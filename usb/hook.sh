@@ -314,6 +314,13 @@ if [ -f $G/audio/gbos-hda-pch/audio_config.xml ]; then
   if [ -n "$CID" ] && [ "$CID" != PCH ]; then
     AC=gbos-gen; rm -rf /tmp/gbos-audio/$AC; cp -r $G/audio/gbos-hda-pch /tmp/gbos-audio/$AC
     sed -i "s/HDA Intel PCH/$CNAME/g; s/PCH/$CID/g" /tmp/gbos-audio/$AC/*.xml
+    if [ "$CID" = sofhdadsp ]; then
+      # SOF + HDA codec (skl_hda_dsp_generic, sof-hda-generic-*.tplg): analog is still PCM 0, but HDMI/DP are PCM 3/4/5
+      # (legacy HDA: 3/7/8) and the digital mics are their own capture PCM ("DMIC", not "DMIC16kHz") instead of the codec's.
+      sed -i "s/,7</,4</; s/,8</,5</; s/pcm=7/pcm=4/; s/pcm=8/pcm=5/" /tmp/gbos-audio/$AC/audio_config.xml
+      DM=$(sed -n 's/^[0-9]*-0*\([0-9][0-9]*\): DMIC (.*capture.*/\1/p' /proc/asound/pcm | head -n 1)
+      [ -n "$DM" ] && sed -i "/<InternalMic>/,/<\/InternalMic>/ s/hw:$CID,0/hw:$CID,$DM/" /tmp/gbos-audio/$AC/audio_config.xml
+    fi
     sed "s/<soundcard>PCH/<soundcard>$CID/; s#gbos-hda-pch#$AC#" $G/audio/audio_default.xml > /tmp/gbos-audio/audio_default.xml
     ASRC=/tmp/gbos-audio/$AC; ADEF=/tmp/gbos-audio/audio_default.xml
   else
