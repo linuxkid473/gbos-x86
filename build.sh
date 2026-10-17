@@ -107,7 +107,7 @@ else say "1/4 Google's OS image: already extracted"; fi
 
 if [ ! -x kernel/out/busybox ]; then say "2/4 busybox"; sh tools/fetch_busybox.sh; else say "2/4 busybox: present"; fi
 
-if [ ! -d usb/modules/lib/modules ]; then
+if [ ! -f usb/modules/lib/modules/6.18.21-gbos-whl+/kernel/sound/soc/intel/boards/snd-soc-skl_hda_dsp.ko ]; then
   say "3/4 kernel modules and firmware"
   fetch "$REL/$MODS" "build/dl/$MODS" "$MODS_SHA"; tar -xJf "build/dl/$MODS" -C usb
 else say "3/4 kernel modules: present"; fi
