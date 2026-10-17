@@ -65,8 +65,8 @@ if [ -z "$BUILD_TYPE" ]; then
   fi
 fi
 
-REL=https://github.com/linuxkid473/gbos-x86/releases/download/v32
-MODS=gbos86-modules-6.18.21-gbos-whl.tar.xz;               MODS_SHA=876705e2f707bde12ef558b0759f2b3c62db287e8163183d767d5f53fa3ffdac
+REL=https://github.com/linuxkid473/gbos-x86/releases/download/v36
+MODS=gbos86-modules-6.18.21-gbos-whl-r2.tar.xz;            MODS_SHA=8d05757c6dcd531d34fd7b86ee1c5fc4c957abee491fc8185b8fb133a68a4370
 REL_FW=https://github.com/linuxkid473/gbos-x86/releases/download/v35
 FW=gbos86-firmware-12dfe670-sof2026.09.2-r4.tar.xz;        FW_SHA=8ad4ce620194e6555fe747bff95eb75b74c3c8f198ff7e3d5280c02f37bb1463
 GOOGLE=https://dl.google.com/device/recovery/lapis-user/16452207/recovery.zip
@@ -88,7 +88,7 @@ docker info >/dev/null 2>&1 || die "docker is installed but not running"
 NEED=""
 have_parts || NEED="$NEED\n  - Google's recovery image: $GOOGLE (7.7 GB, from dl.google.com)"
 [ -x kernel/out/busybox ] || NEED="$NEED\n  - busybox-static from Debian via docker (about 1 MB)"
-[ -d usb/modules/lib/modules ] || NEED="$NEED\n  - $MODS (14 MB, from this project's GitHub release)"
+[ -f usb/modules/lib/modules/6.18.21-gbos-whl+/kernel/sound/soc/intel/boards/snd-soc-skl_hda_dsp.ko ] || NEED="$NEED\n  - $MODS (14 MB, from this project's GitHub release)"
 [ -f usb/firmware/rtl_nic/rtl8168h-2.fw ] || NEED="$NEED\n  - $FW (70 MB, from this project's GitHub release)"
 if [ -z "$NEED" ]; then say "everything is already downloaded"; else
   printf 'This will download:%b\n' "$NEED"
