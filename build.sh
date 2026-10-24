@@ -1,9 +1,10 @@
 #!/bin/sh
 # gbOS86: one-command build.
-#   ./build.sh                     -> interactive menu (standard or looper, custom userdata size)
+#   ./build.sh                     -> interactive menu (standard, looper, or dualboot)
 #   ./build.sh --standard          -> dist/gbOS86-YYYYMMDD.img (live USB installer, MODE=ask)
 #   ./build.sh --looper            -> dist/gbOS86-looper-YYYYMMDD.img (persistent /data, MODE=boot)
 #   ./build.sh --looper --data-size 32
+#   ./build.sh --dualboot --target /dev/sda -> install directly to disk alongside existing Windows/Linux
 #   ./build.sh -y                  don't ask before downloading (uses standard if not specified)
 #   ./build.sh --dry-run           show what would be downloaded and built, change nothing
 #
@@ -31,6 +32,12 @@ while [ $# -gt 0 ]; do
     --dry-run) DRY=1;;
     --standard) BUILD_TYPE="standard";;
     --looper|--loopback) BUILD_TYPE="looper";;
+    --dualboot|--dual-boot) BUILD_TYPE="dualboot";;
+    --target) shift; TARGET_DISK="$1";;
+    --target=*) TARGET_DISK="${1#*=}";;
+    --allow-internal) EXTRA_FLAGS="$EXTRA_FLAGS --allow-internal";;
+    --allow-root) EXTRA_FLAGS="$EXTRA_FLAGS --allow-root";;
+    --reformat) EXTRA_FLAGS="$EXTRA_FLAGS --reformat";;
     --data-size) shift; DATA_GB="$1";;
     --data-size=*) DATA_GB="${1#*=}";;
     -h|--help) sed -n '2,16p' "$0"; exit 0;;
@@ -44,12 +51,18 @@ if [ -z "$BUILD_TYPE" ]; then
   if [ $YES = 1 ]; then
     BUILD_TYPE="standard"
   else
-    printf '\n================ gbOS86 Image Target ================\n'
+    printf '\n================ gbOS86 Target ================\n'
     echo "  1) Standard image (live USB + installer menu, MODE=ask)"
     echo "  2) Loopback persistent image (MODE=boot, persistent /data and /metadata)"
-    printf 'Choose target [1/2, default: 1]: '
+    echo "  3) Dual-boot direct install (non-destructive direct install alongside Windows/Linux)"
+    printf 'Choose target [1/2/3, default: 1]: '
     read -r ans
     case "$ans" in
+      3|dualboot|dual-boot)
+        BUILD_TYPE="dualboot"
+        printf 'Enter target drive device (e.g. /dev/sda, /dev/sdb): '
+        read -r TARGET_DISK
+        ;;
       2|looper|loopback)
         BUILD_TYPE="looper"
         printf 'Enter userdata (/data) size in GB (sparse, expands as needed) [default: 64]: '
@@ -147,7 +160,14 @@ if ! have_ksu; then
   chmod 755 usb/ksu/ksud
 else say "    KernelSU manager + ksud: present"; fi
 
-say "4/4 building the image ($BUILD_TYPE)"
-sh tools/make_gbos86_image.sh --type "$BUILD_TYPE" --data-size "$DATA_GB"
-echo
-echo "Done. Flash the .img in dist/ to a USB stick or target drive (balenaEtcher, Rufus, or dd), then boot it."
+if [ "$BUILD_TYPE" = "dualboot" ]; then
+  [ -n "$TARGET_DISK" ] || die "Target disk required for dualboot. Pass --target /dev/sdX"
+  say "4/4 installing gbOS86 in dual-boot mode onto $TARGET_DISK"
+  [ $DRY -eq 1 ] && EXTRA_FLAGS="$EXTRA_FLAGS --dry-run"
+  sudo sh tools/install_dualboot.sh --target "$TARGET_DISK" --data-size "$DATA_GB" $EXTRA_FLAGS
+else
+  say "4/4 building the image ($BUILD_TYPE)"
+  sh tools/make_gbos86_image.sh --type "$BUILD_TYPE" --data-size "$DATA_GB"
+  echo
+  echo "Done. Flash the .img in dist/ to a USB stick or target drive (balenaEtcher, Rufus, or dd), then boot it."
+fi
