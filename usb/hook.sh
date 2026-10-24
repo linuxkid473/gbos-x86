@@ -226,6 +226,7 @@ if mount --bind /gbos /new/postinstall; then
   # The Trusty security VM never answers here (software KeyMint/Gatekeeper replace it) but spins one CPU core at 100%: stopped once
   # booted. TRUSTY_VM=1 in gbos.cfg keeps it running (for debugging).
   if [ "${TRUSTY_VM:-0}" = 1 ]; then TRUSTYSTOP="# gbos: Trusty VM kept (TRUSTY_VM=1)"; else TRUSTYSTOP="stop trusty_security_protected_vm_launcher"; fi
+  if [ "${SKIP_SETUP:-1}" != 0 ]; then PROV_START="    start gbos_provision"; else PROV_START=""; fi
   IDCRC=
   if [ "${TOUCHPAD_FLICK:-1}" != 0 ]; then
     for tp in $(gbos_touchpads); do
@@ -296,6 +297,7 @@ on property:sys.boot_completed=1
     start gbos_displaydiag
     start gbos_aidiag
     start gbos_ksu
+$PROV_START
 
 # AI diagnostics (Magic Pointer / AICore): usb/aidiag.sh writes logs/boot-N/ai-1.txt (90 s) and ai-2.txt (4 min).
 # The gbos_aidns_* services run one ping per app uid so aidiag can compare DNS as AICore (10107) with
@@ -373,6 +375,14 @@ service gbos_iptsd /system/bin/sh /postinstall/gbos/surface/iptsd-run.sh $N
 
 # "Device name" in Settings (Settings.Global.device_name): kept in step with DEVICE_MODEL from gbos.cfg.
 service gbos_devname /system/bin/sh -c "sleep 15; [ -n '$DEVICE_MODEL' ] && settings put global device_name '$DEVICE_MODEL'"
+    user root
+    group root
+    seclabel u:r:shell:s0
+    oneshot
+    disabled
+
+# Provisioning & SetupWizard skip: ensures device_provisioned and user_setup_complete are set, launching HOME
+service gbos_provision /system/bin/sh -c "sleep 2; settings put global device_provisioned 1; settings put secure user_setup_complete 1; settings put --user 10 secure user_setup_complete 1; am start -a android.intent.action.MAIN -c android.intent.category.HOME 2>/dev/null"
     user root
     group root
     seclabel u:r:shell:s0
@@ -600,6 +610,20 @@ if [ -f $G/audio/gbos-hda-pch/audio_config.xml ]; then
 fi
 # apgetty (UART shell) has no UART configured here and crash-loops
 : > /tmp/empty.rc && mount --bind /tmp/empty.rc /new/system_ext/etc/init/apgetty.rc && log "hook: apgetty disabled"
+
+# SetupWizard bypass: generic PCs fail Google's official OTA check and get stuck on the update screen (Issue #24).
+# SKIP_SETUP=1 in gbos.cfg (default) masks SetupWizard APK directories and update_engine services.
+if [ "${SKIP_SETUP:-1}" != 0 ]; then
+  mkdir -p /new/mnt/empty_suw
+  for suw in /new/product/priv-app/*[Ss]etup[Ww]izard* /new/system_ext/priv-app/*[Ss]etup[Ww]izard* /new/system/priv-app/*[Ss]etup[Ww]izard*; do
+    if [ -d "$suw" ]; then
+      mount --bind /new/mnt/empty_suw "$suw" 2>/dev/null && log "hook: masked $(basename "$suw") with empty dir"
+    fi
+  done
+  for rc in /new/system/etc/init/update_engine.rc /new/system/etc/init/update_engine_sideload.rc; do
+    [ -f "$rc" ] && mount --bind /tmp/empty.rc "$rc" 2>/dev/null && log "hook: $(basename $rc) disabled"
+  done
+fi
 log "hook: kvm: $(ls /sys/class/misc | grep -E 'kvm|vhost' | tr '\n' ' ')"
 
 # KVM trace -> kvmtrace.txt: guest exceptions / failed emulation / triple faults, to see why the
