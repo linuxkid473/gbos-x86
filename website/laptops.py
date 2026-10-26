@@ -5,7 +5,7 @@ status: works | partial | pending | no
 """
 from html import escape
 
-UPDATED = '2026-10-18'
+UPDATED = '2026-10-26'
 
 STATUS = {'works': 'Works', 'partial': 'Partly works', 'pending': 'Fix pending', 'no': 'Does not work'}
 
@@ -35,6 +35,12 @@ LAPTOPS = [
          works='Wi-Fi (AX200), Bluetooth, sound, touchpad, keyboard, backlight, display, touchscreen, hinge detection, webcam, microphone, Caps Lock LED, Wacom pen, suspend and lid close',
          broken='Auto-rotate, microphone-mute LED',
          notes='Kernel #37, live from a Looper image. Auto-rotate: the ISH sensor hub loaded but no accelerometer driver was built; added to the next kernel (needs a rebuild and a sensors HAL check). The fan runs at full speed and C-states look unused: no evidence yet.'),
+    dict(name='Dell Latitude 5290 2-in-1', cpu='Core i5 (model not given)', status='works',
+         works='Sound, once the speaker volume is raised (see the note)',
+         broken='',
+         notes='Short report. Speakers were very quiet; the reporter set <code>Master Playback Volume</code> to <code>87</code> in <code>mixer_paths.xml</code> '
+               '(<code>gbos-hda-pch/</code>, in the <code>gbos/audio</code> folder of the stick) and the volume was fine. 87 is the maximum; higher values are not safe for the speakers. '
+               'The shipped config uses 87 from 2026-10-26, so a stick built or updated after that needs no manual edit. Nothing else was tested or reported.'),
     dict(name='Lenovo ThinkPad T480', cpu='Core i5-8350U (Kaby Lake R), 16 GB DDR4, Samsung PM981 NVMe', status='works',
          works='Wi-Fi, Bluetooth, sound, touchpad, touchscreen, keyboard, brightness, display, webcam (installed to the NVMe)',
          broken='',

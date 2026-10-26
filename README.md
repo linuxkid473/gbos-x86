@@ -45,7 +45,7 @@ Boot the laptop from the stick (**F12** at the logo, Secure Boot off).
 
 `./build.sh --dry-run` shows what it would download (Google's 7.7 GB image, ~1 MB busybox, 14 MB of kernel modules and 70 MB of firmware
 from this repo's [release](https://github.com/linuxkid473/gbos-x86/releases)). It streams only the six partitions it needs out of
-Google's zip, so the 19 GB disk image inside is never unpacked. Allow 30 to 60 minutes, mostly the download. Nineteen machines have been
+Google's zip, so the 19 GB disk image inside is never unpacked. Allow 30 to 60 minutes, mostly the download. Twenty machines have been
 tried (see [Tested laptops](#tested-laptops)); if you try another, please post its `gbos/logs/boot-N/hwdetect.txt` in an issue.
 Fedora/RHEL with SELinux enforcing: the scripts add `:z` to the docker bind mounts of this repo's own folders automatically; don't disable SELinux.
 
@@ -73,7 +73,7 @@ Fedora/RHEL with SELinux enforcing: the scripts add `:z` to the docker bind moun
 | Auth-bound keystore keys | `soft_gk`'s auth tokens aren't trusted by the software KeyMint |
 | Google's on-device AI (Magic Pointer, AICore) | Google's servers refuse it without hardware key attestation, which no non-Google laptop can provide |
 | OS updates | Built-in OTA can't work; moving to a new Google build is semi-automated: `tools/port_build.sh`, see [`porting.md`](porting.md) |
-| Other laptops | Seven of nineteen tried machines work fully, nine partly, one pending, two not; see [Tested laptops](#tested-laptops). The CPU-emulation kernel should help any pre-2021 Intel CPU |
+| Other laptops | Eight of twenty tried machines work fully, nine partly, one pending, two not; see [Tested laptops](#tested-laptops). The CPU-emulation kernel should help any pre-2021 Intel CPU |
 
 ## How it works
 
@@ -164,6 +164,7 @@ Reports from people who booted the stick (2026-10-18). A row says what was repor
 | Intel NUC8BEH (mini PC) | Core i3-8109U, 8 GB | **Works** (live) | Wi-Fi, Bluetooth, display and brightness (external monitor), keyboard (external), USB ports | Sound not tested. SATA M.2 SSD: install support for SATA disks added afterwards (QEMU-tested only, not yet tried on this NUC) |
 | HP Envy 13-aq0xxx | Core i5-8265U, 8 GB | **Works** | Reported as working great, live and installed to the NVMe (kernel #32) | Per-device detail is in the forum thread |
 | Dell Latitude 5300 2-in-1 | Core i7-8665U, 16 GB | **Works** | Wi-Fi, Bluetooth, sound, touchpad, backlight, display, touchscreen, hinge, webcam, pen, suspend | Auto-rotate (sensor driver added to the next kernel), mic-mute LED |
+| Dell Latitude 5290 2-in-1 | Core i5 (model not given) | **Works** | Sound, once the speaker volume is raised | Short report: speakers were very quiet, `Master Playback Volume` 87 in `gbos-hda-pch/mixer_paths.xml` fixed it (shipped from 2026-10-26) |
 | Lenovo ThinkPad T480 | Core i5-8350U, 16 GB | **Works** | Wi-Fi, Bluetooth, sound, touchpad, touchscreen, keyboard, brightness, display, webcam (installed) | Slow to wake; Wi-Fi needs a toggle after sleep |
 | HP OmniBook 7 | Core Ultra 5 225U, 16 GB | Partly | Touchpad, keyboard, brightness, display | Wi-Fi (Intel BE201). Sound, webcam, Bluetooth not tested |
 | HP Pavilion Power 15 | Core i7-7700HQ + GTX 1050, 16 GB | Partly | Wi-Fi, Bluetooth, touchpad, brightness, display, webcam | Speakers (fixed in the next update: audio config picked the NVIDIA HDMI card); dock/DisplayLink and the NVIDIA GPU have no driver |
@@ -205,7 +206,7 @@ The kernel (#31) builds drivers for most Intel-era laptops as **modules**, and b
 | Hotkeys, fans, rfkill | Dell, HP, ThinkPad, IdeaPad, Asus, Acer, Samsung, MSI, Sony, Fujitsu, LG, Intel HID/VBTN |
 | Other | SD card readers (Realtek, SDHCI), USB webcams (UVC), Ethernet (r8169, e1000e, igc, USB r8152 and friends) |
 
-**Honest limits.** Nineteen machines have been booted (below); anything not on that list is built and wired but untested on
+**Honest limits.** Twenty machines have been booted (below); anything not on that list is built and wired but untested on
 hardware. Sound on SOF machines needs the codec's mixer controls to match the generated config (best effort);
 suspend/resume, fingerprint readers, IPU6 cameras and NVIDIA/AMD discrete GPUs are not covered. Build the payload with
 `tools/fetch_firmware.sh` (firmware, not committed) and `kernel/isa_emu_patch/build_generic*.sh` (modules, not committed).
