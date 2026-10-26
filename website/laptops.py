@@ -45,6 +45,11 @@ LAPTOPS = [
          works='Wi-Fi, Bluetooth, sound, touchpad, touchscreen, keyboard, brightness, display, webcam (installed to the NVMe)',
          broken='',
          notes='Kernel #37. Quirks: sometimes slow to wake; Wi-Fi must be toggled off and on after sleep; a Bluetooth pairing request to an already paired phone after reboot; the external battery percentage is shown with two batteries fitted. Not diagnosed yet.'),
+    dict(name='Dell Latitude 3380', cpu='Core i5-7200U (Kaby Lake), 8 GB DDR4, 256 GB SSD', status='partial',
+         works='Wi-Fi, sound, touchpad, keyboard, brightness, display, webcam (installed)',
+         broken='Bluetooth',
+         notes='Kernel #42. The Bluetooth chip is a Qualcomm Atheros one (USB <code>0cf3:e007</code>): its firmware loads and <code>hci0</code> comes up, so the cause is not known yet; '
+               'it needs <code>logcat.txt</code> from a boot where Bluetooth was switched on. The wired Ethernet chip (Realtek <code>10ec:8168</code>) has no driver; nobody has reported whether that matters.'),
     dict(name='HP OmniBook 7', cpu='Core Ultra 5 225U, 16 GB LPDDR5, 512 GB NVMe', status='partial',
          works='Touchpad, keyboard, brightness, display (live USB)',
          broken='Wi-Fi (Intel Wi-Fi 7 BE201)',
