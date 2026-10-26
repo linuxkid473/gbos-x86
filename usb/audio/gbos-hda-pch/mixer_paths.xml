@@ -3,7 +3,7 @@
 	<!-- gbos: HDA controls start muted at volume 0; unmute them. Controls the codec
 	     doesn't have are skipped by audio_route. -->
 	<ctl name="Master Playback Switch" value="1" />
-	<ctl name="Master Playback Volume" value="64" />
+	<ctl name="Master Playback Volume" value="87" />
 	<ctl name="Speaker Playback Switch" value="1 1" />
 	<ctl name="Headphone Playback Switch" value="1 1" />
 	<ctl name="Capture Switch" value="1 1" />
