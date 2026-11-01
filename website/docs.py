@@ -152,8 +152,9 @@ def google_hw():
 <tr><td>Logs truncated, stick corrupted</td><td>Android's volume daemon ran a filesystem check on the stick while mounted.</td><td>The USB rule is removed from the fstab so Android never touches the stick.</td></tr>
 <tr><td>No sound</td><td>Google uses SOF; a laptop's own audio is usually legacy HDA.</td><td>The audio HAL configuration is replaced (see <a href="/docs/hardware-detection">Hardware detection</a>).</td></tr>
 <tr><td>White veil, lifted blacks</td><td>Google's display compositor loads a gamma curve meant for its own graphics driver into i915 every frame.</td><td>i915 ignores userspace gamma, degamma and colour matrices; the panel is treated as full-range sRGB.</td></tr>
+<tr><td>Night Light</td><td>Android ColorDisplayService supplies a display colour transform.</td><td>On i915, drm_hwcomposer uses client composition: SurfaceFlinger/RenderEngine GPU-composes the frame and applies the transform before KMS. Verified on a Lenovo ThinkPad X13 Gen 1 (Intel).</td></tr>
 <tr><td>Everything too big</td><td>Google's panel is set for density 260.</td><td><code>RESOLUTION</code> and <code>DENSITY</code> in <code>gbos.cfg</code>.</td></tr></tbody></table>
-<p>The consequence of the colour fix: Night Light has no effect, because the gamma tables it uses are ignored on purpose.</p>
+<p><strong>Night Light is supported on the tested i915 client-composition path.</strong> The kernel #29 workaround neutralizes the KMS DEGAMMA_LUT, GAMMA_LUT and CTM properties, but it does not disable Android colour transforms applied while SurfaceFlinger/RenderEngine GPU-composes the frame. This was verified on a Lenovo ThinkPad X13 Gen 1 (Intel). This result is specific to the i915 client-composition path; it does not establish behaviour on xe or other display backends.</p>
 <h2>Drivers Google's modules cannot provide</h2>
 <p>Google's vendor kernel modules are built for Google's kernel and do not load on this one. Battery and AC, the Intel LPSS I2C controller (touchpad) and legacy HDA audio are therefore built into the gbOS86 kernel; the rest are loadable modules found by <a href="/docs/hardware-detection">hardware detection</a>.</p>'''
 
@@ -261,6 +262,7 @@ def changelog():
     return '''<h1>Changelog</h1>
 <p class="lead">Headline milestones. Kernel numbers are the build counter printed in the boot log.</p>
 <table class="spec"><thead><tr><th>Build</th><th>Change</th></tr></thead><tbody>
+<tr><td>2026-11-01</td><td>Android Night Light verified on Intel i915 client composition (ThinkPad X13 Gen 1). SurfaceFlinger/RenderEngine applies the colour transform during GPU composition, upstream of the KMS colour properties neutralized by kernel #29.</td></tr>
 <tr><td>#32</td><td><strong>Generic Intel gen 6+ support.</strong> About 400 driver modules, boot-time hardware detection with a per-boot report, firmware for Intel, Realtek, MediaTek, Qualcomm and Broadcom Wi-Fi and Bluetooth, SOF audio, generated audio configs. HDA versus SOF is now chosen by the kernel. Early binding of the patched libraries.</td></tr>
 <tr><td>#30</td><td>gbOS86 boot menu (live / install or update / boot installed) and branding; flashable live and installer USB image.</td></tr>
 <tr><td>#29</td><td>i915 ignores userspace gamma, degamma and colour matrices: the white veil and lifted blacks are fixed.</td></tr>
