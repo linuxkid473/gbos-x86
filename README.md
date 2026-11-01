@@ -64,11 +64,11 @@ Fedora/RHEL with SELinux enforcing: the scripts add `:z` to the docker bind moun
 | Screen-lock password | Software Gatekeeper (`gatekeeper/soft_gk.c`) |
 | Root for apps (KernelSU) | Built into the kernel; the manager app is installed on first boot, root is granted per app in it |
 | Correct display colours / black levels | Kernel #29: i915 ignores the HWC's gamma tables (see below) |
+| Night Light | Works on i915's client-composition path: SurfaceFlinger applies Android's colour transform during GPU composition, before KMS; verified on a ThinkPad X13 Gen 1 |
 
 | Not done / limited | |
 |---|---|
 | Speed | Some instructions are still emulated in the kernel (see "Why it's slow") |
-| Night Light | Gamma tables from userspace are ignored (that's the colour fix), so it has no effect |
 | Linux Terminal (AVF) | Secretkeeper hang fixed; VM boot not yet confirmed |
 | Auth-bound keystore keys | `soft_gk`'s auth tokens aren't trusted by the software KeyMint |
 | Google's on-device AI (Magic Pointer, AICore) | Google's servers refuse it without hardware key attestation, which no non-Google laptop can provide |
