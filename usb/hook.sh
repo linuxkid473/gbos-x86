@@ -629,7 +629,7 @@ if [ "$DEVICE_MODEL" = "auto" ]; then
   fi
 fi
 DROP='^ro.boot.hypervisor.protected_vm.supported=|^ro.surface_flinger.has_wide_color_display=|^ro.surface_flinger.has_HDR_display='
-[ "$GPU_SW" = 1 ] && DROP="$DROP|^ro.surface_flinger.supports_background_blur=|^ro.vendor.hwc.use_overlay_planes=|^vendor.hwc.drm.enable_color_pipeline=|^ro.hwui.use_vulkan="   # blur on the CPU is far too slow
+[ "$GPU_SW" = 1 ] && DROP="$DROP|^ro.surface_flinger.supports_background_blur=|^ro.vendor.hwc.use_overlay_planes=|^vendor.hwc.drm.use_overlay_planes=|^vendor.hwc.drm.scale_with_gpu=|^vendor.hwc.drm.enable_color_pipeline=|^ro.hwui.use_vulkan=|^ro.surface_flinger.default_composition_pixel_format="   # blur on the CPU is far too slow
 [ -n "$DENSITY" ] && DROP="$DROP|^ro.sf.lcd_density="
 [ -n "$DEVICE_MODEL" ] && DROP="$DROP|^ro.product.model=|^ro.product.vendor.model=|^ro.product.marketname=|^ro.product.vendor.marketname="
 { grep -v -E "$DROP" /new/vendor/build.prop
@@ -638,8 +638,10 @@ DROP='^ro.boot.hypervisor.protected_vm.supported=|^ro.surface_flinger.has_wide_c
   if [ "$GPU_SW" = 1 ]; then
     echo "ro.surface_flinger.supports_background_blur=0"
     # drm_hwcomposer picks its backend by DRM driver: i915/xe get "client" (everything composited by SurfaceFlinger), any other
-    # driver "generic", which also tries overlay planes. Unknown driver, so stay on the primary plane like Intel does.
+    # driver "generic", which also tries overlay planes. Disable overlay planes and force GPU scaling so everything composites onto the primary plane.
     echo "ro.vendor.hwc.use_overlay_planes=false"
+    echo "vendor.hwc.drm.use_overlay_planes=0"
+    echo "vendor.hwc.drm.scale_with_gpu=1"
     # Google's vendor build.prop has vendor.hwc.drm.enable_color_pipeline=true: drm_hwcomposer then sets the DRM COLOR_PIPELINE client
     # cap and rejects every plane without a COLOR_PIPELINE property ("Plane[N] does not support COLOR_PIPELINE. Rejecting", then
     # "Primary plane for CRTC not found", "No pipelines available. Creating null-display for headless mode": SurfaceFlinger draws into
@@ -650,6 +652,12 @@ DROP='^ro.boot.hypervisor.protected_vm.supported=|^ro.surface_flinger.has_wide_c
     # systemui, launcher, 300+ times; SwiftShader reports queueCount=1, RADV too). OpenGL ES through ANGLE (-> the same Vulkan driver) is
     # what SurfaceFlinger already uses successfully here. Seen on the Ryzen 3 3350U, second logs.
     echo "ro.hwui.use_vulkan=false"
+    # Default composition pixel format: PixelFormat::RGBX_8888 (2). Intel Gen <= 8 (Broadwell, Haswell, Ivybridge)
+    # primary display planes do NOT support DRM_FORMAT_ABGR8888 (AB24 / HAL_PIXEL_FORMAT_RGBA_8888), which causes
+    # drmModeAddFB2 to fail with -EINVAL (-22), producing "drmhwc: could not create drm fb -22" and "SurfaceFlinger:
+    # present failed for display: BAD_DISPLAY (2)" on every frame. RGBX_8888 maps to DRM_FORMAT_XBGR8888 (XB24),
+    # which is natively supported on all Intel display generations, AMD, and CPU rendering.
+    echo "ro.surface_flinger.default_composition_pixel_format=2"
   fi
   if [ -n "$DENSITY" ]; then echo "ro.sf.lcd_density=$DENSITY"; fi
   if [ -n "$DEVICE_MODEL" ]; then
