@@ -28,6 +28,15 @@ then aborts on "Failed to create a valid texture ... format:842094169"). The wid
 multiple of 256. The 8 bytes at 0xe4a7 (add r12d,0x1f; and r12d,-32) become `call cave` + nop; the cave is 14 int3 bytes of padding
 at 0xe422: add r12d,0x1ff; and r12w,0xfe00; ret.
 
+Fourth edit (KMS scanout on Intel Gen <= 8 & universal displays): cros_gralloc_convert_format maps HAL_PIXEL_FORMAT_RGBA_8888 (1) to
+DRM_FORMAT_ABGR8888 ('AB24' = 0x34324241) at 0x1a303. SurfaceFlinger allocates FramebufferSurface with format 1 (RGBA_8888).
+On older Intel GPUs (Broadwell, Haswell, Ivy Bridge, Sandy Bridge), the primary display plane hardware does not support AB24 scanout
+(only Gen 9+ Skylake introduced universal planes with AB24 support). When drm_hwcomposer imports the framebuffer via
+drmModeAddFB2WithModifiers, the i915 driver rejects it with -EINVAL (-22 "unsupported pixel format AB24"), leaving the screen black
+and freezing presentation. We rewrite the returned FourCC from 'AB24' (0x34324241) to 'XB24' (0x34324258 = DRM_FORMAT_XBGR8888, the
+exact FourCC already returned for RGBX_8888 at 0x1a35d). Because DRM_FORMAT_XBGR8888 shares the identical 32bpp RGBA byte-order memory
+layout, CPU/SwiftShader rendering is completely unaffected, while DRM/KMS scanout succeeds on all Intel display generations and AMD.
+
 Only applied to the exact original (sha256 pinned): the offset is into one specific build.
 """
 import hashlib, sys
@@ -37,6 +46,7 @@ KOMEDA = 0x50b7   # .rodata literal compared at 0xc549 and pointed to by backend
 ALIGN_SITE = 0xe4a7   # drv_dumb_bo_create_ex, YVU420_ANDROID: add r12d,0x1f; and r12d,-32 (width in r12)
 CAVE = 0xe422         # int3 padding before drv_dumb_bo_create_ex
 PASTEL = 0x51af   # .rodata literal strstr()'d against ro.hardware.vulkan at 0x17364 (its only reference)
+RGBA8888_SITE = 0x1a304  # cros_gralloc_convert_format: mov $0x34324241, %eax (b'AB24' -> b'XB24')
 
 
 def main():
@@ -54,9 +64,12 @@ def main():
     rel = (CAVE - (ALIGN_SITE + 5)) & 0xffffffff
     d[ALIGN_SITE:ALIGN_SITE + 8] = b'\xe8' + rel.to_bytes(4, 'little') + b'\x0f\x1f\x00'
     d[CAVE:CAVE + 14] = bytes.fromhex('4181c4ff010000' '664181e400fe' 'c3')
+    assert d[RGBA8888_SITE:RGBA8888_SITE + 4] == b'AB24'
+    assert d[RGBA8888_SITE - 1] == 0xb8
+    d[RGBA8888_SITE:RGBA8888_SITE + 4] = b'XB24'
     open(dst, 'wb').write(d)
     print('patched: generic linear backend answers to DRM driver "amdgpu"; software-renderer flag set by ro.hardware.vulkan=intel; '
-          'YV12 dumb-buffer width aligned to 512')
+          'YV12 dumb-buffer width aligned to 512; RGBA_8888 mapped to DRM_FORMAT_XBGR8888 (XB24) for universal KMS scanout')
 
 
 if __name__ == '__main__':
