@@ -157,36 +157,36 @@ detect_host_hardware() {
       DETECTED_GPU_VENDOR="Intel"
       if [ "$_intel_modern" = 1 ] || [ "$_pci_driver" = "xe" ]; then
         DETECTED_GPU_NAME="Intel Xe Graphics / Arc"
-        DETECTED_LOAD_I915=0
-        DETECTED_XE_PARAMS="enable_psr=0 enable_fbc=0 enable_panel_replay=0"
-        DETECTED_EXTRA_SLEEP=2
-        DETECTED_GPU_SW=auto
-        DETECTED_GPU_VK=auto
       else
         DETECTED_GPU_NAME="Intel HD/UHD Graphics"
-        DETECTED_LOAD_I915=1
-        DETECTED_GPU_SW=auto
-        DETECTED_GPU_VK=auto
       fi
+      DETECTED_LOAD_I915=auto
+      DETECTED_XE_PARAMS=""
+      DETECTED_EXTRA_SLEEP=0
+      DETECTED_GPU_SW=auto
+      DETECTED_GPU_VK=auto
       ;;
     0x1002)
       DETECTED_GPU_VENDOR="AMD"
       DETECTED_GPU_NAME="AMD Radeon Graphics"
-      DETECTED_LOAD_I915=0
+      DETECTED_LOAD_I915=auto
+      DETECTED_XE_PARAMS=""
       DETECTED_GPU_SW=auto
       DETECTED_GPU_VK=radv
       ;;
     0x10de)
       DETECTED_GPU_VENDOR="NVIDIA"
       DETECTED_GPU_NAME="NVIDIA GeForce / RTX"
-      DETECTED_LOAD_I915=0
+      DETECTED_LOAD_I915=auto
+      DETECTED_XE_PARAMS=""
       DETECTED_GPU_SW=1
       DETECTED_GPU_VK=swiftshader
       ;;
     *)
       DETECTED_GPU_VENDOR="Generic/Other"
       DETECTED_GPU_NAME="x86 Display Controller"
-      DETECTED_LOAD_I915=1
+      DETECTED_LOAD_I915=auto
+      DETECTED_XE_PARAMS=""
       DETECTED_GPU_SW=auto
       DETECTED_GPU_VK=auto
       ;;

@@ -126,39 +126,15 @@ log "hardware inventory written (hw.txt)"
 
 [ "$SHELL_AT" = early ] && shell "SHELL_AT=early"
 
-# Dynamic GPU detection: automatically pick between i915 (standard Intel) and xe (Meteor/Lunar Lake)
-if [ "$LOAD_I915" = auto ] || [ -z "$LOAD_I915" ]; then
-  LOAD_I915=0
-  for _pci in /sys/bus/pci/devices/*; do
-    [ -e "$_pci/class" ] || continue
-    case "$(cat $_pci/class 2>/dev/null)" in
-      0x03*)
-        if [ "$(cat $_pci/vendor 2>/dev/null)" = "0x8086" ]; then
-          _dev_id=$(cat $_pci/device 2>/dev/null | sed 's/^0x//')
-          case "$_dev_id" in
-            7d[0-9a-f][0-9a-f]|64[0-9a-f][0-9a-f]|b6[0-9a-f][0-9a-f]|56[0-9a-f][0-9a-f]|e2[0-9a-f][0-9a-f])
-              # Modern Intel Xe/Arc GPU (Meteor/Lunar/Arrow Lake): driven by xe, do not load i915
-              LOAD_I915=0
-              ;;
-            *)
-              # Standard Intel HD/UHD/Iris GPU (Broadwell, Skylake ... Raptor Lake)
-              LOAD_I915=1
-              ;;
-          esac
-        fi
-        ;;
-    esac
-  done
-  log "dynamic gpu detection: LOAD_I915=$LOAD_I915"
-fi
-
-if [ "$LOAD_I915" = 1 ]; then
-  log "modprobe i915. If the screen freezes here, set LOAD_I915=0 in gbos.cfg"
+# Universal dynamic hardware bring-up via modalias coldplugging
+if [ "$HWDETECT" != 0 ] && [ -f $G/hwdetect.sh ] && [ -d $G/modules/lib/modules ]; then
+  . $G/hwdetect.sh
+  gbos_hwdetect 5
+elif [ "$LOAD_I915" = 1 ]; then
+  # Fallback for minimal sticks without modules tree
+  log "modprobe i915"
   modprobe i915 && log "i915 loaded" || log "i915 load FAILED rc=$?"
   sleep 2; mdev -s
-fi
-if [ "$LOAD_WIFI" = 1 ]; then
-  log "modprobe iwlmvm"; modprobe iwlmvm && log "iwlmvm loaded" || log "iwlmvm load FAILED"
 fi
 
 # Install to NVMe instead of booting (gbos.cfg MODE=install on the stick). install.sh never returns.

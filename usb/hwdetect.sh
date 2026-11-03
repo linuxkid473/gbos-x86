@@ -17,6 +17,7 @@ GBOS_FWPATH=/sys/module/firmware_class/parameters/path
 
 gbos_modules_mount() {
   KVER=$(uname -r)
+  grep -q " /lib/modules/$KVER " /proc/mounts 2>/dev/null && return 0
   MDIR=""
   if [ -f "$G/modules/lib/modules/$KVER/modules.dep" ]; then
     MDIR="$G/modules/lib/modules/$KVER"
@@ -47,20 +48,40 @@ gbos_load_opmodes() {
   done
 }
 
-# MODOPTS="module.param=value ..." (gbos.cfg): modprobe each named module with its parameters before the coldplug loads it
-# without. Done with `modprobe module param=value` (not /etc/modprobe.d: /etc is read-only under Android's init).
-# A module already loaded by stage0 keeps its parameters; that is logged. Built-in (non-module) parameters cannot be set here.
+# MODOPTS="module.param=value ..." (gbos.cfg): configure module parameters generically via /etc/modprobe.d/
+# and /etc/modprobe.conf so that when modalias coldplug loads a driver for a detected device, the parameters
+# are applied naturally without hardcoding drivers or loading modules for hardware not present.
 gbos_modopts() {
-  [ -n "$MODOPTS" ] || return 0
-  echo "$MODOPTS" | tr ' ' '\n' | awk 'index($0,".")>1 && index($0,"=")>index($0,".") {i=index($0,"."); m=substr($0,1,i-1); o[m]=o[m] " " substr($0,i+1)} END{for(m in o) print m o[m]}' \
-    | while read m opts; do
-        mu=$(echo $m | tr - _)
-        if grep -q "^$mu " /proc/modules; then log "hwdetect: MODOPTS: $m is already loaded, '$opts' NOT applied"; continue; fi
-        modprobe -q $m $opts && log "hwdetect: MODOPTS: loaded $m $opts" || log "hwdetect: MODOPTS: modprobe $m $opts FAILED"
-      done
-  for kv in $MODOPTS; do
-    case $kv in ?*.?*=*) ;; *) log "hwdetect: MODOPTS entry ignored (want module.param=value): $kv";; esac
-  done
+  mkdir -p /etc/modprobe.d 2>/dev/null
+  : > /etc/modprobe.d/gbos.conf
+
+  # Backward compatibility: map legacy XE_PARAMS to options xe ...
+  if [ -n "$XE_PARAMS" ]; then
+    echo "options xe $XE_PARAMS" >> /etc/modprobe.d/gbos.conf
+    log "hwdetect: MODOPTS: mapped legacy XE_PARAMS to xe options"
+  fi
+
+  # Backward compatibility: LOAD_I915=0 blacklists i915
+  if [ "$LOAD_I915" = "0" ]; then
+    echo "blacklist i915" >> /etc/modprobe.d/gbos.conf
+    log "hwdetect: MODOPTS: LOAD_I915=0 -> blacklisted i915"
+  fi
+
+  [ -n "$MODOPTS" ] || { cp /etc/modprobe.d/gbos.conf /etc/modprobe.conf 2>/dev/null; return 0; }
+
+  # Parse module.param=value entries into "options <module> <param>=<val>"
+  echo "$MODOPTS" | tr ' ' '\n' | awk '
+    index($0,".")>1 && index($0,"=")>index($0,".") {
+      i=index($0,"."); m=substr($0,1,i-1); o[m]=o[m] " " substr($0,i+1)
+    }
+    /^blacklist=/ { split($0, a, "="); b[a[2]]=1 }
+    END {
+      for(m in o) print "options " m o[m]
+      for(m in b) print "blacklist " m
+    }' >> /etc/modprobe.d/gbos.conf
+
+  cp /etc/modprobe.d/gbos.conf /etc/modprobe.conf 2>/dev/null
+  log "hwdetect: configured modprobe options from MODOPTS"
 }
 
 # One coldplug pass: all modaliases, de-duplicated, to a single modprobe (it reads modules.alias once).
@@ -159,30 +180,11 @@ gbos_hw_report() {
   log "hwdetect: report written (hwdetect.txt)"
 }
 
-# XE_PARAMS in gbos.cfg = module parameters for the xe graphics driver (e.g. "enable_psr=0 enable_fbc=0"), loaded before the coldplug
-# so xe does not come up with its defaults. Unknown parameters are only warned about.
-gbos_xe_params() {
-  [ -n "$XE_PARAMS" ] || return 0
-  # Only load xe if an Intel Xe/Arc GPU is physically present
-  _has_xe=0
-  for _pci in /sys/bus/pci/devices/*; do
-    [ "$(cat $_pci/vendor 2>/dev/null)" = "0x8086" ] || continue
-    _dev_id=$(cat $_pci/device 2>/dev/null | sed 's/^0x//')
-    case "$_dev_id" in
-      7d[0-9a-f][0-9a-f]|64[0-9a-f][0-9a-f]|b6[0-9a-f][0-9a-f]|56[0-9a-f][0-9a-f]|e2[0-9a-f][0-9a-f])
-        _has_xe=1; break;;
-    esac
-  done
-  [ $_has_xe = 1 ] || return 0
-  log "hwdetect: loading xe with: $XE_PARAMS"
-  modprobe -q xe $XE_PARAMS && log "hwdetect: xe loaded with parameters" || log "hwdetect: xe load with parameters FAILED"
-}
-
 # Whole thing; $1 = seconds to wait for devices (default 15).
 gbos_hwdetect() {
   [ -f $G/gbos.cfg ] && [ "$HWDETECT" = 0 ] && { log "hwdetect: disabled (HWDETECT=0)"; return 0; }
   [ -d $G/firmware ] && echo -n $G/firmware > $GBOS_FWPATH
-  gbos_modules_mount && gbos_modopts && { gbos_xe_params; gbos_coldplug && gbos_wait_devices ${1:-15}; }
+  gbos_modules_mount && gbos_modopts && gbos_coldplug && gbos_wait_devices ${1:-15}
   # The brightness keys/backlight need acpi_video when the panel has no native backlight.
   [ -d /sys/class/backlight ] && [ -z "$(ls /sys/class/backlight 2>/dev/null)" ] && modprobe -q video 2>/dev/null
   gbos_hw_report

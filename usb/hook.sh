@@ -146,16 +146,15 @@ gbos_gpu_decide() {
       drv=${e#*,}
       case "$drv" in i915|xe) intel=$drv;; *) gbos_gpu_real "$drv" && real="$real ${e%%,*}:$drv";; esac
     done
-    # Intel driver bound: hardware acceleration active, leave software rendering off
+    # Intel (bound, or at least present on the PCI bus): leave everything as it is, whatever else is installed.
     [ -n "$intel" ] && { log "hook: software rendering: off (auto; Intel GPU driver $intel bound)"; return 0; }
+    gbos_gpu_intel_pci && { log "hook: software rendering: off (auto; Intel display controller present)"; return 0; }
     [ -n "$real" ] && break
     [ $w -ge ${1:-0} ] && break
     sleep 1; w=$((w+1))
   done
   if [ -n "$real" ]; then
     GPU_SW=1; log "hook: software rendering: on (auto; no Intel GPU, DRM:$real, after ${w}s)"
-  elif [ -z "$intel" ] && gbos_gpu_intel_pci; then
-    GPU_SW=1; log "hook: software rendering: on (auto; Intel GPU present but no DRM driver bound after ${w}s; falling back to CPU Vulkan)"
   else
     log "hook: software rendering: off (auto; no DRM GPU driver bound after ${w}s; cards: $(gbos_gpu_cards | tr '\n' ';'))"
   fi
@@ -539,8 +538,8 @@ if [ "$DENSITY" = "auto" ] || [ -z "$DENSITY" ]; then
 fi
 case "$DENSITY" in ''|*[!0-9]*) DENSITY=;; esac
 
-# Auto-detect real laptop device model from DMI if unset or auto
-if [ "$DEVICE_MODEL" = "auto" ] || [ -z "$DEVICE_MODEL" ]; then
+# Auto-detect real laptop device model from DMI if set to auto
+if [ "$DEVICE_MODEL" = "auto" ]; then
   _prod=$(cat /sys/class/dmi/id/product_name 2>/dev/null | tr -d '\000\r\n' | sed -e 's/[[:space:]]\+/ /g' -e 's/^ *//; s/ *$//')
   _vend=$(cat /sys/class/dmi/id/sys_vendor 2>/dev/null | tr -d '\000\r\n' | sed -e 's/[[:space:]]\+/ /g' -e 's/^ *//; s/ *$//')
   case "$_prod" in
@@ -552,7 +551,9 @@ if [ "$DEVICE_MODEL" = "auto" ] || [ -z "$DEVICE_MODEL" ]; then
       *) DEVICE_MODEL="$_vend $_prod" ;;
     esac
     DEVICE_MODEL=$(echo "$DEVICE_MODEL" | sed 's/^ *//; s/ *$//')
-    log "hook: auto-detected device model: $DEVICE_MODEL"
+    command -v log >/dev/null 2>&1 && log "hook: auto-detected device model: $DEVICE_MODEL"
+  else
+    DEVICE_MODEL=""
   fi
 fi
 DROP='^ro.boot.hypervisor.protected_vm.supported=|^ro.surface_flinger.has_wide_color_display=|^ro.surface_flinger.has_HDR_display='
@@ -663,6 +664,51 @@ AC=gbos-hda-pch
 if [ -f $G/audio/gbos-hda-pch/audio_config.xml ]; then
   CARD=$(gbos_audio_card)
   CID=$(echo "$CARD" | sed -n 's/^ *[0-9]* \[\([^] ]*\) *\].*/\1/p'); CNAME=$(echo "$CARD" | sed -n 's/.* - //p')
+  # Free the first id by leaving the GPU HDMI audio unbound, then re-probe the internal card.
+  case "$CID" in *[!A-Za-z0-9]*)
+    CNO=$(echo "$CARD" | sed -n 's/^ *\([0-9][0-9]*\) \[.*/\1/p')
+    BCNO=
+    for _cn in $(sed -n 's/^ *\([0-9][0-9]*\) \[.*/\1/p' /proc/asound/cards); do
+      [ "$_cn" = "$CNO" ] && continue
+      if grep -h '^Codec:' /proc/asound/card$_cn/codec#* 2>/dev/null | grep -qiE 'HDMI|DisplayPort'; then BCNO=$_cn; break; fi
+    done
+    D=/sys/bus/pci/drivers/snd_hda_intel
+    MDEV=$(readlink -f /sys/class/sound/card$CNO/device 2>/dev/null); MDEV=${MDEV##*/}
+    BDEV=$(readlink -f /sys/class/sound/card$BCNO/device 2>/dev/null); BDEV=${BDEV##*/}
+    if [ -n "$BCNO" ] && [ -d $D/$MDEV ] && [ -d $D/$BDEV ] \
+       && echo "$BDEV" > $D/unbind && echo "$MDEV" > $D/unbind && echo "$MDEV" > $D/bind; then
+      CARD=
+      _try=0
+      while [ -z "$CARD" ] && [ "$_try" -lt 20 ]; do
+        CARD=$(gbos_audio_card)
+        [ -n "$CARD" ] || sleep 0.1
+        _try=$((_try + 1))
+      done
+      CID=$(echo "$CARD" | sed -n 's/^ *[0-9]* \[\([^] ]*\) *\].*/\1/p'); CNAME=$(echo "$CARD" | sed -n 's/.* - //p')
+      if [ -n "$CID" ]; then
+        # Stage0 has no hotplug mdev daemon, so rebuild /dev/snd from the post-reprobe sysfs devices.
+        mkdir -p /dev/snd
+        rm -f /dev/snd/*
+        _snd_ok=1
+        for _snd in /sys/class/sound/*; do
+          [ -r "$_snd/dev" ] || continue
+          _snd_name=${_snd##*/}
+          case "$_snd_name" in card[0-9]*) continue;; esac
+          _snd_dev=$(cat "$_snd/dev")
+          _snd_major=${_snd_dev%:*}; _snd_minor=${_snd_dev#*:}
+          case "$_snd_major:$_snd_minor" in *[!0-9:]*|:*) _snd_ok=0; continue;; esac
+          mknod -m 0660 "/dev/snd/$_snd_name" c "$_snd_major" "$_snd_minor" || _snd_ok=0
+        done
+        [ "$_snd_ok" = 1 ] || log "hook: failed to recreate some /dev/snd nodes from sysfs"
+        log "hook: HDMI audio left unbound; internal audio card is '$CARD'"
+      else
+        log "hook: internal audio card did not register after HDMI audio unbind and re-probe"
+      fi
+    else
+      [ -n "$MDEV" ] && [ -d "$D/$MDEV" ] || { [ -n "$MDEV" ] && echo "$MDEV" > $D/bind; }
+      log "hook: could not re-probe internal audio card; HDMI audio may be unavailable"
+    fi;;
+  esac
   mkdir -p /tmp/gbos-audio
   if [ -n "$CID" ] && [ "$CID" != PCH ]; then
     AC=gbos-gen
