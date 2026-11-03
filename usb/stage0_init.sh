@@ -221,6 +221,38 @@ fi
 mount -t devpts devpts /dev/pts -o mode=0620,ptmxmode=0666 2>/dev/null
 mknod -m 666 /dev/ptmx c 5 2 2>/dev/null; mknod -m 666 /dev/zero c 1 5 2>/dev/null
 mknod -m 666 /dev/random c 1 8 2>/dev/null; mknod -m 666 /dev/urandom c 1 9 2>/dev/null
+
+# Ensure all DRM character devices exist in /dev/dri with permissions 0666
+mkdir -p -m 0755 /dev/dri
+for _c in /sys/class/drm/card[0-9]* /sys/class/drm/renderD[0-9]*; do
+  [ -f "$_c/dev" ] || continue
+  _name=${_c##*/}
+  _dev=$(cat "$_c/dev")
+  [ -c "/dev/dri/$_name" ] || mknod -m 0666 "/dev/dri/$_name" c ${_dev%:*} ${_dev#*:}
+done
+# Point /dev/dri/card0 at active display GPU (e.g. card1 if simpledrm took card0)
+_prim=
+for _s in /sys/class/drm/card*-*/status; do
+  [ -f "$_s" ] || continue
+  if grep -q '^connected' "$_s" 2>/dev/null; then
+    _prim=${_s%/status}; _prim=${_prim##*/}; _prim=${_prim%%-*}; break
+  fi
+done
+if [ -z "$_prim" ]; then
+  for _c in /sys/class/drm/card[0-9]*; do
+    case ${_c##*/} in card*-*) continue;; esac
+    _drv=$(readlink "$_c/device/driver" 2>/dev/null); _drv=${_drv##*/}
+    case "$_drv" in i915|xe|amdgpu|nouveau|radeon) _prim=${_c##*/}; break;; esac
+  done
+fi
+if [ -n "$_prim" ] && [ "$_prim" != "card0" ] && [ -f "/sys/class/drm/$_prim/dev" ]; then
+  _pdev=$(cat "/sys/class/drm/$_prim/dev")
+  rm -f /dev/dri/card0
+  mknod -m 0666 /dev/dri/card0 c ${_pdev%:*} ${_pdev#*:}
+  log "drm: primary display on $_prim ($_pdev), mapped to /dev/dri/card0"
+fi
+chmod 0666 /dev/dri/* 2>/dev/null || true
+
 dmesg > $L/stage0-dmesg.txt; sync
 sleep $EXTRA_SLEEP
 mount --move /dev /new/dev; mount --move /proc /new/proc; mount --move /sys /new/sys

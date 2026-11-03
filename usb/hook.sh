@@ -108,8 +108,8 @@ fi
 # is not Intel's, "software GPU" mode swaps in (a) SwiftShader, a CPU Vulkan driver, over vulkan.intel.so (ro.hardware.vulkan=intel
 # keeps working, no prop change) and (b) a gralloc whose generic linear-buffer backend answers to DRM driver "amdgpu" and which
 # lets the CPU driver lock any buffer (tools/patch_gralloc_amdgpu.py; likewise libgbm.so, tools/patch_libgbm_amdgpu.py).
-# GPU_SOFTWARE in gbos.cfg: auto (default: only when no Intel GPU is present and another GPU driver is bound), 1 (force, even
-# on Intel), 0 (never). SYSFS= and NEWROOT= are only for tools/test_gpu_select.sh.
+# GPU_SOFTWARE in gbos.cfg: auto (default: only when no Intel GPU is present and another GPU driver is bound, or Intel Gen <= 8
+# which lacks Vulkan support in Google's image), 1 (force, even on Intel), 0 (never). SYSFS= and NEWROOT= are only for tools/test_gpu_select.sh.
 GBOS_GRALLOC_SHA=d48536951fd0e9643e71a5c8843e90833ce3e212e182782185470e2fbbfad673
 GBOS_LIBGBM_SHA=64a0f2537a5917822cb3f538dc74229e7ccf4ca45a30265bb97f742678ba294e
 GBOS_VKINTEL_SHA=5c687450523ea9ed9e8d4d9cc98ef4fef6c8d592d46db4bf425ad571dc6f7c73
@@ -132,6 +132,35 @@ gbos_gpu_intel_pci() {
   done
   return 1
 }
+# Checks if an Intel GPU has native Vulkan hardware support in Google's image (Gen 9 Skylake+).
+# Older Intel GPUs (Gen 8 Broadwell, Haswell, Valleyview, Cherryview, Ivy Bridge, Sandy Bridge)
+# are rejected by Google's vulkan.intel.so (devinfo->ver < 9) and must fall back to SwiftShader.
+gbos_gpu_intel_has_vulkan() {
+  [ "${1:-}" = xe ] && return 0
+
+  # Check kernel dmesg for integrated display version (< 9 is Gen 8 or older)
+  _ver=$(dmesg 2>/dev/null | grep -m1 -o 'integrated display version [0-9]*' | awk '{print $4}')
+  if [ -n "$_ver" ] && [ "$_ver" -lt 9 ] 2>/dev/null; then return 1; fi
+  if dmesg 2>/dev/null | grep -qiE 'Found (broadwell|haswell|ivybridge|sandybridge|valleyview|cherryview)'; then return 1; fi
+
+  # Check PCI device IDs of Intel display controllers (legacy Gen <= 8)
+  for _d in ${SYSFS:-/sys}/bus/pci/devices/*; do
+    [ -e "$_d/class" ] || continue
+    case "$(cat "$_d/class" 2>/dev/null)" in 0x03*)
+      [ "$(cat "$_d/vendor" 2>/dev/null)" = 0x8086 ] || continue
+      _dev=$(cat "$_d/device" 2>/dev/null | tr '[A-Z]' '[a-z]')
+      case "$_dev" in
+        0x16*) return 1;; # Broadwell Gen 8
+        0x04*|0x0a*|0x0c*|0x0d*) return 1;; # Haswell Gen 7.5
+        0x0f*|0x22*) return 1;; # Valleyview / Cherryview
+        0x015*|0x016*) return 1;; # Ivy Bridge Gen 7
+        0x010*|0x011*|0x012*) return 1;; # Sandy Bridge Gen 6
+      esac
+      ;;
+    esac
+  done
+  return 0
+}
 # Sets GPU_SW=1 (software rendering wanted) or 0 and logs why. $1 = seconds to wait for a non-Intel driver to bind.
 gbos_gpu_decide() {
   GPU_SW=0
@@ -146,9 +175,27 @@ gbos_gpu_decide() {
       drv=${e#*,}
       case "$drv" in i915|xe) intel=$drv;; *) gbos_gpu_real "$drv" && real="$real ${e%%,*}:$drv";; esac
     done
-    # Intel (bound, or at least present on the PCI bus): leave everything as it is, whatever else is installed.
-    [ -n "$intel" ] && { log "hook: software rendering: off (auto; Intel GPU driver $intel bound)"; return 0; }
-    gbos_gpu_intel_pci && { log "hook: software rendering: off (auto; Intel display controller present)"; return 0; }
+    # Intel (bound, or at least present on the PCI bus): check if supported by image Vulkan driver (Gen 9+)
+    if [ -n "$intel" ]; then
+      if gbos_gpu_intel_has_vulkan "$intel"; then
+        log "hook: software rendering: off (auto; Intel GPU driver $intel bound, Gen 9+ hardware Vulkan supported)"
+        return 0
+      else
+        GPU_SW=1
+        log "hook: software rendering: on (auto; Intel GPU driver $intel bound, but Gen <= 8 lacks Vulkan in image; using SwiftShader)"
+        return 0
+      fi
+    fi
+    if gbos_gpu_intel_pci; then
+      if gbos_gpu_intel_has_vulkan ""; then
+        log "hook: software rendering: off (auto; Intel display controller present)"
+        return 0
+      else
+        GPU_SW=1
+        log "hook: software rendering: on (auto; Intel display controller present, but Gen <= 8 lacks Vulkan in image; using SwiftShader)"
+        return 0
+      fi
+    fi
     [ -n "$real" ] && break
     [ $w -ge ${1:-0} ] && break
     sleep 1; w=$((w+1))
@@ -190,6 +237,39 @@ gbos_gpu_enable() {
 # Let the DRM driver (amdgpu probes for several seconds and loads ~20 firmware files) finish before deciding.
 gbos_gpu_decide ${GPU_WAIT:-25}
 [ "$GPU_SW" = 1 ] && gbos_gpu_enable
+
+# Set up DRM device nodes cleanly before switch_root
+gbos_drm_setup() {
+  mkdir -p -m 0755 /dev/dri
+  for _c in /sys/class/drm/card[0-9]* /sys/class/drm/renderD[0-9]*; do
+    [ -f "$_c/dev" ] || continue
+    _name=${_c##*/}
+    _dev=$(cat "$_c/dev")
+    [ -c "/dev/dri/$_name" ] || mknod -m 0666 "/dev/dri/$_name" c ${_dev%:*} ${_dev#*:}
+  done
+  _prim=
+  for _s in /sys/class/drm/card*-*/status; do
+    [ -f "$_s" ] || continue
+    if grep -q '^connected' "$_s" 2>/dev/null; then
+      _prim=${_s%/status}; _prim=${_prim##*/}; _prim=${_prim%%-*}; break
+    fi
+  done
+  if [ -z "$_prim" ]; then
+    for _c in /sys/class/drm/card[0-9]*; do
+      case ${_c##*/} in card*-*) continue;; esac
+      _drv=$(readlink "$_c/device/driver" 2>/dev/null); _drv=${_drv##*/}
+      case "$_drv" in i915|xe|amdgpu|nouveau|radeon) _prim=${_c##*/}; break;; esac
+    done
+  fi
+  if [ -n "$_prim" ] && [ "$_prim" != "card0" ] && [ -f "/sys/class/drm/$_prim/dev" ]; then
+    _pdev=$(cat "/sys/class/drm/$_prim/dev")
+    rm -f /dev/dri/card0
+    mknod -m 0666 /dev/dri/card0 c ${_pdev%:*} ${_pdev#*:}
+    log "hook: primary display on $_prim ($_pdev), mapped to /dev/dri/card0"
+  fi
+  chmod 0666 /dev/dri/* 2>/dev/null || true
+}
+gbos_drm_setup
 
 # drm.debug=0x04 (KMS only; not ATOMIC, which logs every frame): i915 dumps gamma/CSC mode and range per modeset while
 # drm_hwcomposer first sets up the panel. gbos.rc turns it off at boot_completed. Washed-out colours.
@@ -296,17 +376,9 @@ service gbos_audiodiag /system/bin/sh -c "sleep 60; cd /proc/asound; ( head -n 3
     group root audio
     seclabel u:r:shell:s0
     oneshot
-# A /dev/dri/card0 node with no DRM device behind it (i915 is card1) makes the Widevine HAL abort at start-up ("Failed to open
-# /dev/dri/card0: Permission denied"; Dell Inspiron 14 Plus 7440, issue 17). Point it at card1 and restart the HAL. Does nothing when
-# the kernel has a real card0.
-service gbos_drifix /system/bin/sh -c "[ ! -e /sys/class/drm/card0 ] && [ -e /dev/dri/card1 ] && rm -f /dev/dri/card0 && ln -s /dev/dri/card1 /dev/dri/card0 && setprop sys.gbos_dri_fixed 1"
-    user root
-    group root
-    seclabel u:r:shell:s0
-    oneshot
-    disabled
-on early-boot
-    start gbos_drifix
+# DRM card0 is configured directly in stage0_init before Android init starts.
+on early-init
+    setprop sys.gbos_dri_fixed 1
 on property:sys.gbos_dri_fixed=1
     restart vendor.drm-widevine-hal
 
