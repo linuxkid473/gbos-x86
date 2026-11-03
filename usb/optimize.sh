@@ -20,6 +20,18 @@ for d in /sys/bus/usb/devices/*/power/control; do
     echo on > "$d" 2>/dev/null
 done
 
+# Ensure all cpusets are valid for the actual online CPU count (e.g. 0-3 on a 4-thread CPU)
+# Google's powerhint assumes 8 cores (4-7) which fails with EINVAL and starves background tasks
+NUM_CPUS=$(nproc 2>/dev/null || echo 4)
+VALID_CPUS="0-$((NUM_CPUS - 1))"
+for cs in /dev/cpuset/*/cpus /dev/cpuset/cpus; do
+    echo "$VALID_CPUS" > "$cs" 2>/dev/null
+done
+setprop vendor.sys_tuner.disable_cpuset_config true
+
+# Stop OEM proprietary touchpad inhibitor if it is spinning in a 1-second busy loop
+stop touchpad-inhibitor 2>/dev/null
+
 # Suppress drmhwc 60 FPS gamma log spam that causes SurfaceFlinger frame pacing jitter
 setprop log.tag.drmhwc WARN
 setprop persist.log.tag.drmhwc WARN
@@ -30,9 +42,9 @@ setprop persist.log.tag.drmhwc WARN
 settings put global disable_window_blurs 1 2>/dev/null
 cmd window disable-blur 1 2>/dev/null
 setprop persist.sys.sf.disable_blurs 1 2>/dev/null
-settings put global window_animation_scale 0.5 2>/dev/null
-settings put global transition_animation_scale 0.5 2>/dev/null
-settings put global animator_duration_scale 0.5 2>/dev/null
+settings put global window_animation_scale 0 2>/dev/null
+settings put global transition_animation_scale 0 2>/dev/null
+settings put global animator_duration_scale 0 2>/dev/null
 
 # ==============================================================================
 # 3. DISABLE SWAP (Protects storage from wear, latency spikes, and stalls)

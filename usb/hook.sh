@@ -416,7 +416,7 @@ on property:sys.boot_completed=1
 # update_engine runs normally to satisfy GMS binder without crashing
 
 # Skip SetupWizard completely and launch desktop (disables blurs and optimizes animations)
-service gbos_skip_setup /system/bin/sh -c "sleep 1; settings put --user 0 secure user_setup_complete 1; settings put --user 10 secure user_setup_complete 1; settings put secure user_setup_complete 1; settings put global device_provisioned 1; settings put global setup_wizard_has_run 1; settings put global force_resizable_activities 1; settings put global enable_freeform_support 1; settings put global ota_disable_automatic_update 1; settings put global auto_system_update 0; settings put global disable_window_blurs 1; cmd window disable-blur 1; settings put global window_animation_scale 0.5; settings put global transition_animation_scale 0.5; settings put global animator_duration_scale 0.5; setprop ro.setupwizard.mode DISABLED; am start --user 10 -a android.intent.action.MAIN -c android.intent.category.HOME 2>/dev/null; am start -n com.google.android.apps.nexuslauncher/.NexusLauncherActivity -a android.intent.action.MAIN -c android.intent.category.HOME 2>/dev/null"
+service gbos_skip_setup /system/bin/sh -c "sleep 1; settings put --user 0 secure user_setup_complete 1; settings put --user 10 secure user_setup_complete 1; settings put secure user_setup_complete 1; settings put global device_provisioned 1; settings put global setup_wizard_has_run 1; settings put global force_resizable_activities 1; settings put global enable_freeform_support 1; settings put global ota_disable_automatic_update 1; settings put global auto_system_update 0; settings put global disable_window_blurs 1; cmd window disable-blur 1; settings put global window_animation_scale 0; settings put global transition_animation_scale 0; settings put global animator_duration_scale 0; setprop ro.setupwizard.mode DISABLED; am start --user 10 -a android.intent.action.MAIN -c android.intent.category.HOME 2>/dev/null; am start -n com.google.android.apps.nexuslauncher/.NexusLauncherActivity -a android.intent.action.MAIN -c android.intent.category.HOME 2>/dev/null"
     user root
     group root
     seclabel u:r:shell:s0
@@ -642,7 +642,7 @@ if [ "$DEVICE_MODEL" = "auto" ]; then
   fi
 fi
 DROP='^ro.boot.hypervisor.protected_vm.supported=|^ro.surface_flinger.has_wide_color_display=|^ro.surface_flinger.has_HDR_display='
-[ "$GPU_SW" = 1 ] && DROP="$DROP|^ro.surface_flinger.supports_background_blur=|^persist.sys.sf.disable_blurs=|^ro.launcher.blur.appLaunch=|^log.tag.drmhwc=|^persist.log.tag.drmhwc=|^ro.vendor.hwc.use_overlay_planes=|^vendor.hwc.drm.use_overlay_planes=|^vendor.hwc.drm.scale_with_gpu=|^vendor.hwc.drm.enable_color_pipeline=|^ro.hwui.use_vulkan=|^ro.surface_flinger.default_composition_pixel_format="   # blur on the CPU is far too slow
+[ "$GPU_SW" = 1 ] && DROP="$DROP|^ro.surface_flinger.supports_background_blur=|^persist.sys.sf.disable_blurs=|^ro.launcher.blur.appLaunch=|^log.tag.drmhwc=|^persist.log.tag.drmhwc=|^ro.vendor.hwc.use_overlay_planes=|^vendor.hwc.drm.use_overlay_planes=|^vendor.hwc.drm.scale_with_gpu=|^vendor.hwc.drm.enable_color_pipeline=|^ro.hwui.use_vulkan=|^ro.surface_flinger.default_composition_pixel_format=|^debug.renderengine.backend=|^debug.renderengine.graphite=|^debug.renderengine.graphite_desktop_optin=|^debug.renderengine.vulkan=|^ro.hwui.render_ahead=|^ro.surface_flinger.max_frame_buffer_acquired_buffers=|^debug.sf.enable_gl_backpressure="   # blur on the CPU is far too slow
 [ -n "$DENSITY" ] && DROP="$DROP|^ro.sf.lcd_density="
 [ -n "$DEVICE_MODEL" ] && DROP="$DROP|^ro.product.model=|^ro.product.vendor.model=|^ro.product.marketname=|^ro.product.vendor.marketname="
 { grep -v -E "$DROP" /new/vendor/build.prop
@@ -654,11 +654,24 @@ DROP='^ro.boot.hypervisor.protected_vm.supported=|^ro.surface_flinger.has_wide_c
     echo "ro.launcher.blur.appLaunch=0"
     echo "log.tag.drmhwc=WARN"
     echo "persist.log.tag.drmhwc=WARN"
-    # drm_hwcomposer picks its backend by DRM driver: i915/xe get "client" (everything composited by SurfaceFlinger), any other
-    # driver "generic", which also tries overlay planes. Disable overlay planes and force GPU scaling so everything composites onto the primary plane.
-    echo "ro.vendor.hwc.use_overlay_planes=false"
-    echo "vendor.hwc.drm.use_overlay_planes=0"
-    echo "vendor.hwc.drm.scale_with_gpu=1"
+    # Hardware cursor & overlay planes:
+    # Intel KMS (i915/xe) has a dedicated hardware cursor plane (plane[44], format AR24).
+    # DO NOT disable overlay/cursor planes on Intel: disabling them forces drm_hwcomposer to
+    # composite the cursor in software via SwiftShader on CPU, pinning all cores at 100% and
+    # causing 3-4s mouse lag and ANRs. Non-Intel software rendering (e.g. AMD without overlay caps)
+    # stays on the primary plane.
+    is_intel_drm=0
+    if gbos_gpu_cards 2>/dev/null | grep -qE " (i915|xe)$"; then
+      is_intel_drm=1
+    fi
+    if [ "$is_intel_drm" = 1 ]; then
+      echo "ro.vendor.hwc.use_overlay_planes=true"
+      echo "vendor.hwc.drm.use_overlay_planes=0"
+    else
+      echo "ro.vendor.hwc.use_overlay_planes=false"
+      echo "vendor.hwc.drm.use_overlay_planes=0"
+      echo "vendor.hwc.drm.scale_with_gpu=1"
+    fi
     # Google's vendor build.prop has vendor.hwc.drm.enable_color_pipeline=true: drm_hwcomposer then sets the DRM COLOR_PIPELINE client
     # cap and rejects every plane without a COLOR_PIPELINE property ("Plane[N] does not support COLOR_PIPELINE. Rejecting", then
     # "Primary plane for CRTC not found", "No pipelines available. Creating null-display for headless mode": SurfaceFlinger draws into
@@ -675,6 +688,19 @@ DROP='^ro.boot.hypervisor.protected_vm.supported=|^ro.surface_flinger.has_wide_c
     # present failed for display: BAD_DISPLAY (2)" on every frame. RGBX_8888 maps to DRM_FORMAT_XBGR8888 (XB24),
     # which is natively supported on all Intel display generations, AMD, and CPU rendering.
     echo "ro.surface_flinger.default_composition_pixel_format=2"
+    # RenderEngine Skia backend:
+    # Google defaults to Graphite over Vulkan on desktop (debug.renderengine.graphite_desktop_optin=true).
+    # Graphite compiles Vulkan pipelines asynchronously at runtime, which saturates SwiftShader on CPU.
+    # Fall back to Ganesh (SkiaGL) via ANGLE: much lighter and 3-5x faster on 2-core / 4-thread CPUs.
+    echo "debug.renderengine.backend=skiaglthreaded"
+    echo "debug.renderengine.graphite=false"
+    echo "debug.renderengine.graphite_desktop_optin=false"
+    echo "debug.renderengine.vulkan=false"
+    # Reduce frame queue latency: render immediately without 2-frame buffering
+    echo "ro.hwui.render_ahead=0"
+    echo "ro.surface_flinger.max_frame_buffer_acquired_buffers=2"
+    echo "debug.sf.enable_gl_backpressure=0"
+    echo "debug.sf.rounded_corner_opaque_optimization=true"
   fi
   if [ -n "$DENSITY" ]; then echo "ro.sf.lcd_density=$DENSITY"; fi
   if [ -n "$DEVICE_MODEL" ]; then
