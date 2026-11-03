@@ -505,7 +505,56 @@ fi
 # The Latitude's LG LP133WF6 is an sRGB panel, not wide-gamut/HDR like Google's: with these true,
 # SurfaceFlinger offers DISPLAY_BT2020 and drm_hwcomposer tags eDP as BT.2020 (pale colours; the
 # kernel side is fixed in i915_edp_colorspace.sh). Declare it sRGB-only.
+# Auto-detect optimal UI density from connected screen if unset or auto
+if [ "$DENSITY" = "auto" ] || [ -z "$DENSITY" ]; then
+  DENSITY=
+  for _s in /sys/class/drm/card*-*/status; do
+    [ -f "$_s" ] || continue
+    if grep -q '^connected$' "$_s" 2>/dev/null; then
+      _d=$(dirname "$_s")
+      if [ -f "$_d/modes" ] && [ -s "$_d/modes" ]; then
+        _res=$(head -n1 "$_d/modes" 2>/dev/null | tr -d '\r\n')
+        if [ -n "$_res" ]; then
+          _w=$(echo "$_res" | cut -d'x' -f1)
+          _h=$(echo "$_res" | cut -d'x' -f2)
+          if [ "$_w" -le 1366 ]; then
+            DENSITY=140
+          elif [ "$_w" -le 1600 ]; then
+            DENSITY=160
+          elif [ "$_w" -le 1920 ]; then
+            [ "$_h" -ge 1200 ] && DENSITY=180 || DENSITY=160
+          elif [ "$_w" -le 2560 ]; then
+            DENSITY=220
+          elif [ "$_w" -le 2880 ]; then
+            DENSITY=240
+          else
+            DENSITY=320
+          fi
+          log "hook: auto-detected resolution ${_res}, calculated density: $DENSITY"
+          break
+        fi
+      fi
+    fi
+  done
+fi
 case "$DENSITY" in ''|*[!0-9]*) DENSITY=;; esac
+
+# Auto-detect real laptop device model from DMI if unset or auto
+if [ "$DEVICE_MODEL" = "auto" ] || [ -z "$DEVICE_MODEL" ]; then
+  _prod=$(cat /sys/class/dmi/id/product_name 2>/dev/null | tr -d '\000\r\n' | sed -e 's/[[:space:]]\+/ /g' -e 's/^ *//; s/ *$//')
+  _vend=$(cat /sys/class/dmi/id/sys_vendor 2>/dev/null | tr -d '\000\r\n' | sed -e 's/[[:space:]]\+/ /g' -e 's/^ *//; s/ *$//')
+  case "$_prod" in
+    ''|'None'|'Default string'|'System Product Name'|'To be filled by O.E.M.'|'System Version') _prod="" ;;
+  esac
+  if [ -n "$_prod" ]; then
+    case "$_prod" in
+      *"$_vend"*) DEVICE_MODEL="$_prod" ;;
+      *) DEVICE_MODEL="$_vend $_prod" ;;
+    esac
+    DEVICE_MODEL=$(echo "$DEVICE_MODEL" | sed 's/^ *//; s/ *$//')
+    log "hook: auto-detected device model: $DEVICE_MODEL"
+  fi
+fi
 DROP='^ro.boot.hypervisor.protected_vm.supported=|^ro.surface_flinger.has_wide_color_display=|^ro.surface_flinger.has_HDR_display='
 [ "$GPU_SW" = 1 ] && DROP="$DROP|^ro.surface_flinger.supports_background_blur=|^ro.vendor.hwc.use_overlay_planes=|^vendor.hwc.drm.enable_color_pipeline=|^ro.hwui.use_vulkan="   # blur on the CPU is far too slow
 [ -n "$DENSITY" ] && DROP="$DROP|^ro.sf.lcd_density="

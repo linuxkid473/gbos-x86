@@ -163,6 +163,17 @@ gbos_hw_report() {
 # so xe does not come up with its defaults. Unknown parameters are only warned about.
 gbos_xe_params() {
   [ -n "$XE_PARAMS" ] || return 0
+  # Only load xe if an Intel Xe/Arc GPU is physically present
+  _has_xe=0
+  for _pci in /sys/bus/pci/devices/*; do
+    [ "$(cat $_pci/vendor 2>/dev/null)" = "0x8086" ] || continue
+    _dev_id=$(cat $_pci/device 2>/dev/null | sed 's/^0x//')
+    case "$_dev_id" in
+      7d[0-9a-f][0-9a-f]|64[0-9a-f][0-9a-f]|b6[0-9a-f][0-9a-f]|56[0-9a-f][0-9a-f]|e2[0-9a-f][0-9a-f])
+        _has_xe=1; break;;
+    esac
+  done
+  [ $_has_xe = 1 ] || return 0
   log "hwdetect: loading xe with: $XE_PARAMS"
   modprobe -q xe $XE_PARAMS && log "hwdetect: xe loaded with parameters" || log "hwdetect: xe load with parameters FAILED"
 }

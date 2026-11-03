@@ -100,7 +100,7 @@ log "logging to USB: gbos/logs/boot-$N/kmsg.log"
 ( while /gbos/busybox sleep 5; do /gbos/busybox sync; done ) &
 
 # Config file on the stick (edit from any computer)
-SHELL_AT=none; LOAD_I915=1; LOAD_WIFI=0; EXTRA_SLEEP=0; MODE=boot
+SHELL_AT=none; LOAD_I915=auto; LOAD_WIFI=0; EXTRA_SLEEP=0; MODE=boot
 [ -f $G/gbos.cfg ] && . $G/gbos.cfg && log "loaded gbos.cfg: MODE=$MODE SHELL_AT=$SHELL_AT LOAD_I915=$LOAD_I915 LOAD_WIFI=$LOAD_WIFI"
 # The boot menu's choice wins over gbos.cfg's MODE (ask/live are menu-level settings).
 [ -n "$SELMODE" ] && MODE=$SELMODE
@@ -126,8 +126,34 @@ log "hardware inventory written (hw.txt)"
 
 [ "$SHELL_AT" = early ] && shell "SHELL_AT=early"
 
+# Dynamic GPU detection: automatically pick between i915 (standard Intel) and xe (Meteor/Lunar Lake)
+if [ "$LOAD_I915" = auto ] || [ -z "$LOAD_I915" ]; then
+  LOAD_I915=0
+  for _pci in /sys/bus/pci/devices/*; do
+    [ -e "$_pci/class" ] || continue
+    case "$(cat $_pci/class 2>/dev/null)" in
+      0x03*)
+        if [ "$(cat $_pci/vendor 2>/dev/null)" = "0x8086" ]; then
+          _dev_id=$(cat $_pci/device 2>/dev/null | sed 's/^0x//')
+          case "$_dev_id" in
+            7d[0-9a-f][0-9a-f]|64[0-9a-f][0-9a-f]|b6[0-9a-f][0-9a-f]|56[0-9a-f][0-9a-f]|e2[0-9a-f][0-9a-f])
+              # Modern Intel Xe/Arc GPU (Meteor/Lunar/Arrow Lake): driven by xe, do not load i915
+              LOAD_I915=0
+              ;;
+            *)
+              # Standard Intel HD/UHD/Iris GPU (Broadwell, Skylake ... Raptor Lake)
+              LOAD_I915=1
+              ;;
+          esac
+        fi
+        ;;
+    esac
+  done
+  log "dynamic gpu detection: LOAD_I915=$LOAD_I915"
+fi
+
 if [ "$LOAD_I915" = 1 ]; then
-  log "modprobe i915 (UHD 620). If the screen freezes here, set LOAD_I915=0 in gbos.cfg"
+  log "modprobe i915. If the screen freezes here, set LOAD_I915=0 in gbos.cfg"
   modprobe i915 && log "i915 loaded" || log "i915 load FAILED rc=$?"
   sleep 2; mdev -s
 fi

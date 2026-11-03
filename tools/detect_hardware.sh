@@ -21,18 +21,20 @@ detect_host_hardware() {
     [ -f "$DMI_DIR/product_version" ] && _ver=$(head -n1 "$DMI_DIR/product_version" 2>/dev/null | tr -d '\r\n')
     [ -f "$DMI_DIR/product_name" ] && _name=$(head -n1 "$DMI_DIR/product_name" 2>/dev/null | tr -d '\r\n')
 
-    # Filter dummy strings
+    # Filter dummy or OEM-internal strings
     for _v in _fam _ver _name; do
       eval "_val=\$$_v"
       case "$_val" in
-        "None"|"Default string"|"To be filled by O.E.M."|"System Version"|"System Product Name"|"")
+        "None"|"Default string"|"To be filled by O.E.M."|"System Version"|"System Product Name"|*"Type1ProductConfigId"*|*"X=Null"*|"")
           eval "$_v=''"
           ;;
       esac
     done
 
-    # Prefer descriptive family/version over internal board code (e.g. IdeaPad Slim 5 over 83DA)
-    if [ -n "$_fam" ] && [ ${#_fam} -ge ${#_name} ]; then
+    # If product_name is descriptive and not a 4-hex-char board ID (e.g. 83DA), prefer product_name
+    if [ -n "$_name" ] && ! echo "$_name" | grep -Eq '^[0-9A-Fa-f]{4}$'; then
+      DETECTED_PRODUCT="$_name"
+    elif [ -n "$_fam" ] && [ ${#_fam} -ge ${#_name} ]; then
       DETECTED_PRODUCT="$_fam"
     elif [ -n "$_ver" ] && [ ${#_ver} -ge ${#_name} ]; then
       DETECTED_PRODUCT="$_ver"
@@ -68,7 +70,7 @@ detect_host_hardware() {
   else
     DETECTED_DEVICE_MODEL="Generic x86 PC"
   fi
-  DETECTED_DEVICE_MODEL=$(echo "$DETECTED_DEVICE_MODEL" | sed 's/[[:space:]]\+/ /g')
+  DETECTED_DEVICE_MODEL=$(echo "$DETECTED_DEVICE_MODEL" | sed -e 's/[[:space:]]\+/ /g' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
 
   # --- 2. CPU Model & AVX / AVX2 Capability ---
   DETECTED_CPU_NAME=""
@@ -99,22 +101,43 @@ detect_host_hardware() {
   _pci_vendor=""
   _pci_driver=""
 
-  # Search DRM cards
+  # Search DRM cards:
+  # 1. Prefer DRM card that actually drives a connected display (e.g. eDP/HDMI)
   for _card in /sys/class/drm/card[0-9]*; do
     [ -d "$_card" ] || continue
-    case "$_card" in *-*) continue ;; esac # skip connectors like card0-eDP-1
-    if [ -f "$_card/device/vendor" ]; then
-      _pci_vendor=$(cat "$_card/device/vendor" 2>/dev/null | tr '[:upper:]' '[:lower:]')
-    fi
-    if [ -L "$_card/device/driver" ]; then
-      _pci_driver=$(basename "$(readlink "$_card/device/driver")" 2>/dev/null)
-    fi
-    [ -n "$_pci_vendor" ] && break
+    case "$_card" in *-*) continue ;; esac
+    _card_name=$(basename "$_card")
+    for _conn in /sys/class/drm/${_card_name}-*/status; do
+      if [ -f "$_conn" ] && grep -q '^connected$' "$_conn" 2>/dev/null; then
+        _pci_vendor=$(cat "$_card/device/vendor" 2>/dev/null | tr '[:upper:]' '[:lower:]')
+        if [ -L "$_card/device/driver" ]; then
+          _pci_driver=$(basename "$(readlink "$_card/device/driver")" 2>/dev/null)
+        fi
+        break 2
+      fi
+    done
   done
 
-  # Fallback to lspci if DRM card inspection was inconclusive
+  # 2. In dual-GPU laptops (Intel/AMD iGPU + NVIDIA dGPU), prefer the integrated display GPU
+  if [ -z "$_pci_vendor" ] || [ "$_pci_vendor" = "0x10de" ]; then
+    for _card in /sys/class/drm/card[0-9]*; do
+      [ -d "$_card" ] || continue
+      case "$_card" in *-*) continue ;; esac
+      _v=$(cat "$_card/device/vendor" 2>/dev/null | tr '[:upper:]' '[:lower:]')
+      if [ "$_v" = "0x8086" ] || [ "$_v" = "0x1002" ]; then
+        _pci_vendor="$_v"
+        if [ -L "$_card/device/driver" ]; then
+          _pci_driver=$(basename "$(readlink "$_card/device/driver")" 2>/dev/null)
+        fi
+        break
+      fi
+    done
+  fi
+
+  # Fallback to lspci if DRM card inspection was inconclusive (prefer VGA over 3D controller)
   if [ -z "$_pci_vendor" ] && command -v lspci >/dev/null 2>&1; then
-    _vga_line=$(lspci -nn 2>/dev/null | grep -Ei 'vga|3d|display' | head -n1)
+    _vga_line=$(lspci -nn 2>/dev/null | grep -Ei 'vga compatible' | head -n1)
+    [ -z "$_vga_line" ] && _vga_line=$(lspci -nn 2>/dev/null | grep -Ei 'vga|3d|display' | head -n1)
     case "$_vga_line" in
       *8086:*) _pci_vendor="0x8086" ;;
       *1002:*) _pci_vendor="0x1002" ;;
