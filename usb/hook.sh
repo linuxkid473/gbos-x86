@@ -271,6 +271,14 @@ gbos_drm_setup() {
 }
 gbos_drm_setup
 
+# Maximize CPU governor early to prevent throttling during init and software rendering
+for _g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+  echo performance > "$_g" 2>/dev/null || true
+done
+for _e in /sys/devices/system/cpu/cpu*/cpufreq/energy_performance_preference; do
+  echo performance > "$_e" 2>/dev/null || true
+done
+
 # drm.debug=0x04 (KMS only; not ATOMIC, which logs every frame): i915 dumps gamma/CSC mode and range per modeset while
 # drm_hwcomposer first sets up the panel. gbos.rc turns it off at boot_completed. Washed-out colours.
 echo 0x04 > /sys/module/drm/parameters/debug 2>/dev/null && log "hook: drm.debug=0x04 (KMS) until boot_completed"
@@ -389,6 +397,11 @@ on property:sys.boot_completed=1
     write /sys/module/drm/parameters/debug 0
     # The KVM exit trace (kvmtrace.txt) only matters while the Trusty VM boots; left on it costs CPU and writes a lot.
     write /sys/kernel/tracing/tracing_on 0
+    # Maximize CPU frequency governor permanently
+    write /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor performance
+    write /sys/devices/system/cpu/cpu1/cpufreq/scaling_governor performance
+    write /sys/devices/system/cpu/cpu2/cpufreq/scaling_governor performance
+    write /sys/devices/system/cpu/cpu3/cpufreq/scaling_governor performance
     $TRUSTYSTOP
     start gbos_skip_setup
     start gbos_optimize
@@ -402,8 +415,8 @@ on property:sys.boot_completed=1
 
 # update_engine runs normally to satisfy GMS binder without crashing
 
-# Skip SetupWizard completely and launch desktop
-service gbos_skip_setup /system/bin/sh -c "sleep 1; settings put --user 0 secure user_setup_complete 1; settings put --user 10 secure user_setup_complete 1; settings put secure user_setup_complete 1; settings put global device_provisioned 1; settings put global setup_wizard_has_run 1; settings put global force_resizable_activities 1; settings put global enable_freeform_support 1; settings put global ota_disable_automatic_update 1; settings put global auto_system_update 0; setprop ro.setupwizard.mode DISABLED; am start --user 10 -a android.intent.action.MAIN -c android.intent.category.HOME 2>/dev/null; am start -n com.google.android.apps.nexuslauncher/.NexusLauncherActivity -a android.intent.action.MAIN -c android.intent.category.HOME 2>/dev/null"
+# Skip SetupWizard completely and launch desktop (disables blurs and optimizes animations)
+service gbos_skip_setup /system/bin/sh -c "sleep 1; settings put --user 0 secure user_setup_complete 1; settings put --user 10 secure user_setup_complete 1; settings put secure user_setup_complete 1; settings put global device_provisioned 1; settings put global setup_wizard_has_run 1; settings put global force_resizable_activities 1; settings put global enable_freeform_support 1; settings put global ota_disable_automatic_update 1; settings put global auto_system_update 0; settings put global disable_window_blurs 1; cmd window disable-blur 1; settings put global window_animation_scale 0.5; settings put global transition_animation_scale 0.5; settings put global animator_duration_scale 0.5; setprop ro.setupwizard.mode DISABLED; am start --user 10 -a android.intent.action.MAIN -c android.intent.category.HOME 2>/dev/null; am start -n com.google.android.apps.nexuslauncher/.NexusLauncherActivity -a android.intent.action.MAIN -c android.intent.category.HOME 2>/dev/null"
     user root
     group root
     seclabel u:r:shell:s0
@@ -629,7 +642,7 @@ if [ "$DEVICE_MODEL" = "auto" ]; then
   fi
 fi
 DROP='^ro.boot.hypervisor.protected_vm.supported=|^ro.surface_flinger.has_wide_color_display=|^ro.surface_flinger.has_HDR_display='
-[ "$GPU_SW" = 1 ] && DROP="$DROP|^ro.surface_flinger.supports_background_blur=|^ro.vendor.hwc.use_overlay_planes=|^vendor.hwc.drm.use_overlay_planes=|^vendor.hwc.drm.scale_with_gpu=|^vendor.hwc.drm.enable_color_pipeline=|^ro.hwui.use_vulkan=|^ro.surface_flinger.default_composition_pixel_format="   # blur on the CPU is far too slow
+[ "$GPU_SW" = 1 ] && DROP="$DROP|^ro.surface_flinger.supports_background_blur=|^persist.sys.sf.disable_blurs=|^ro.launcher.blur.appLaunch=|^log.tag.drmhwc=|^persist.log.tag.drmhwc=|^ro.vendor.hwc.use_overlay_planes=|^vendor.hwc.drm.use_overlay_planes=|^vendor.hwc.drm.scale_with_gpu=|^vendor.hwc.drm.enable_color_pipeline=|^ro.hwui.use_vulkan=|^ro.surface_flinger.default_composition_pixel_format="   # blur on the CPU is far too slow
 [ -n "$DENSITY" ] && DROP="$DROP|^ro.sf.lcd_density="
 [ -n "$DEVICE_MODEL" ] && DROP="$DROP|^ro.product.model=|^ro.product.vendor.model=|^ro.product.marketname=|^ro.product.vendor.marketname="
 { grep -v -E "$DROP" /new/vendor/build.prop
@@ -637,6 +650,10 @@ DROP='^ro.boot.hypervisor.protected_vm.supported=|^ro.surface_flinger.has_wide_c
   echo "ro.surface_flinger.has_HDR_display=false"
   if [ "$GPU_SW" = 1 ]; then
     echo "ro.surface_flinger.supports_background_blur=0"
+    echo "persist.sys.sf.disable_blurs=1"
+    echo "ro.launcher.blur.appLaunch=0"
+    echo "log.tag.drmhwc=WARN"
+    echo "persist.log.tag.drmhwc=WARN"
     # drm_hwcomposer picks its backend by DRM driver: i915/xe get "client" (everything composited by SurfaceFlinger), any other
     # driver "generic", which also tries overlay planes. Disable overlay planes and force GPU scaling so everything composites onto the primary plane.
     echo "ro.vendor.hwc.use_overlay_planes=false"
