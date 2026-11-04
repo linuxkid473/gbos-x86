@@ -48,6 +48,7 @@ DEV=$STICK; FROM=stick; SELMODE=
 #   MODE=boot -> the NVMe install if there is one, else live. Unset/MODE=ask -> menu.
 boot_menu() {
   def=1; [ -n "$SYS" ] && def=3
+  mt=${MENU_T:-15}
   chvt 1 2>/dev/null; clear > /dev/tty1 2>/dev/null
   sleep 1
   # Discard any residual keystrokes (e.g. Enter pressed in GRUB)
@@ -57,20 +58,27 @@ boot_menu() {
     echo "   1) Run gbOS86 live from this USB (nothing is saved)"
     echo "   2) Install or update gbOS86 on this laptop's internal SSD"
     [ -n "$SYS" ] && echo "   3) Boot the installed gbOS86"
-    echo; printf "   Choose 1-%s [default %s in 15 s]: " "$([ -n "$SYS" ] && echo 3 || echo 2)" $def
+    echo; printf "   Choose 1-%s [default %s in %s s]: " "$([ -n "$SYS" ] && echo 3 || echo 2)" $def $mt
   } > /dev/tty1
-  c=; read -t 15 -r c < /dev/tty1; echo > /dev/tty1
+  c=; read -t $mt -r c < /dev/tty1; echo > /dev/tty1
   case "$c" in 1|2) ;; 3) [ -n "$SYS" ] || c=$def;; *) c=$def;; esac
   log "boot menu: choice $c (default $def)"
   CHOICE=$c
 }
 if [ -n "$STICK" ]; then
-  CFGMODE=
+  CFGMODE=; MENU_T=
   mount -t vfat -o ro $STICK /gbos 2>/dev/null && {
     CFGMODE=$(sed -n 's/^MODE=//p' /gbos/gbos/gbos.cfg 2>/dev/null | tail -1)
     grep -q '^BOOT_FROM=stick' /gbos/gbos/gbos.cfg 2>/dev/null && CFGMODE=live
+    # Screen reader (Speakup + espeakup, gbos/a11y/ on the stick, see usb/a11y/start.sh): copy it to RAM so the stick can be unmounted,
+    # and give the menu longer (60 s) when it speaks. gbos.cfg: A11Y=0 off, A11Y_MENU_TIMEOUT=seconds.
+    if [ -f /gbos/gbos/a11y/start.sh ] && ! grep -q '^A11Y=0' /gbos/gbos/gbos.cfg 2>/dev/null; then
+      mkdir -p /a11y && cp -a /gbos/gbos/a11y/. /a11y/ 2>/dev/null
+      MENU_T=$(sed -n 's/^A11Y_MENU_TIMEOUT=\([0-9][0-9]*\)$/\1/p' /gbos/gbos/gbos.cfg 2>/dev/null | tail -1); MENU_T=${MENU_T:-60}
+    fi
     umount /gbos
   }
+  [ -f /a11y/start.sh ] && { log "a11y: starting the screen reader"; . /a11y/start.sh; [ -f /a11y/active ] || MENU_T=; }
   case "$CFGMODE" in
     install) CHOICE=2;;
     live) CHOICE=1;;
@@ -193,8 +201,22 @@ mdev -s
 # /data and /metadata: the NVMe install's ext4 partitions (persistent), else tmpfs (fresh each boot).
 # ext4 is made without the encrypt feature, so vold behaves as it did on tmpfs (no fscrypt).
 DATA=; META=
+# Find a data partition by ext4 label, else by GPT partition name (PARTNAME in sysfs) on the same disk as the system partition. A hand-made
+# or re-made partition (dual-boot users resize things in Windows/GParted) often keeps the GPT name but has no ext4 label; without this
+# fallback /data silently became tmpfs. Only a partition that already holds ext4 is used (checked by the mount below); nothing is formatted here.
+find_part() {
+  _p=$(findfs LABEL=$1 2>/dev/null); [ -n "$_p" ] && { echo "$_p"; return; }
+  _pd=$(basename "$(readlink -f /sys/class/block/$(basename $DEV)/.. 2>/dev/null)" 2>/dev/null)
+  for _u in /sys/class/block/*/uevent; do
+    grep -qx "PARTNAME=$1" $_u 2>/dev/null || continue
+    _n=${_u%/uevent}; _n=${_n##*/}
+    [ "$(basename "$(readlink -f /sys/class/block/$_n/.. 2>/dev/null)" 2>/dev/null)" = "$_pd" ] && [ -b /dev/$_n ] && { echo /dev/$_n; return; }
+  done
+}
 if [ $FROM = nvme ]; then
-  DATA=$(findfs LABEL=GBOS_DATA 2>/dev/null); META=$(findfs LABEL=GBOS_META 2>/dev/null)
+  DATA=$(find_part GBOS_DATA); META=$(find_part GBOS_META)
+  [ -n "$DATA" ] && log "data partition: $DATA (label GBOS_DATA: $(findfs LABEL=GBOS_DATA 2>/dev/null || echo 'no, found by GPT name'))" \
+    || log "data partition: none (no ext4 label GBOS_DATA and no GPT partition named GBOS_DATA on the system disk)"
   # A dual-boot install (installer mode 1) has no GBOS_META partition: /metadata is the 64 MB ext4 image gbos/metadata.img inside GBOSSYS.
   # loop12 is free in both layouts (0-5 and 7 are super.img, 8-11 the separate images, 6 the fake boot disk).
   if [ -n "$DATA" ] && [ -z "$META" ] && [ -f $G/metadata.img ]; then
@@ -255,6 +277,7 @@ chmod 0666 /dev/dri/* 2>/dev/null || true
 
 dmesg > $L/stage0-dmesg.txt; sync
 sleep $EXTRA_SLEEP
+[ -f /a11y/stop.sh ] && . /a11y/stop.sh
 mount --move /dev /new/dev; mount --move /proc /new/proc; mount --move /sys /new/sys
 mount -t selinuxfs selinuxfs /new/sys/fs/selinux
 for d in mnt debug_ramdisk second_stage_resources; do mount -t tmpfs -o mode=0755 tmpfs /new/$d; done

@@ -407,6 +407,7 @@ on property:sys.boot_completed=1
     start gbos_optimize
     start gbos_audiodiag
     start gbos_devname
+    start gbos_talkback
     start gbos_iptsd
     start gbos_wmsize
     start gbos_displaydiag
@@ -499,6 +500,16 @@ service gbos_displaydiag /system/bin/sh -c "sleep 70; ( mount -t debugfs debugfs
 service gbos_iptsd /system/bin/sh /postinstall/gbos/surface/iptsd-run.sh $N
     user root
     group root input
+    seclabel u:r:shell:s0
+    oneshot
+    disabled
+
+# ACCESSIBILITY=talkback in gbos.cfg: switch Google's TalkBack screen reader on (users 0 and 10, as gbos_skip_setup) so a blind user gets speech
+# from the first desktop on, without having to find the setting. Done once per /data (marker file), so turning TalkBack off in Settings
+# sticks; in live mode /data is tmpfs, so it is switched on every boot. No shell variables here: init reads $ in an .rc line as a property.
+service gbos_talkback /system/bin/sh -c "[ '$ACCESSIBILITY' = talkback ] || exit 0; [ -e /data/local/tmp/.gbos_talkback ] && exit 0; sleep 3; settings put --user 0 secure enabled_accessibility_services com.google.android.marvin.talkback/com.google.android.marvin.talkback.TalkBackService; settings put --user 0 secure accessibility_enabled 1; settings put --user 10 secure enabled_accessibility_services com.google.android.marvin.talkback/com.google.android.marvin.talkback.TalkBackService; settings put --user 10 secure accessibility_enabled 1; touch /data/local/tmp/.gbos_talkback"
+    user root
+    group root
     seclabel u:r:shell:s0
     oneshot
     disabled

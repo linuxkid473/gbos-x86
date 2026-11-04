@@ -24,7 +24,7 @@ put() {  # put SRC DST(relative to gbos/): copy when different
 
 echo "deploying to $VOL"
 for f in hook.sh install.sh aidiag.sh early_patch.sh hwdetect.sh apex_patch.sh crossystem libkm_compat.so system_ext_manifest.xml soft_gk; do put "$U/$f" "$f"; done
-for d in patched audio installer kmod ksu; do
+for d in patched audio installer kmod ksu a11y; do
   [ -d "$U/$d" ] || continue
   (cd "$U" && find "$d" -type f ! -name '.DS_Store') | while read -r f; do put "$U/$f" "$f"; done
 done

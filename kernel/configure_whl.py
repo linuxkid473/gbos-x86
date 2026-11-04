@@ -64,6 +64,9 @@ def _m(*names):
 def _y(*names):
     for n in names:
         GENERIC[n] = 'y'
+# Screen reader for the stage0 boot menu and installer (usb/a11y/, tools/fetch_a11y_tools.sh): Speakup built in with the userspace
+# "soft" synthesizer (/dev/softsynth, driven by espeakup); selected by speakup.synth=soft on the command line. Needs the console (VT).
+_y('ACCESSIBILITY', 'SPEAKUP', 'SPEAKUP_SYNTH_SOFT')
 # Wi-Fi: Intel (old DVM + new MVM), Realtek, MediaTek, Qualcomm Atheros, Broadcom.
 _y('WLAN_VENDOR_REALTEK', 'WLAN_VENDOR_MEDIATEK', 'WLAN_VENDOR_ATH', 'WLAN_VENDOR_BROADCOM', 'WLAN_VENDOR_MARVELL')
 # Marvell 88W8897 (Surface Pro 4/Book, PCIe 11ab:2b38; firmware mrvl/pcie8897_uapsta.bin, picked up by fw_wanted.py)
