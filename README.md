@@ -362,7 +362,8 @@ During installation, live progress bars indicate system image and driver/firmwar
   laptop's sound card, starts the reader and reads the boot menu and every installer message aloud; typed characters are echoed. The boot
   menu waits 60 s instead of 15 (`A11Y_MENU_TIMEOUT`), progress is announced every 10 percent, and the drive serial you must type before an
   erase is also spelled out character by character. The confirmation itself is unchanged. `A11Y=0` in `gbos.cfg` turns it off.
-  Works on laptops whose sound card the kernel brings up by itself (legacy Intel HDA: most pre-2021 laptops). SOF-only machines have no sound
+  Works on laptops whose sound card the kernel brings up by itself (legacy Intel HDA: most pre-2021 laptops), and on newer Intel ones whose HDA
+  controller waits for the GPU driver (Raptor Lake: `start.sh` loads i915/xe itself first). SOF-only machines have no sound
   at that stage, so no speech there (logged as `a11y: no sound card`). Nothing is spoken before the stick's kernel starts (the firmware's own
   boot-device menu is outside gbOS86). Test: `kernel/isa_emu_test/run_a11y_qemu.py usb/out/BOOTX64.EFI` (emulated Intel HDA, records the audio).
 - **Android**: set `ACCESSIBILITY=talkback` in `gbos.cfg` and Google's TalkBack (already in the image, with Google TTS) is switched on at the
