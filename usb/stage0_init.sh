@@ -25,6 +25,9 @@ mknod -m 600 /dev/mapper/control c 10 236; mknod -m 600 /dev/device-mapper c 10 
 # eMMC is the internal disk of many small laptops: its controller driver is a module (the NVMe driver is built in), so load it before
 # looking for the volume. Silent if there is no such controller; coldplug (hwdetect) would otherwise only load it after boot.
 modprobe -q sdhci-pci 2>/dev/null && log "sdhci-pci loaded (eMMC/SD controller)"
+# Realtek PCI card readers (Latitude 5300: rtsx_pci_sdmmc) are not sdhci: without this the SD card holding the image is invisible
+# here ("mmcblk missing"; Android reads the card fine once coldplug loads the same driver). Pulls in rtsx_pci as a dependency.
+modprobe -q rtsx_pci_sdmmc 2>/dev/null && log "rtsx_pci_sdmmc loaded (Realtek SD card reader)"
 
 # Find the gbos volume: the USB stick (label GBOS) or an NVMe/eMMC install (label GBOSSYS, made by
 # gbos/install.sh). The stick wins when present, unless the NVMe install exists and the stick's

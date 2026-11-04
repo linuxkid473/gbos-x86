@@ -117,10 +117,15 @@ gbos_wait_devices() {
     # Peripherals created by the drivers loaded above (SoundWire codecs, Surface Aggregator children) appear after the first
     # coldplug: another pass every 2 s while waiting.
     [ $((i % 2)) -eq 1 ] && gbos_coldplug_pass
-    # SoundWire codecs (Surface Laptop 7: RT1320 amp, RT721 jack codec) were not autoloaded by the coldplug here (root cause not
-    # found, modalias present); ask for them by name once the SoundWire machine driver is in. Harmless without the chips.
-    if grep -q '^snd_soc_sof_sdw ' /proc/modules && ! grep -q '^snd_soc_rt721_sdca ' /proc/modules; then
-      modprobe -a -q snd-soc-rt1320-sdw snd-soc-rt721-sdca 2>/dev/null && log "hwdetect: SoundWire codec modules requested"
+    # SoundWire codecs were not autoloaded by the coldplug here (root cause not found, modalias present on the Surface Laptop 7;
+    # on the Latitude 7320 (Tiger Lake) the codec sysfs entries exist but have an empty modalias): ask for them by name once the
+    # SoundWire machine driver is in. Surface Laptop 7: RT1320 amp + RT721 jack codec. Latitude 7320: RT711 (SDCA) jack codec,
+    # RT1316 amp, RT714 (rt715-sdca driver) on the topology sof-tgl-rt711-l0-rt1316-l1-mono-rt714-l3. Harmless without the chips.
+    # Once per boot (the module names are only asked for when the machine driver is loaded).
+    if grep -q '^snd_soc_sof_sdw ' /proc/modules && [ -z "$GBOS_SDW_REQ" ]; then
+      GBOS_SDW_REQ=1
+      modprobe -a -q snd-soc-rt1320-sdw snd-soc-rt721-sdca snd-soc-rt711-sdca snd-soc-rt1316-sdw snd-soc-rt715-sdca 2>/dev/null \
+        && log "hwdetect: SoundWire codec modules requested (rt1320, rt721, rt711-sdca, rt1316, rt715-sdca)"
     fi
     sleep 1; i=$((i+1))
   done

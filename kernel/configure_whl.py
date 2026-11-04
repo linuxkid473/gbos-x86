@@ -69,8 +69,9 @@ def _y(*names):
 _y('ACCESSIBILITY', 'SPEAKUP', 'SPEAKUP_SYNTH_SOFT')
 # Wi-Fi: Intel (old DVM + new MVM), Realtek, MediaTek, Qualcomm Atheros, Broadcom.
 _y('WLAN_VENDOR_REALTEK', 'WLAN_VENDOR_MEDIATEK', 'WLAN_VENDOR_ATH', 'WLAN_VENDOR_BROADCOM', 'WLAN_VENDOR_MARVELL')
-# Marvell 88W8897 (Surface Pro 4/Book, PCIe 11ab:2b38; firmware mrvl/pcie8897_uapsta.bin, picked up by fw_wanted.py)
-_m('MWIFIEX', 'MWIFIEX_PCIE', 'MWIFIEX_USB')
+# Marvell 88W8897 (Surface Pro 4/Book, PCIe 11ab:2b38; firmware mrvl/pcie8897_uapsta.bin, picked up by fw_wanted.py).
+# MWIFIEX_SDIO: Google Pixelbook (2017, "Eve") Wi-Fi is an SDIO 88W8897 (UNCONFIRMED): hwdetect shows no network device on PCI or USB.
+_m('MWIFIEX', 'MWIFIEX_PCIE', 'MWIFIEX_USB', 'MWIFIEX_SDIO')
 _m('IWLDVM', 'RTW88', 'RTW88_PCI', 'RTW88_8822BE', 'RTW88_8822CE', 'RTW88_8723DE', 'RTW88_8821CE',
    'RTW89', 'RTW89_PCI', 'RTW89_8852AE', 'RTW89_8852BE', 'RTW89_8852CE', 'RTW89_8851BE', 'RTW89_8922AE',
    'MT76_CORE', 'MT7921E', 'MT7921U', 'MT7925E', 'MT7615E', 'MT76x2E',
