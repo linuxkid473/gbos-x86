@@ -100,7 +100,7 @@ log "logging to USB: gbos/logs/boot-$N/kmsg.log"
 ( while /gbos/busybox sleep 5; do /gbos/busybox sync; done ) &
 
 # Config file on the stick (edit from any computer)
-SHELL_AT=none; LOAD_I915=1; LOAD_WIFI=0; EXTRA_SLEEP=0; MODE=boot
+SHELL_AT=none; LOAD_I915=auto; LOAD_WIFI=0; EXTRA_SLEEP=0; MODE=boot
 [ -f $G/gbos.cfg ] && . $G/gbos.cfg && log "loaded gbos.cfg: MODE=$MODE SHELL_AT=$SHELL_AT LOAD_I915=$LOAD_I915 LOAD_WIFI=$LOAD_WIFI"
 # The boot menu's choice wins over gbos.cfg's MODE (ask/live are menu-level settings).
 [ -n "$SELMODE" ] && MODE=$SELMODE
@@ -126,13 +126,15 @@ log "hardware inventory written (hw.txt)"
 
 [ "$SHELL_AT" = early ] && shell "SHELL_AT=early"
 
-if [ "$LOAD_I915" = 1 ]; then
-  log "modprobe i915 (UHD 620). If the screen freezes here, set LOAD_I915=0 in gbos.cfg"
+# Universal dynamic hardware bring-up via modalias coldplugging
+if [ "$HWDETECT" != 0 ] && [ -f $G/hwdetect.sh ] && [ -d $G/modules/lib/modules ]; then
+  . $G/hwdetect.sh
+  gbos_hwdetect 5
+elif [ "$LOAD_I915" = 1 ]; then
+  # Fallback for minimal sticks without modules tree
+  log "modprobe i915"
   modprobe i915 && log "i915 loaded" || log "i915 load FAILED rc=$?"
   sleep 2; mdev -s
-fi
-if [ "$LOAD_WIFI" = 1 ]; then
-  log "modprobe iwlmvm"; modprobe iwlmvm && log "iwlmvm loaded" || log "iwlmvm load FAILED"
 fi
 
 # Install to NVMe instead of booting (gbos.cfg MODE=install on the stick). install.sh never returns.
@@ -219,6 +221,38 @@ fi
 mount -t devpts devpts /dev/pts -o mode=0620,ptmxmode=0666 2>/dev/null
 mknod -m 666 /dev/ptmx c 5 2 2>/dev/null; mknod -m 666 /dev/zero c 1 5 2>/dev/null
 mknod -m 666 /dev/random c 1 8 2>/dev/null; mknod -m 666 /dev/urandom c 1 9 2>/dev/null
+
+# Ensure all DRM character devices exist in /dev/dri with permissions 0666
+mkdir -p -m 0755 /dev/dri
+for _c in /sys/class/drm/card[0-9]* /sys/class/drm/renderD[0-9]*; do
+  [ -f "$_c/dev" ] || continue
+  _name=${_c##*/}
+  _dev=$(cat "$_c/dev")
+  [ -c "/dev/dri/$_name" ] || mknod -m 0666 "/dev/dri/$_name" c ${_dev%:*} ${_dev#*:}
+done
+# Point /dev/dri/card0 at active display GPU (e.g. card1 if simpledrm took card0)
+_prim=
+for _s in /sys/class/drm/card*-*/status; do
+  [ -f "$_s" ] || continue
+  if grep -q '^connected' "$_s" 2>/dev/null; then
+    _prim=${_s%/status}; _prim=${_prim##*/}; _prim=${_prim%%-*}; break
+  fi
+done
+if [ -z "$_prim" ]; then
+  for _c in /sys/class/drm/card[0-9]*; do
+    case ${_c##*/} in card*-*) continue;; esac
+    _drv=$(readlink "$_c/device/driver" 2>/dev/null); _drv=${_drv##*/}
+    case "$_drv" in i915|xe|amdgpu|nouveau|radeon) _prim=${_c##*/}; break;; esac
+  done
+fi
+if [ -n "$_prim" ] && [ "$_prim" != "card0" ] && [ -f "/sys/class/drm/$_prim/dev" ]; then
+  _pdev=$(cat "/sys/class/drm/$_prim/dev")
+  rm -f /dev/dri/card0
+  mknod -m 0666 /dev/dri/card0 c ${_pdev%:*} ${_pdev#*:}
+  log "drm: primary display on $_prim ($_pdev), mapped to /dev/dri/card0"
+fi
+chmod 0666 /dev/dri/* 2>/dev/null || true
+
 dmesg > $L/stage0-dmesg.txt; sync
 sleep $EXTRA_SLEEP
 mount --move /dev /new/dev; mount --move /proc /new/proc; mount --move /sys /new/sys

@@ -23,7 +23,13 @@ mk() {
     [ "$md" = none ] || { mkdir -p "$T/drivers/$md"; ln -s "$T/drivers/$md" "$T/sys/class/drm/$mn/device/driver"; }
   done
   mi=0
-  for mp in $2; do mi=$((mi+1)); mkdir -p "$T/sys/bus/pci/devices/0000:00:0$mi.0"; echo "${mp%%:*}" > "$T/sys/bus/pci/devices/0000:00:0$mi.0/vendor"; echo "${mp#*:}" > "$T/sys/bus/pci/devices/0000:00:0$mi.0/class"; done
+  for mp in $2; do
+    mi=$((mi+1)); pdir="$T/sys/bus/pci/devices/0000:00:0$mi.0"; mkdir -p "$pdir"
+    echo "$mp" | cut -d: -f1 > "$pdir/vendor"
+    echo "$mp" | cut -d: -f2 > "$pdir/class"
+    mdev=$(echo "$mp" | cut -d: -f3)
+    [ -n "$mdev" ] && echo "$mdev" > "$pdir/device"
+  done
 }
 check() { # name expected(GPU_SW) cards pci [GPU_SOFTWARE]
   n=$((n+1)); mk "$3" "$4"; SYSFS=$T/sys; GPU_SOFTWARE=${5:-auto}; GPU_SW=x
@@ -31,9 +37,13 @@ check() { # name expected(GPU_SW) cards pci [GPU_SOFTWARE]
   if [ "$GPU_SW" = "$2" ]; then echo "ok   $1 -> $GPU_SW ($(tail -n1 $T/log | cut -c1-110))"; else echo "FAIL $1: wanted $2, got $GPU_SW"; cat "$T/log"; fails=$((fails+1)); fi
 }
 AMD=0x1002:0x030000; INTEL=0x8086:0x030000; NV=0x10de:0x030200
+INTEL_BDW=0x8086:0x030000:0x1616; INTEL_HSW=0x8086:0x030000:0x0416
 check "Intel i915 laptop"              0 "card0:i915"                "$INTEL"
 check "Intel xe"                       0 "card0:xe"                  "$INTEL"
+check "Intel Broadwell Gen 8 (legacy)" 1 "card0:i915"                "$INTEL_BDW"
+check "Intel Haswell Gen 7.5 (legacy)" 1 "card0:i915"                "$INTEL_HSW"
 check "Intel, i915 not bound yet"      0 "card0:simpledrm"           "$INTEL"
+check "Intel Broadwell unbound"        1 "card0:simpledrm"           "$INTEL_BDW"
 check "Intel + AMD dGPU (hybrid)"      0 "card0:i915 card1:amdgpu"   "$INTEL $AMD"
 check "AMD amdgpu (reporter's laptop)" 1 "card0:amdgpu"              "$AMD"
 check "AMD, simpledrm replaced"        1 "card1:amdgpu card0:simpledrm" "$AMD"
@@ -94,5 +104,17 @@ n=$((n+1)); printf 'ro.hwui.use_vulkan=true\nvendor.hwc.drm.enable_color_pipelin
 if [ "$(grep -c '^ro.hwui.use_vulkan=' "$T/out.prop")" = 1 ] && grep -q '^ro.hwui.use_vulkan=false$' "$T/out.prop"; then echo "ok   build.prop: software GPU mode -> ro.hwui.use_vulkan=false (once)"; else echo "FAIL build.prop hwui"; cat "$T/out.prop"; fails=$((fails+1)); fi
 n=$((n+1)); printf 'ro.hwui.use_vulkan=true\n' > "$T/vendor.build.prop"; ( GPU_SW=0; DENSITY=; DEVICE_MODEL=; . "$T/prop.sh" > "$T/out.prop" ) 2>/dev/null
 if grep -q '^ro.hwui.use_vulkan=true$' "$T/out.prop"; then echo "ok   build.prop: Intel keeps ro.hwui.use_vulkan=true"; else echo "FAIL build.prop hwui Intel"; fails=$((fails+1)); fi
+n=$((n+1)); ( GPU_SW=1; DENSITY=; DEVICE_MODEL=; . "$T/prop.sh" > "$T/out.prop" ) 2>/dev/null
+if grep -q '^ro.surface_flinger.default_composition_pixel_format=2$' "$T/out.prop" && grep -q '^vendor.hwc.drm.use_overlay_planes=0$' "$T/out.prop"; then
+  echo "ok   build.prop: software GPU mode -> default_composition_pixel_format=2 and use_overlay_planes=0"
+else
+  echo "FAIL build.prop pixel_format / overlay_planes"; cat "$T/out.prop"; fails=$((fails+1))
+fi
+n=$((n+1)); ( GPU_SW=0; DENSITY=; DEVICE_MODEL=; . "$T/prop.sh" > "$T/out.prop" ) 2>/dev/null
+if ! grep -q '^ro.surface_flinger.default_composition_pixel_format=' "$T/out.prop"; then
+  echo "ok   build.prop: Intel stock -> no forced default_composition_pixel_format"
+else
+  echo "FAIL build.prop Intel has unexpected default_composition_pixel_format"; cat "$T/out.prop"; fails=$((fails+1))
+fi
 bp "Intel (stock, unchanged)" 0 true
 [ $fails = 0 ] && echo "GPU_SELECT_TEST_PASS ($n checks)" || { echo "$fails FAILED"; exit 1; }

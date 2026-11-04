@@ -638,32 +638,13 @@ if [ "$INSTALL_MODE" = dualboot ]; then
     case "/dev/$_p" in "$TARGET_SYS"|"$TARGET_DATA"|"$TARGET_EFI") continue;; esac
     _mroot=$(mktemp -d)
     if mount /dev/$_p "$_mroot" 2>/dev/null || mount -t ext4 /dev/$_p "$_mroot" 2>/dev/null; then
-      # Dynamically probe GPU for Intel Xe / Meteor / Lunar Lake architectures
-      _gpu_flags=""
-      for _pci_dev in /sys/bus/pci/devices/*; do
-        _pci_class=$(cat "$_pci_dev/class" 2>/dev/null)
-        case "$_pci_class" in
-          0x03*)
-            _pci_vendor=$(cat "$_pci_dev/vendor" 2>/dev/null)
-            _pci_id=$(cat "$_pci_dev/device" 2>/dev/null | sed 's/^0x//')
-            if [ "$_pci_vendor" = "0x8086" ]; then
-              # Meteor Lake (7d4x-7d6x), Lunar Lake (64xx), Arrow Lake (b6xx), Arc Alchemist (56xx), Battlemage (e2xx)
-              case "$_pci_id" in
-                7d[0-9a-f][0-9a-f]|64[0-9a-f][0-9a-f]|b6[0-9a-f][0-9a-f]|56[0-9a-f][0-9a-f]|e2[0-9a-f][0-9a-f])
-                  _gpu_flags="module_blacklist=i915 i915.force_probe=!$_pci_id xe.force_probe=$_pci_id "
-                  ;;
-              esac
-            fi
-            ;;
-        esac
-      done
       _grub_entry="
 # Googlebook OS (gbOS86) Persistent
 menuentry \"Googlebook OS (gbOS86)\" --class android --class os {
     insmod part_gpt
     insmod fat
     search --no-floppy --fs-uuid --set=root $_esp_uuid
-    linux /EFI/gbos86/BOOTX64.EFI ibt=off i8042.nopnp ${_gpu_flags}androidboot.setupwizard.mode=DISABLED usbcore.autosuspend=-1
+    linux /EFI/gbos86/BOOTX64.EFI ibt=off i8042.nopnp androidboot.setupwizard.mode=DISABLED usbcore.autosuspend=-1
 }"
       _added=0
       _custom_sourced=0
