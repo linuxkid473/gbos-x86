@@ -58,6 +58,9 @@ fi
 # zram is a module here (=m in Google's config too); mmd_setup aborts without /sys/block/zram0.
 modprobe zram && log "hook: zram loaded" || log "hook: modprobe zram FAILED"
 
+# Speakup synth probing without serial hardware causes kernel panic on modern platforms: disable synth probe
+[ -e /sys/accessibility/speakup/synth ] && echo "none" > /sys/accessibility/speakup/synth 2>/dev/null
+
 # Generic hardware bring-up (gbOS86 for any Intel gen6+ laptop): usb/hwdetect.sh binds the full module tree from
 # gbos/modules, coldplugs every device by modalias (Wi-Fi, Bluetooth, audio, input, hotkeys, backlight, ...),
 # with firmware from gbos/firmware, and writes hwdetect.txt. Falls back to the original Latitude 5300 sequence
@@ -351,6 +354,12 @@ if mount --bind /gbos /new/postinstall; then
     chown system system /data/system/devices/idc/$IDCN
     chmod 0644 /data/system/devices/idc/$IDCN" && log "hook: touchpad $tp: IDC with Change_Timeout=0.02 queued"
     done
+    if [ -f $G/surface/Vendor_045e_Product_0c9f.idc ]; then
+      IDCRC="$IDCRC
+    copy /postinstall/gbos/surface/Vendor_045e_Product_0c9f.idc /data/system/devices/idc/Vendor_045e_Product_0c9f.idc
+    chown system system /data/system/devices/idc/Vendor_045e_Product_0c9f.idc
+    chmod 0644 /data/system/devices/idc/Vendor_045e_Product_0c9f.idc" && log "hook: Surface precision touchpad IDC queued"
+    fi
     [ -n "$IDCRC" ] && IDCRC="    mkdir /data/system 0775 system system
     mkdir /data/system/devices 0775 system system
     mkdir /data/system/devices/idc 0775 system system$IDCRC"
@@ -397,6 +406,8 @@ on property:sys.boot_completed=1
     write /sys/module/drm/parameters/debug 0
     # The KVM exit trace (kvmtrace.txt) only matters while the Trusty VM boots; left on it costs CPU and writes a lot.
     write /sys/kernel/tracing/tracing_on 0
+    # Speakup synth hardware probe causes kernel panic if unassigned
+    write /sys/accessibility/speakup/synth none
     # Maximize CPU frequency governor permanently
     write /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor performance
     write /sys/devices/system/cpu/cpu1/cpufreq/scaling_governor performance
@@ -409,6 +420,8 @@ on property:sys.boot_completed=1
     start gbos_devname
     start gbos_talkback
     start gbos_iptsd
+    start gbos_camera
+    start gbos_sleep_guard
     start gbos_wmsize
     start gbos_displaydiag
     start gbos_aidiag
@@ -502,6 +515,21 @@ service gbos_iptsd /system/bin/sh /postinstall/gbos/surface/iptsd-run.sh $N
     group root input
     seclabel u:r:shell:s0
     oneshot
+    disabled
+
+# Surface Laptop 7 IPU7 webcam bridge daemon
+service gbos_camera /system/bin/sh /postinstall/gbos/surface/surface-camera.sh
+    user root
+    group root video
+    seclabel u:r:shell:s0
+    oneshot
+    disabled
+
+# Surface Laptop 7 lid and sleep guard daemon
+service gbos_sleep_guard /system/bin/sh /postinstall/gbos/surface/sleep-guard.sh
+    user root
+    group root
+    seclabel u:r:shell:s0
     disabled
 
 # ACCESSIBILITY=talkback in gbos.cfg: switch Google's TalkBack screen reader on (users 0 and 10, as gbos_skip_setup) so a blind user gets speech
@@ -862,6 +890,10 @@ if [ -f $G/audio/gbos-hda-pch/audio_config.xml ]; then
        && grep -qi 'Surface Laptop.*7th Edition' /sys/class/dmi/id/product_name 2>/dev/null; then
       cp $G/audio/mixer_paths_surface_laptop_7.xml /tmp/gbos-audio/$AC/mixer_paths.xml \
         && log "hook: audio mixer_paths for the Surface Laptop 7 (RT1320/RT721) installed"
+      if [ -f $G/audio/audio_config_surface_laptop_7.xml ]; then
+        cp $G/audio/audio_config_surface_laptop_7.xml /tmp/gbos-audio/$AC/audio_config.xml \
+          && log "hook: audio audio_config for the Surface Laptop 7 installed"
+      fi
     fi
     # ASRC lives in /tmp of the initramfs, which switch_root deletes: a bind mount of it is empty in Android (dras: "Failed to read
     # /vendor/etc/audio/gbos-gen/audio_config.xml"), so the files are copied into the tmpfs over /vendor/etc/audio below.

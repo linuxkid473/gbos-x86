@@ -15,8 +15,13 @@
 	</path>
 	<path name="Mic">
 		<ctl name="rt721 FU0F Capture Switch" value="1 1" />
+		<ctl name="rt721 FU0F Capture Volume" value="50 50" />
 	</path>
 	<path name="InternalMic">
+		<ctl name="rt1320-1 FU Capture Switch" value="1 1 1 1" />
+		<ctl name="rt1320-1 FU Capture Volume" value="50 50 50 50" />
+		<ctl name="rt1320-2 FU Capture Switch" value="1 1 1 1" />
+		<ctl name="rt1320-2 FU Capture Volume" value="50 50 50 50" />
 	</path>
 	<path name="HDMI1">
 	</path>
