@@ -1,0 +1,39 @@
+<?xml version='1.0' encoding='utf-8'?>
+<audio_config>
+	<SoundCardName>hw:sofsoundwire</SoundCardName>
+	<HiFi>
+		<Speaker>
+			<PlaybackPCM>hw:sofsoundwire,2</PlaybackPCM>
+		</Speaker>
+		<Headphone>
+			<PlaybackPCM>hw:sofsoundwire,2</PlaybackPCM>
+			<JackDev>sof-soundwire Headset Jack</JackDev>
+			<JackSwitch>2</JackSwitch>
+		</Headphone>
+		<InternalMic>
+			<CapturePCM>hw:sofsoundwire,4</CapturePCM>
+			<IntrinsicSensitivity>-2600</IntrinsicSensitivity>
+			<RampUpMs>100</RampUpMs>
+		</InternalMic>
+		<Mic>
+			<CapturePCM>hw:sofsoundwire,4</CapturePCM>
+			<CaptureMixerElem>Capture</CaptureMixerElem>
+			<JackDev>sof-soundwire Headset Jack</JackDev>
+		</Mic>
+		<HDMI1>
+			<PlaybackPCM>hw:sofsoundwire,5</PlaybackPCM>
+			<JackDev>sof-soundwire HDMI/DP,pcm=5</JackDev>
+			<PlaybackChannels>2</PlaybackChannels>
+		</HDMI1>
+		<HDMI2>
+			<PlaybackPCM>hw:sofsoundwire,6</PlaybackPCM>
+			<JackDev>sof-soundwire HDMI/DP,pcm=6</JackDev>
+			<PlaybackChannels>2</PlaybackChannels>
+		</HDMI2>
+		<HDMI3>
+			<PlaybackPCM>hw:sofsoundwire,7</PlaybackPCM>
+			<JackDev>sof-soundwire HDMI/DP,pcm=7</JackDev>
+			<PlaybackChannels>2</PlaybackChannels>
+		</HDMI3>
+	</HiFi>
+</audio_config>
