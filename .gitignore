@@ -30,6 +30,7 @@
 # Surface Laptop 7 helper binaries, built by tools/build_surface_tools.sh (not committed)
 /usb/surface/iptsd
 /usb/surface/iptsd-check-device
+/usb/surface/surface-webcam
 /usb/audio/tinymix
 /usb/modroot/
 /usb/stage0.cpio

@@ -221,13 +221,15 @@ Tested on a Surface Laptop for Business 7th Edition with Intel: boots from the s
 |---|---|
 | Wi-Fi (BE201) | `CONFIG_IWLMLD` |
 | Internal keyboard, battery/charger, fan, platform profile | Surface Aggregator: `kernel/isa_emu_patch/surface_sl7_sam.sh`, `SERIAL_8250_RUNTIME_UARTS=4`, `PINCTRL_INTEL_PLATFORM` (the last two in `configure_whl.py --generic`) |
-| Speakers, headset jack | RT1320 amp + RT721 codec on SoundWire: `python3 kernel/isa_emu_patch/sdw_sl7.py`, firmware `realtek/rt1320/` (`tools/fetch_firmware.sh`), `usb/audio/mixer_paths_surface_laptop_7.xml` |
-| Touchpad with gestures and physical click | `tools/build_surface_tools.sh` (iptsd), `usb/surface/` |
+| Speakers, headset jack, internal mic | RT1320 amp + RT721 codec on SoundWire: `python3 kernel/isa_emu_patch/sdw_sl7.py`, firmware `realtek/rt1320/` (`tools/fetch_firmware.sh`), `usb/audio/mixer_paths_surface_laptop_7.xml`, `audio_config_surface_laptop_7.xml` |
+| Touchpad with gestures, physical click and precision IDC | `tools/build_surface_tools.sh` (iptsd), `usb/surface/` |
+| Camera (OV02C10 on IPU7) | `surface-webcam` bridge (`kernel/surface-webcam.c`, `tools/build_surface_tools.sh`), `usb/surface/`, `v4l2loopback` |
+| Sleep, lid close/open guard & power profiles | `usb/surface/sleep-guard.sh` |
 | Bluetooth | nothing extra |
 | Touchscreen, suspend/resume | nothing beyond the rows above (tested by hand on the laptop) |
 | Stable picture (no ghost images or freezes) | `XE_PARAMS="enable_psr=0 enable_fbc=0"` in `gbos.cfg` |
 
-Not working: internal microphone, HDMI audio, camera. `DEVICE_MODEL="Surface Laptop 7"` in `gbos.cfg` shows
+Not working: HDMI audio. `DEVICE_MODEL="Surface Laptop 7"` in `gbos.cfg` shows
 that name as Model / Device name in Settings. Tests: `tools/test_audio_config.sh`, `tools/test_iptsd_run.sh`, `tools/test_device_model.sh`.
 Credit: nierdal's write-up and patches in linux-surface/linux-surface issue #1710 (SAM entry, SoundWire analysis, touchpad calibration and
 `LiftGraceMs`), and alex-lentz's iptsd fork.

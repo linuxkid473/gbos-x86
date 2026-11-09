@@ -2,6 +2,7 @@
 # Build the static helper binaries of the Surface Laptop 7 support in an amd64 Debian container:
 #   usb/surface/iptsd, usb/surface/iptsd-check-device   touchpad daemon: github.com/alex-lentz/iptsd (fork of linux-surface/iptsd with
 #       Surface Laptop 7 support) at a pinned commit, plus tools/iptsd/0004-... (Touchpad LiftGraceMs, by nierdal)
+#   usb/surface/surface-webcam                          userspace bridge daemon for Lunar Lake IPU7 raw sensor -> v4l2loopback
 #   usb/audio/tinymix                                   tinyalsa's mixer tool at a pinned commit, for the sound diagnostics (mixdiag.sh)
 # Needs docker and network access (github.com, the Debian mirrors; a few hundred MB). Nothing is installed on the host. The results are
 # not committed (.gitignore): run this before tools/make_gbos86_image.sh, or attach them to a release. Everything is linked statically,
@@ -37,8 +38,11 @@ git fetch -q --depth 1 origin bbdba1e208f402c5b7d5cb3d42307a3db9f6bb1c
 git checkout -q FETCH_HEAD
 gcc -O2 -static -Iinclude -o /repo/usb/audio/tinymix utils/tinymix.c src/*.c
 strip /repo/usb/audio/tinymix
-chown $HOSTUID:$HOSTGID /repo/usb/surface/iptsd /repo/usb/surface/iptsd-check-device /repo/usb/audio/tinymix
-ls -la /repo/usb/surface/iptsd /repo/usb/surface/iptsd-check-device /repo/usb/audio/tinymix
-file /repo/usb/surface/iptsd /repo/usb/audio/tinymix | cut -c1-140
+# surface-webcam, static, for Surface Laptop 7 IPU7 webcam bridge
+gcc -O3 -static -o /repo/usb/surface/surface-webcam /repo/kernel/surface-webcam.c -lm
+strip /repo/usb/surface/surface-webcam
+chown $HOSTUID:$HOSTGID /repo/usb/surface/iptsd /repo/usb/surface/iptsd-check-device /repo/usb/surface/surface-webcam /repo/usb/audio/tinymix
+ls -la /repo/usb/surface/iptsd /repo/usb/surface/iptsd-check-device /repo/usb/surface/surface-webcam /repo/usb/audio/tinymix
+file /repo/usb/surface/iptsd /repo/usb/surface/surface-webcam /repo/usb/audio/tinymix | cut -c1-140
 echo BUILD_SURFACE_TOOLS_DONE
 INNER
