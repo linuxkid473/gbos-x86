@@ -429,8 +429,8 @@ on property:sys.boot_completed=1
 
 # update_engine runs normally to satisfy GMS binder without crashing
 
-# Skip SetupWizard completely and launch desktop (disables blurs and optimizes animations)
-service gbos_skip_setup /system/bin/sh -c "sleep 1; settings put --user 0 secure user_setup_complete 1; settings put --user 10 secure user_setup_complete 1; settings put secure user_setup_complete 1; settings put global device_provisioned 1; settings put global setup_wizard_has_run 1; settings put global force_resizable_activities 1; settings put global enable_freeform_support 1; settings put global ota_disable_automatic_update 1; settings put global auto_system_update 0; settings put global disable_window_blurs 1; cmd window disable-blur 1; settings put global window_animation_scale 0; settings put global transition_animation_scale 0; settings put global animator_duration_scale 0; setprop ro.setupwizard.mode DISABLED; am start --user 10 -a android.intent.action.MAIN -c android.intent.category.HOME 2>/dev/null; am start -n com.google.android.apps.nexuslauncher/.NexusLauncherActivity -a android.intent.action.MAIN -c android.intent.category.HOME 2>/dev/null"
+# Skip SetupWizard completely and launch desktop (animations/blur are handled by optimize.sh, software rendering only)
+service gbos_skip_setup /system/bin/sh -c "sleep 1; settings put --user 0 secure user_setup_complete 1; settings put --user 10 secure user_setup_complete 1; settings put secure user_setup_complete 1; settings put global device_provisioned 1; settings put global setup_wizard_has_run 1; settings put global force_resizable_activities 1; settings put global enable_freeform_support 1; settings put global ota_disable_automatic_update 1; settings put global auto_system_update 0; setprop ro.setupwizard.mode DISABLED; am start --user 10 -a android.intent.action.MAIN -c android.intent.category.HOME 2>/dev/null; am start -n com.google.android.apps.nexuslauncher/.NexusLauncherActivity -a android.intent.action.MAIN -c android.intent.category.HOME 2>/dev/null"
     user root
     group root
     seclabel u:r:shell:s0
@@ -689,6 +689,8 @@ DROP='^ro.boot.hypervisor.protected_vm.supported=|^ro.surface_flinger.has_wide_c
   echo "ro.surface_flinger.has_HDR_display=false"
   if [ "$GPU_SW" = 1 ]; then
     echo "ro.surface_flinger.supports_background_blur=0"
+    # Read by optimize.sh: animations and window blur are only switched off while the CPU composites (hardware GPUs keep Google's defaults).
+    echo "ro.gbos.software_rendering=1"
     echo "persist.sys.sf.disable_blurs=1"
     echo "ro.launcher.blur.appLaunch=0"
     echo "log.tag.drmhwc=WARN"

@@ -39,12 +39,25 @@ setprop persist.log.tag.drmhwc WARN
 # ==============================================================================
 # 2. DISABLE WINDOW BLURS & STREAMLINE ANIMATIONS
 # ==============================================================================
-settings put global disable_window_blurs 1 2>/dev/null
-cmd window disable-blur 1 2>/dev/null
-setprop persist.sys.sf.disable_blurs 1 2>/dev/null
-settings put global window_animation_scale 0 2>/dev/null
-settings put global transition_animation_scale 0 2>/dev/null
-settings put global animator_duration_scale 0 2>/dev/null
+# Only while the CPU composites (hook.sh sets ro.gbos.software_rendering=1 then). With a hardware GPU the animations and blur stay at
+# Google's defaults: forcing them off on every boot (builds from 2026-11-04) made the UI look broken and overrode the user's settings.
+if [ "$(getprop ro.gbos.software_rendering)" = 1 ]; then
+    settings put global disable_window_blurs 1 2>/dev/null
+    cmd window disable-blur 1 2>/dev/null
+    setprop persist.sys.sf.disable_blurs 1 2>/dev/null
+    settings put global window_animation_scale 0 2>/dev/null
+    settings put global transition_animation_scale 0 2>/dev/null
+    settings put global animator_duration_scale 0 2>/dev/null
+elif [ "$(getprop persist.gbos.anim_restored)" != 1 ]; then
+    # One-time repair for installs that already got the values above written into /data by the 2026-11-04 builds.
+    settings put global disable_window_blurs 0 2>/dev/null
+    cmd window disable-blur 0 2>/dev/null
+    setprop persist.sys.sf.disable_blurs 0 2>/dev/null
+    settings put global window_animation_scale 1 2>/dev/null
+    settings put global transition_animation_scale 1 2>/dev/null
+    settings put global animator_duration_scale 1 2>/dev/null
+    setprop persist.gbos.anim_restored 1 2>/dev/null
+fi
 
 # ==============================================================================
 # 3. DISABLE SWAP (Protects storage from wear, latency spikes, and stalls)
