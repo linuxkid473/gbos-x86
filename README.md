@@ -388,7 +388,7 @@ Display size, reset it to Default.
 Needs macOS or Linux with docker, python3, qemu (for tests) and ~30 GB free. The build images used:
 `gbos-kbuild` (`kernel/docker/Dockerfile`) and `gbos-erofs` (`tools/erofs-docker/Dockerfile`).
 
-1. **Google's OS image:** `lapis/dl.sh` downloads `lapis-user/16658739/recovery.zip` from
+1. **Google's OS image:** `lapis/dl.sh` downloads `lapis-user/16693588/recovery.zip` from
    `dl.google.com`. Extract the recovery disk image from it, then pull the logical partitions (system,
    vendor, product, system_ext, system_dlkm, vendor_dlkm; slot `_a`) out of `super` with
    `tools/lp_extract.py DISK.raw lapis/parts NAME...` (run it with just `DISK.raw` to list the names).

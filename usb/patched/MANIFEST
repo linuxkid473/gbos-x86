@@ -3,7 +3,7 @@
 # early/bind:  <kind> <path on the device in stage0> <sha256 of the ORIGINAL> <patched file relative to gbos/>
 # apex:        apex <path inside every /apex/*> <sha256 of the ORIGINAL> <patched file relative to gbos/>
 # A patch is bound only over a file with exactly that sha256.
-# build Android/desktop_system/desktop:17/CL3B.260622.276.R4/16658739:user/release-keys
+# build Android/desktop_system/desktop:17/CL3B.260622.276.R5/16693588:user/release-keys
 early /new/system/lib64/libz.so 371f70d6a9392327cb36838d0cbc7af7388d1689c25d91cd343af8e58433683b patched/system.libz.so
 early /new/vendor/lib64/libz.so e45aecb65cbb40f0c3070b05aa9d974076d401ed6f2aff3081af26a14e812590 patched/vendor.libz.so
 early /new/system/lib64/libcrypto.so 0ee96c7e0cb1ffca5520d2eaca02b4fa2ccff5a8fcb753a491e85555a91c9f2a patched/system.libcrypto.so
