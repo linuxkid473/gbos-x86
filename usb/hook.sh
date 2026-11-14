@@ -344,6 +344,10 @@ if mount --bind /gbos /new/postinstall; then
   # The Trusty security VM never answers here (software KeyMint/Gatekeeper replace it) but spins one CPU core at 100%: stopped once
   # booted. TRUSTY_VM=1 in gbos.cfg keeps it running (for debugging).
   if [ "${TRUSTY_VM:-0}" = 1 ]; then TRUSTYSTOP="# gbos: Trusty VM kept (TRUSTY_VM=1)"; else TRUSTYSTOP="stop trusty_security_protected_vm_launcher"; fi
+  # Surface Laptop 7 daemons (camera bridge, lid/sleep guard): started only on a Surface. gbos_sleep_guard is not oneshot (it is a daemon on
+  # a Surface), so on any other laptop it exited at once and init restarted it every 5 s for as long as the system ran.
+  if grep -qi 'Surface' /sys/class/dmi/id/product_name 2>/dev/null; then SURFACESTART="start gbos_camera
+    start gbos_sleep_guard"; else SURFACESTART="# gbos: not a Surface, camera bridge and sleep guard not started"; fi
   IDCRC=
   if [ "${TOUCHPAD_FLICK:-1}" != 0 ]; then
     for tp in $(gbos_touchpads); do
@@ -420,8 +424,7 @@ on property:sys.boot_completed=1
     start gbos_devname
     start gbos_talkback
     start gbos_iptsd
-    start gbos_camera
-    start gbos_sleep_guard
+    $SURFACESTART
     start gbos_wmsize
     start gbos_displaydiag
     start gbos_aidiag

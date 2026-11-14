@@ -6,7 +6,7 @@
 # Hardware sensor streaming is gated on-demand (LED only lights when an app uses the camera).
 
 # Exit immediately on non-Surface / non-IPU7 hardware so service costs nothing
-if ! grep -qi 'Surface' /sys/class/dmi/id/product_name 2>/dev/null && [ ! -e /dev/media0 ]; then
+if ! grep -qi 'Surface' /sys/class/dmi/id/product_name 2>/dev/null || [ ! -e /dev/media0 ]; then
     exit 0
 fi
 
