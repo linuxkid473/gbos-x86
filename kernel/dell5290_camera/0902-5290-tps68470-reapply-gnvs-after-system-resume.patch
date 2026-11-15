@@ -1,0 +1,33 @@
+--- a/drivers/platform/x86/intel/int3472/tps68470.c
++++ b/drivers/platform/x86/intel/int3472/tps68470.c
+@@ -407,9 +407,22 @@ static void skl_int3472_tps68470_remove(struct i2c_client *client)
+ 	}
+ }
+ 
++static int skl_int3472_tps68470_resume(struct device *dev)
++{
++	dell5290_gnvs_fix();
++
++	return 0;
++}
++
++static const struct dev_pm_ops skl_int3472_tps68470_pm_ops = {
++	.resume = skl_int3472_tps68470_resume,
++	.thaw = skl_int3472_tps68470_resume,
++	.restore = skl_int3472_tps68470_resume,
++};
++
+ static const struct acpi_device_id int3472_device_id[] = {
+ 	{ "INT3472", 0 },
+ 	{ }
+ };
+ MODULE_DEVICE_TABLE(acpi, int3472_device_id);
+ 
+@@ -421,6 +435,7 @@ static struct i2c_driver int3472_tps68470 = {
+ 	.driver = {
+ 		.name = "int3472-tps68470",
+ 		.acpi_match_table = int3472_device_id,
++		.pm = &skl_int3472_tps68470_pm_ops,
+ 	},
+ 	.probe = skl_int3472_tps68470_probe,
+ 	.remove = skl_int3472_tps68470_remove,

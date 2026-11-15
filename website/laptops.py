@@ -42,6 +42,13 @@ LAPTOPS = [
          notes='Short report. Speakers were very quiet; the reporter set <code>Master Playback Volume</code> to <code>87</code> in <code>mixer_paths.xml</code> '
                '(<code>gbos-hda-pch/</code>, in the <code>gbos/audio</code> folder of the stick) and the volume was fine. 87 is the maximum; higher values are not safe for the speakers. '
                'The shipped config uses 87 from 2026-10-26, so a stick built or updated after that needs no manual edit. Nothing else was tested or reported.'),
+    dict(name='Dell Latitude 5290 2-in-1', cpu='Core i7-8650U (Kaby Lake R), 16 GB', status='works',
+         works='Wi-Fi, Bluetooth, sound, display, touchscreen, pen, touchpad, keyboard, front and rear cameras (OV5670, OV8858 with autofocus), '
+               'auto-rotation, tablet mode with on-screen keyboard (live USB)',
+         broken='',
+         notes='The MIPI cameras need the IPU3 kernel support and the camera bridge added on 2026-11-15 (<code>kernel/dell5290_camera/</code>, '
+               '<code>usb/device/</code>); rotation and tablet mode come from <code>gbos-autorotate</code>, as the image has no sensors HAL. '
+               'Picture quality in very low light is limited: there is no hardware image processor, the image is processed in software.'),
     dict(name='Lenovo ThinkPad T480', cpu='Core i5-8350U (Kaby Lake R), 16 GB DDR4, Samsung PM981 NVMe', status='works',
          works='Wi-Fi, Bluetooth, sound, touchpad, touchscreen, keyboard, brightness, display, webcam (installed to the NVMe)',
          broken='',

@@ -7,13 +7,23 @@
 # set, so the updater can no longer apply deltas to it (2026-11-22: a hand-deployed APK broke the lab update test). The script then
 # lists what it would change and stops; ship the change as an update (tools/publish_system_update.sh), or pass --over-set.
 set -e
-EJECT=1; OVERSET=0
-while [ $# -gt 0 ]; do case "$1" in --no-eject) EJECT=0; shift;; --over-set) OVERSET=1; shift;; *) break;; esac; done
-VOL=${1:-/Volumes/GBOS}
+EJECT=1 KERNEL=0 OVERSET=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --no-eject) EJECT=0; shift;;
+    --over-set) OVERSET=1; shift;;
+    --kernel) KERNEL=1; shift;;
+    *) break;;
+  esac
+done
+if [ -n "$1" ]; then VOL=$1
+elif [ "$(uname)" = Darwin ]; then VOL=/Volumes/GBOS
+else VOL=$(findmnt -rn -S LABEL=GBOS -o TARGET 2>/dev/null | head -1); VOL=${VOL:-/run/media/$USER/GBOS}
+fi
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 U=$ROOT/usb
 G=$VOL/gbos
-[ -d "$G" ] || { echo "no gbos folder on $VOL: plug the stick in (it mounts as /Volumes/GBOS)"; exit 1; }
+[ -d "$G" ] || { echo "no gbos folder on $VOL: plug the stick in (macOS: /Volumes/GBOS; Linux: mount the GBOS partition) or pass its mount point"; exit 1; }
 CHANGED=$(mktemp); trap 'rm -f "$CHANGED"' EXIT
 
 put() {  # put SRC DST(relative to gbos/): copy when different (DRY=1: only list it)
@@ -22,14 +32,14 @@ put() {  # put SRC DST(relative to gbos/): copy when different (DRY=1: only list
     [ "${DRY:-0}" = 1 ] && { echo "$2" >> "$CHANGED"; return 0; }
     mkdir -p "$(dirname "$G/$2")"
     printf '  %s\n' "$2"
-    dd if="$1" of="$G/$2.part" bs=1m 2>/dev/null && mv -f "$G/$2.part" "$G/$2"
+    dd if="$1" of="$G/$2.part" bs=1048576 2>/dev/null && mv -f "$G/$2.part" "$G/$2"
     echo "$2" >> "$CHANGED"
   fi
 }
 
 put_all() {
 for f in hook.sh stick_fat.sh install.sh aidiag.sh native_zygote.sh early_patch.sh sensor_vendor_overlay.sh sensor_trial_diag.sh tablet_mode.sh sensordiag.sh hwdetect.sh mask_vendor_modules.sh apex_patch.sh crossystem libkm_compat.so system_ext_manifest.xml soft_gk gbos_fp sysupdate.sh sysupdate.pub gbos86-updater.apk; do put "$U/$f" "$f"; done
-for d in patched audio installer kmod ksu a11y surface thermal camera display; do
+for d in patched audio installer kmod ksu a11y surface thermal camera device display; do
   [ -d "$U/$d" ] || continue
   (cd "$U" && find "$d" -type f ! -name '.DS_Store') | while read -r f; do put "$U/$f" "$f"; done
 done
@@ -39,6 +49,7 @@ if [ -f "$G/system.manifest" ] && [ $OVERSET = 0 ]; then
   R=$(ls "$U/modules/lib/modules" 2>/dev/null | head -1)
   [ -n "$R" ] && ! cmp -s "$U/modules/lib/modules/$R/gbos-build-id" "$G/modules/lib/modules/$R/gbos-build-id" 2>/dev/null &&
     echo "modules/ (kernel $R)" >> "$CHANGED"
+  [ $KERNEL = 0 ] || cmp -s "$U/out/BOOTX64.EFI" "$VOL/EFI/BOOT/BOOTX64.EFI" 2>/dev/null || echo "EFI/BOOT/BOOTX64.EFI (--kernel)" >> "$CHANGED"
   if [ -s "$CHANGED" ]; then
     echo "refusing: $VOL holds the published update set seq $(sed -n 's/^seq //p' "$G/system.manifest" | head -n 1) (gbos/system.manifest), and these differ from usb/:"
     sed 's/^/  /' "$CHANGED"
@@ -57,32 +68,75 @@ if [ -d "$MODS" ]; then
   if [ -n "$R" ] && ! cmp -s "$MODS/$R/gbos-build-id" "$G/modules/lib/modules/$R/gbos-build-id" 2>/dev/null; then
     printf '  modules/ (kernel %s: the stick has %s)\n' "$R" "$(ls "$G/modules/lib/modules" 2>/dev/null | tr '\n' ' ')"
     rm -rf "$G/modules" && cp -R "$U/modules" "$G/modules" && echo "modules/lib/modules/$R/gbos-build-id" >> "$CHANGED"
+  elif [ -n "$R" ]; then
+    (cd "$U" && find "modules/lib/modules/$R" -type f) | while read -r f; do put "$U/$f" "$f"; done
   fi
+fi
+KCHANGED=$(mktemp); trap 'rm -f "$CHANGED" "$KCHANGED"' EXIT
+if [ $KERNEL = 1 ]; then
+  K=$U/out/BOOTX64.EFI
+  [ -f "$K" ] || { echo "no $K (kernel/build_kernel.sh builds it)"; exit 1; }
+  if [ "$(uname)" = Darwin ]; then EFIVOL=/Volumes/EFI
+  else
+    EFIDEV=$(lsblk -nro PATH,LABEL "/dev/$(lsblk -no PKNAME "$(findmnt -rn -T "$VOL" -o SOURCE)" | head -1)" 2>/dev/null | awk '$2=="EFI" {print $1; exit}')
+    EFIVOL=$([ -n "$EFIDEV" ] && findmnt -rn -S "$EFIDEV" -o TARGET | head -1)
+    if [ -z "$EFIVOL" ] && [ -n "$EFIDEV" ]; then
+      udisksctl mount -b "$EFIDEV" >/dev/null 2>&1 && EFIVOL=$(findmnt -rn -S "$EFIDEV" -o TARGET | head -1)
+    fi
+  fi
+  [ -n "$EFIVOL" ] && [ -d "$EFIVOL/EFI/BOOT" ] || { echo "the stick's EFI partition is not mounted (${EFIVOL:-not found}): mount it and retry"; exit 1; }
+  for dst in "$EFIVOL/EFI/BOOT/BOOTX64.EFI" "$VOL/EFI/BOOT/BOOTX64.EFI"; do
+    [ -d "$(dirname "$dst")" ] || continue
+    if ! cmp -s "$K" "$dst"; then
+      printf '  kernel -> %s (%s)\n' "$dst" "$(grep -a -m1 -o '#[0-9]\+ SMP' "$K" | head -1)"
+      dd if="$K" of="$dst.part" bs=1048576 2>/dev/null && mv -f "$dst.part" "$dst"
+      echo "$dst" >> "$KCHANGED"
+    fi
+  done
 fi
 # the stick's files that this project no longer ships (the removed AI stand-in; the unsigned rotation overlay, now display/)
 [ -d "$G/localai" ] && { printf '  removing localai/\n'; rm -rf "$G/localai"; }
 # gbos/system.manifest names the stick's exact set (docs/system-update.md); after a change it no longer does, and menu 1 would copy a
 # wrong one to the laptop. Remake it with tools/make_system_update.sh manifest if you want the laptop to know its set.
-if [ -s "$CHANGED" ] && [ -f "$G/system.manifest" ]; then printf '  removing system.manifest (it described the stick before this deploy)\n'; rm -f "$G/system.manifest"; fi
+if { [ -s "$CHANGED" ] || [ -s "$KCHANGED" ]; } && [ -f "$G/system.manifest" ]; then printf '  removing system.manifest (it described the stick before this deploy)\n'; rm -f "$G/system.manifest"; fi
 [ -f "$G/sensors/gbos-latitude7320-rotation-policy.apk" ] &&
   { printf '  removing sensors/gbos-latitude7320-rotation-policy.apk (unsigned; display/ has the signed one)\n'
     rm -f "$G/sensors/gbos-latitude7320-rotation-policy.apk"; }
-[ -s "$CHANGED" ] || echo "  nothing to copy: the stick already matches usb/"
+[ -s "$CHANGED" ] || [ -s "$KCHANGED" ] || echo "  nothing to copy: the stick already matches usb/"
 sync
 
 # verify from the disk, not the cache: remount (if it is a real volume), then compare every file we copied
-DEV=$(diskutil info "$VOL" 2>/dev/null | awk -F: '/Device Identifier/{gsub(/ /,"",$2); print $2}')
-WHOLE=$(diskutil info "$VOL" 2>/dev/null | awk -F: '/Part of Whole/{gsub(/ /,"",$2); print $2}')
-if [ -n "$DEV" ] && [ -s "$CHANGED" ]; then
-  diskutil unmount "$VOL" >/dev/null && diskutil mount "$DEV" >/dev/null
+DEV= WHOLE=
+if [ "$(uname)" = Darwin ]; then
+  DEV=$(diskutil info "$VOL" 2>/dev/null | awk -F: '/Device Identifier/{gsub(/ /,"",$2); print $2}')
+  WHOLE=$(diskutil info "$VOL" 2>/dev/null | awk -F: '/Part of Whole/{gsub(/ /,"",$2); print $2}')
+  if [ -n "$DEV" ] && [ -s "$CHANGED" ]; then
+    diskutil unmount "$VOL" >/dev/null && diskutil mount "$DEV" >/dev/null
+  fi
+else
+  DEV=$(findmnt -rn -T "$VOL" -o SOURCE 2>/dev/null)
+  [ -n "$DEV" ] && WHOLE=$(lsblk -no PKNAME "$DEV" 2>/dev/null | head -1)
+  if [ -s "$CHANGED" ]; then
+    while read -r f; do dd if="$G/$f" iflag=nocache count=0 2>/dev/null; dd of="$G/$f" oflag=nocache conv=notrunc,fdatasync count=0 2>/dev/null; done < "$CHANGED"
+  fi
 fi
 BAD=0
 while read -r f; do
   cmp -s "$U/$f" "$G/$f" || { echo "VERIFY FAILED: $f"; BAD=1; }
 done < "$CHANGED"
+while read -r f; do
+  [ "$(uname)" = Darwin ] || dd if="$f" iflag=nocache count=0 2>/dev/null
+  cmp -s "$U/out/BOOTX64.EFI" "$f" || { echo "VERIFY FAILED: $f"; BAD=1; }
+done < "$KCHANGED"
 [ $BAD = 0 ] || { echo "some files did not verify; the stick is NOT ejected"; exit 1; }
-echo "verified $(wc -l < "$CHANGED" | tr -d ' ') file(s)"
+echo "verified $(( $(wc -l < "$CHANGED") + $(wc -l < "$KCHANGED") )) file(s)"
 if [ $EJECT = 1 ] && [ -n "$WHOLE" ]; then
-  sync; diskutil unmount "$VOL" >/dev/null 2>&1 || true
-  diskutil eject "/dev/$WHOLE" | tail -1
+  sync
+  if [ "$(uname)" = Darwin ]; then
+    diskutil unmount "$VOL" >/dev/null 2>&1 || true
+    diskutil eject "/dev/$WHOLE" | tail -1
+  else
+    for p in $(lsblk -nro NAME,MOUNTPOINT "/dev/$WHOLE" | awk '$2!="" {print $1}'); do udisksctl unmount -b "/dev/$p" >/dev/null 2>&1 || umount "/dev/$p" 2>/dev/null || true; done
+    udisksctl power-off -b "/dev/$WHOLE" >/dev/null 2>&1 && echo "ejected /dev/$WHOLE" || echo "unmounted; unplug the stick (/dev/$WHOLE)"
+  fi
 fi

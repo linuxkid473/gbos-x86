@@ -98,7 +98,7 @@ if [ -n "${GBOS_SENSOR_PAYLOAD:-}" ]; then
   sh "$ROOT/sensors/trogdor/image_payload.sh" stage "$GBOS_SENSOR_PAYLOAD" "$G"
 fi
 [ -f "$U/Add-gbOS-to-Windows-BootMenu.bat" ] && cp "$U/Add-gbOS-to-Windows-BootMenu.bat" "$STAGE/gbos/Add-gbOS-to-Windows-BootMenu.bat"
-for d in firmware patched audio installer kmod modules surface ksu thermal display; do cp -R "$U/$d" "$G/$d"; done
+for d in firmware patched audio installer kmod modules surface ksu thermal device display; do cp -R "$U/$d" "$G/$d"; done
 # Stage0 screen reader (Speakup + espeakup, usb/a11y/, filled by tools/fetch_a11y_tools.sh): only used when booting the stick.
 [ -d "$U/a11y/bin" ] && cp -R "$U/a11y" "$G/a11y"
 # Camera calibration (colour matrices and lens shading extracted from the Windows tuning files with

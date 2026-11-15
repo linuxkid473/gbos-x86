@@ -134,6 +134,9 @@ _m('DELL_LAPTOP', 'DELL_WMI', 'DELL_SMBIOS', 'DELL_WMI_DESCRIPTOR', 'THINKPAD_AC
 # has not been compiled with CONFIG_AMD_PMC", ~40% battery overnight; issue 51). Binds by ACPI id (AMDI0005..) through coldplug.
 # AMD_PMF is left out: it needs AMDTEE + AMD_SFH_HID and is not required for S0i3.
 _m('AMD_PMC')
+_y('MEDIA_PCI_SUPPORT', 'MFD_INTEL_LPSS_ACPI')
+_m('IPU_BRIDGE', 'VIDEO_IPU3_CIO2', 'INTEL_SKL_INT3472', 'COMMON_CLK_TPS68470', 'REGULATOR_TPS68470', 'GPIO_TPS68470',
+   'VIDEO_OV5670', 'VIDEO_OV8858', 'VIDEO_DW9714', 'VIDEO_OV5693', 'VIDEO_OV8865', 'VIDEO_OV7251', 'VIDEO_OV2740', 'VIDEO_HI556')
 # Storage / card reader / webcam / ethernet
 _y('MMC', 'USB_VIDEO_CLASS')
 _m('MMC_SDHCI', 'MMC_SDHCI_PCI', 'MMC_REALTEK_PCI', 'MISC_RTSX_PCI', 'MISC_RTSX_USB', 'R8169', 'E1000E', 'IGC',

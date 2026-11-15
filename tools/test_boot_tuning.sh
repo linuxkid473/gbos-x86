@@ -223,6 +223,7 @@ GBOS_MODALIAS="$TMP/modules.alias"; : > "$GBOS_MODALIAS"
 GBOS_PROC_MODULES="$TMP/proc_modules"
 gbos_load_opmodes() { :; }
 gbos_preload_phy() { :; }   # #62's r8169 PHY preload: not under test here
+gbos_camera_pmic_first() { :; }
 mdev() { :; }
 log() { :; }
 sleep() { echo s >> "$TMP/sleeps"; }
@@ -240,7 +241,7 @@ cp_case() {
 cp_case "5 3 0" 3 2      # settles: no sleep after the empty pass
 cp_case "0" 1 0          # nothing to load (the hook's second run): no sleep at all
 cp_case "1 1 1 1 1" 4 4  # still loading: capped at 4 passes, each followed by the settle
-unset -f sleep gbos_coldplug_pass gbos_preload_phy mdev gbos_settle_devices
+unset -f sleep gbos_coldplug_pass gbos_preload_phy gbos_camera_pmic_first mdev gbos_settle_devices
 
 # Settle after a pass: returns once the modalias count holds for two polls, at most GBOS_SETTLE_POLLS polls.
 sed -n '/^gbos_settle_devices() {/,/^}/p' "$ROOT/usb/hwdetect.sh" > "$TMP/settle.sh"

@@ -8,7 +8,7 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 # install.sh's lists, as it builds them (FILES, gbos_fp, DIRS and the optional folders), on a fake stick with everything.
 G=$T/gbos; mkdir -p "$G"
-for d in sensors camera thermal display; do mkdir -p "$G/$d"; done
+for d in sensors camera thermal display device; do mkdir -p "$G/$d"; done
 : > "$G/gbos_fp"
 sed -n '/^FILES="/,/^for d in \$DIRS; do \[ -d/p' "$ROOT/usb/install.sh" | grep -v -e '^for d in \$DIRS' -e '^for f in \$FILES' > "$T/lists.sh"
 FILES=; DIRS=; . "$T/lists.sh"

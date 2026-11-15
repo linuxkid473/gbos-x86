@@ -280,6 +280,10 @@ if ! have_ksu; then
   fetch "$REL_KSU/$KSUD" "usb/ksu/ksud" "$KSUD_SHA"
   chmod 755 usb/ksu/ksud
 else say "    KernelSU manager + ksud: present"; fi
+if [ ! -x usb/device/ipu3-webcam ]; then
+  mkdir -p build; sh tools/build_camera_tools.sh > build/camera-build.log 2>&1 && say "    camera bridge (ipu3-webcam): built" \
+    || printf '\nWARNING: camera bridge not built (build/camera-build.log): IPU3 cameras will not work in this image.\n'
+else say "    camera bridge (ipu3-webcam): present"; fi
 
 # Latitude 7320 cameras: check the payload only now, after step 3/4 put the module tree and firmware in usb/ (a fresh clone has
 # neither before; issue 65). The release modules (r5) and firmware (r4) have no IPU6 driver or ipu6_fw.bin, so without a kernel

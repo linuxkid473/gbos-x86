@@ -202,7 +202,7 @@ for f in hook.sh stick_fat.sh aidiag.sh native_zygote.sh early_patch.sh sensor_v
   [ -f "$U/$f" ] && cp "$U/$f" "$MNT_SYS/gbos/$f"
 done
 
-for d in firmware patched audio installer kmod modules surface ksu sensors camera thermal display; do
+for d in firmware patched audio installer kmod modules surface ksu sensors camera thermal display device; do
   [ -d "$U/$d" ] && { mkdir -p "$MNT_SYS/gbos/$d"; cp -R "$U/$d/." "$MNT_SYS/gbos/$d/"; }
 done
 # Latitude 7320 sensor sub-HAL built by build.sh (GBOS_SENSOR_PAYLOAD), as tools/make_gbos86_image.sh stages it.

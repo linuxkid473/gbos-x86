@@ -119,7 +119,7 @@ DIRS="firmware patched audio installer kmod modules surface ksu"
 # stick only, never in git: read by installer/bin/ipu6-camera-bridge.sh), thermal/ (hook.sh's Latitude 7320
 # thermal config), display/ (hook.sh's Latitude 7320 adaptive-brightness overlay and panel curve). Without camera/
 # and thermal/ an installed system silently booted without them.
-for d in sensors camera thermal display; do [ ! -d "$G/$d" ] || DIRS="$DIRS $d"; done
+for d in sensors camera thermal display device; do [ ! -d "$G/$d" ] || DIRS="$DIRS $d"; done
 for f in $FILES; do [ -f $G/$f ] || die "missing gbos/$f on the stick"; done
 for d in $DIRS; do [ -d $G/$d ] || die "missing gbos/$d/ on the stick"; done
 tool sfdisk --version > /dev/null 2>&1 || die "partitioning tools in gbos/installer/ don't run"
@@ -604,7 +604,7 @@ for f in $FILES; do
 done
 
 say "Copying hardware drivers and firmware ..."
-_tot_kb=$(du -sk $G/firmware $G/modules $G/ksu $G/patched $G/installer $G/kmod $G/audio $G/surface 2>/dev/null | awk '{s+=$1} END {print s}')
+_tot_kb=$(du -sk $G/firmware $G/modules $G/ksu $G/patched $G/installer $G/kmod $G/audio $G/surface $G/device 2>/dev/null | awk '{s+=$1} END {print s}')
 [ -z "$_tot_kb" ] || [ "$_tot_kb" -le 0 ] && _tot_kb=1
 _tot_mb=$(( _tot_kb / 1024 ))
 [ $_tot_mb -le 0 ] && _tot_mb=1

@@ -175,6 +175,7 @@ Reports from people who booted the stick (updated 2026-11-18). A row says what w
 | HP Envy 13-aq0xxx | Core i5-8265U, 8 GB | **Works** | Reported as working great, live and installed to the NVMe (kernel #32) | Per-device detail is in the forum thread |
 | Dell Latitude 5300 2-in-1 | Core i7-8665U, 16 GB | **Works** | Wi-Fi, Bluetooth, sound, touchpad, backlight, display, touchscreen, hinge, webcam, pen, suspend | Auto-rotate (sensor driver added to the next kernel), mic-mute LED |
 | Dell Latitude 5290 2-in-1 | Core i5 (model not given) | **Works** | Sound, once the speaker volume is raised | Short report: speakers were very quiet, `Master Playback Volume` 87 in `gbos-hda-pch/mixer_paths.xml` fixed it (shipped from 2026-10-26) |
+| Dell Latitude 5290 2-in-1 | Core i7-8650U, 16 GB | **Works** | Wi-Fi, Bluetooth, sound, display, touchscreen, pen, touchpad, keyboard, front and rear cameras, auto-rotation, tablet mode with on-screen keyboard (live USB) | Cameras need the IPU3 support from 2026-11-15 (section below); picture quality in very low light is limited (software image processing) |
 | Lenovo ThinkPad T480 | Core i5-8350U, 16 GB | **Works** | Wi-Fi, Bluetooth, sound, touchpad, touchscreen, keyboard, brightness, display, webcam (installed) | Slow to wake; Wi-Fi needs a toggle after sleep |
 | MSI Sword 16 HX | Core i7-13700HX | **Works** | Reported as working perfectly out of the box, used daily for a week | Games (the one exception named). Discord report |
 | Dell Inspiron 14 5440 | Core i3-1305U | **Works** | Display (i915), Wi-Fi, Bluetooth, sound, TalkBack from the first boot, installed next to another OS | Speakers were quiet until the volume 87 change; spoken boot menu fixed 2026-11-05 (kernel #46) |
@@ -232,11 +233,35 @@ The kernel (#31) builds drivers for most Intel-era laptops as **modules**, and b
 | Motion sensors / auto-rotate | HID-over-ISH accel/gyro IIO drivers expose live `accel_3d`/`gyro_3d` values, but the vendor Desktop-IIO Sensors HAL binary has no matching device identifiers and reports no sensors. Its `hals.conf` selects only that HAL; there is no sensor XML override or HAL source/build tree here. A compatible Sensors 2.1 sub-HAL and validated Latitude axis/mount calibration are still required; renaming IIO devices or guessing a matrix is unsafe |
 | Hotkeys, fans, rfkill | Dell, HP, ThinkPad, IdeaPad, Asus, Acer, Samsung, MSI, Sony, Fujitsu, LG, Intel HID/VBTN |
 | Other | SD card readers (Realtek, SDHCI), USB webcams (UVC), Ethernet (r8169, e1000e, igc, USB r8152 and friends) |
+| MIPI cameras (Skylake/Kaby Lake 2-in-1s) | IPU3 CIO2 + INT3472/TPS68470 power + OV5670/OV8858/OV5693/OV8865/OV7251 sensors, through a software bridge into the USB camera HAL (`usb/device/`); working on the Latitude 5290 2-in-1 (front and rear) |
 
 **Honest limits.** Thirty-six machines have been booted (below); anything not on that list is built and wired but untested on
 hardware. Sound on SOF machines needs the codec's mixer controls to match the generated config (best effort);
-suspend/resume, fingerprint readers, IPU6 cameras and NVIDIA/AMD discrete GPUs are not covered. Build the payload with
+suspend/resume, fingerprint readers, IPU6 cameras and NVIDIA/AMD discrete GPUs are not covered (IPU3 cameras: section below). Build the payload with
 `tools/fetch_firmware.sh` (firmware, not committed) and `kernel/isa_emu_patch/build_generic*.sh` (modules, not committed).
+
+## Dell Latitude 5290 2-in-1 (Kaby Lake R): cameras
+
+**Both cameras, screen auto-rotation and tablet mode work on hardware** (2026-11-15, Core i7-8650U, live USB). The rest of this tablet is the same Intel/Dell platform as the Latitude 5300 2-in-1
+(touchscreen, pen, Wi-Fi 8265, HDA sound: rows above). Its two cameras are MIPI sensors on the IPU3, which no Android camera HAL here
+drives, so they need:
+
+| Part | Needs |
+|---|---|
+| Kernel: IPU3 CIO2, ipu-bridge, INT3472/TPS68470 power, OV5670 (front), OV8858 (rear), DW9714 (rear focus) | `kernel/configure_whl.py` (GENERIC, incl. `MFD_INTEL_LPSS_ACPI` for the rear camera's I2C4), `kernel/dell5290_camera/` (Dell board data, I2C4 resource quirk, GNVS fix, OV8858 ACPI id; from vitovt/dell-5290-camera-kernel, see its README) |
+| Sensors bound after their power controller | `usb/hwdetect.sh` (`gbos_camera_pmic_first`), re-probe in `usb/device/ipu3-camera.sh` |
+| Raw Bayer -> picture (no ISP): demosaic, auto exposure/white balance, autofocus, rotation | `ipu3-webcam` bridge (`kernel/ipu3-webcam.c`, `tools/build_camera_tools.sh`) |
+| Android sees "front" and "back" cameras | `usb/device/ipu3-camera.sh`: v4l2loopback + fake UVC devices for the USB camera HAL |
+| Evidence after a test boot | `hwdetect.txt` (`== mipi cameras`), `ipu3-camera.txt`, `camera-*.txt`, `front-*.ppm`/`rear-*.ppm`, `tablet.txt` (cameras, rotation sensors, tablet mode) |
+
+| Screen auto-rotation (Google's image has no sensors HAL, so Android sees no accelerometer) | `gbos-autorotate` (`kernel/gbos-autorotate.c`), `usb/device/autorotate.sh` |
+| Tablet layout and on-screen keyboard when the keyboard is detached (the internal i8042 keyboard device stays present) | `gbos-autorotate` unbinds it in tablet mode |
+| Cameras after sleep (the TPS68470 loses its clock/regulator/GPIO setup) | `kernel/dell5290_camera/0903`-`0905` |
+| Cooler running | `usb/device/power.sh` (`balanced` CPU profile on laptops) |
+
+Settings (`gbos.cfg`): `CAMERA=0`, `CAMERA_FLICKER=50|60`, `CAMERA_ROTATE_<sensor>=180`, `CAMERA_MIRROR_<sensor>=1`, `AUTOROTATE=0|always`,
+`AUTOROTATE_MAP`, `TABLET_KEYBOARD=0`, `CPU_PROFILE` (`usb/device/README.md`).
+The front and rear camera cannot stream at the same time (shared PMIC).
 
 ## Microsoft Surface Laptop 7 (Intel, Core Ultra 7 266V / Lunar Lake)
 

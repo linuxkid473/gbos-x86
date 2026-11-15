@@ -1,0 +1,17 @@
+--- a/drivers/media/i2c/ov5670.c
++++ b/drivers/media/i2c/ov5670.c
+@@ -2533,6 +2533,14 @@ static int __maybe_unused ov5670_runtime_resume(struct device *dev)
+ 	delay_us = DIV_ROUND_UP(8192 * 2 * 1000,
+ 				DIV_ROUND_UP(OV5670_XVCLK_FREQ, 1000));
+ 	fsleep(delay_us);
++
++	/*
++	 * The clock-pulse minimum is not enough on some ACPI/IPU3 systems after
++	 * hibernation.  Give the TPS68470-backed rails and the sensor extra time
++	 * to settle before the first SCCB transaction in start_streaming().
++	 */
++	usleep_range(20000, 25000);
++
+ 
+ 	return 0;
+ }
