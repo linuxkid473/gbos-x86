@@ -1,0 +1,18 @@
+diff --git a/drivers/media/i2c/ov8858.c b/drivers/media/i2c/ov8858.c
+index 5776d14..6a55296 100644
+--- a/drivers/media/i2c/ov8858.c
++++ b/drivers/media/i2c/ov8858.c
+@@ -1867,11 +1867,9 @@ static int ov8858_parse_of(struct ov8858 *ov8858)
+ 	struct fwnode_handle *endpoint;
+ 	int ret;
+ 
+ 	endpoint = fwnode_graph_get_next_endpoint(dev_fwnode(dev), NULL);
+-	if (!endpoint) {
+-		dev_err(dev, "Failed to get endpoint\n");
+-		return -EINVAL;
+-	}
++	if (!endpoint)
++		return dev_err_probe(dev, -EPROBE_DEFER, "waiting for fwnode graph endpoint\n");
+ 
+ 	ret = v4l2_fwnode_endpoint_parse(endpoint, &vep);
+ 	fwnode_handle_put(endpoint);

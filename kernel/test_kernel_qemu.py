@@ -15,7 +15,12 @@ import sys
 import tempfile
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'gbrunch/tools'))
-from test_amd_kernel_qemu import closure, modinfo  # noqa: E402
+try:
+    from test_amd_kernel_qemu import closure, modinfo  # noqa: E402
+except ImportError:
+    def closure(*_a, **_k):
+        raise SystemExit('this smoke test needs the gbrunch repository next to this one (gbrunch/tools/test_amd_kernel_qemu.py)')
+    modinfo = closure
 
 ROOTS = ['i915', 'iwlmvm']
 

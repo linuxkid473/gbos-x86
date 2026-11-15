@@ -348,6 +348,14 @@ if mount --bind /gbos /new/postinstall; then
   # a Surface), so on any other laptop it exited at once and init restarted it every 5 s for as long as the system ran.
   if grep -qi 'Surface' /sys/class/dmi/id/product_name 2>/dev/null; then SURFACESTART="start gbos_camera
     start gbos_sleep_guard"; else SURFACESTART="# gbos: not a Surface, camera bridge and sleep guard not started"; fi
+  CAMSTART=
+  for d in /sys/bus/pci/devices/*; do
+    [ "$(cat $d/vendor 2>/dev/null):$(cat $d/device 2>/dev/null)" = 0x8086:0x9d32 ] || continue
+    CAMSTART="start gbos_ipu3cam"
+    SURFACESTART=$(echo "$SURFACESTART" | sed '/^ *start gbos_camera$/d')
+    log "hook: IPU3 CIO2 found (${d##*/}): camera bridge gbos_ipu3cam queued"
+    break
+  done
   IDCRC=
   if [ "${TOUCHPAD_FLICK:-1}" != 0 ]; then
     for tp in $(gbos_touchpads); do
@@ -415,11 +423,7 @@ on property:sys.boot_completed=1
     write /sys/kernel/tracing/tracing_on 0
     # Speakup synth hardware probe causes kernel panic if unassigned
     write /sys/accessibility/speakup/synth none
-    # Maximize CPU frequency governor permanently
-    write /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor performance
-    write /sys/devices/system/cpu/cpu1/cpufreq/scaling_governor performance
-    write /sys/devices/system/cpu/cpu2/cpufreq/scaling_governor performance
-    write /sys/devices/system/cpu/cpu3/cpufreq/scaling_governor performance
+    start gbos_power
     $TRUSTYSTOP
     start gbos_skip_setup
     start gbos_optimize
@@ -428,6 +432,9 @@ on property:sys.boot_completed=1
     start gbos_talkback
     start gbos_iptsd
     $SURFACESTART
+    $CAMSTART
+    start gbos_tabletdiag
+    start gbos_autorotate
     start gbos_wmsize
     start gbos_displaydiag
     start gbos_aidiag
@@ -537,6 +544,34 @@ service gbos_iptsd /system/bin/sh /postinstall/gbos/surface/iptsd-run.sh $N
 service gbos_camera /system/bin/sh /postinstall/gbos/surface/surface-camera.sh
     user root
     group root video
+    seclabel u:r:shell:s0
+    oneshot
+    disabled
+
+service gbos_power /system/bin/sh /postinstall/gbos/device/power.sh $N ${GPU_SW:-0}
+    user root
+    group root
+    seclabel u:r:shell:s0
+    oneshot
+    disabled
+
+service gbos_ipu3cam /system/bin/sh /postinstall/gbos/device/ipu3-camera.sh $N
+    user root
+    group root camera
+    seclabel u:r:shell:s0
+    oneshot
+    disabled
+
+service gbos_autorotate /system/bin/sh /postinstall/gbos/device/autorotate.sh $N
+    user root
+    group root input
+    seclabel u:r:shell:s0
+    oneshot
+    disabled
+
+service gbos_tabletdiag /system/bin/sh -c "sleep 75; sh /postinstall/gbos/device/diag.sh $N"
+    user root
+    group root input camera
     seclabel u:r:shell:s0
     oneshot
     disabled

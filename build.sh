@@ -159,8 +159,8 @@ if [ -z "$BUILD_TYPE" ]; then
   fi
 fi
 
-REL=https://github.com/linuxkid473/gbos-x86/releases/download/v40   # r5 = the module tree of kernel #42 (release v40: tag to be created, upload build/dl/$MODS)
-MODS=gbos86-modules-6.18.21-gbos-whl-r5.tar.xz;            MODS_SHA=67b1b97f64efc2017df685357adc1299e96b047963e3a22a3c20bd87f002db46
+REL=https://github.com/linuxkid473/gbos-x86/releases/download/v41
+MODS=gbos86-modules-6.18.21-gbos-whl-r6.tar.xz;            MODS_SHA=7fba6ed3907dceb23f888e33055a5868aa1f0987c6f5e6cb872f800d281a689e
 REL_FW=https://github.com/linuxkid473/gbos-x86/releases/download/v35
 FW=gbos86-firmware-12dfe670-sof2026.09.2-r4.tar.xz;        FW_SHA=8ad4ce620194e6555fe747bff95eb75b74c3c8f198ff7e3d5280c02f37bb1463
 # KernelSU's userspace (the kernel part is built into the kernel, see kernel/kernelsu/): the manager app and the daemon.
@@ -183,7 +183,7 @@ sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' '
 # gbos/modules/lib/modules/$(uname -r)) and a tree from another build is rejected by the kernel (module signature, symbol CRCs).
 KREL=$(grep -a -m1 -o '[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*-gbos-whl+\{0,1\} (' usb/out/BOOTX64.EFI 2>/dev/null | sed 's/ ($//')
 have_mods() {
-  [ -n "$KREL" ] && {
+  [ -n "$KREL" ] && ls usb/modules/lib/modules/*/kernel/drivers/media/pci/intel/ipu3/ipu3-cio2.ko >/dev/null 2>&1 && {
     [ -f "usb/modules/lib/modules/$KREL/kernel/drivers/iio/accel/hid-sensor-accel-3d.ko" ] || \
     [ -f "usb/modules/lib/modules/${KREL}+/kernel/drivers/iio/accel/hid-sensor-accel-3d.ko" ] || \
     [ -f "usb/modules/lib/modules/${KREL%+}/kernel/drivers/iio/accel/hid-sensor-accel-3d.ko" ]
@@ -258,6 +258,10 @@ if ! have_ksu; then
   fetch "$REL_KSU/$KSUD" "usb/ksu/ksud" "$KSUD_SHA"
   chmod 755 usb/ksu/ksud
 else say "    KernelSU manager + ksud: present"; fi
+if [ ! -x usb/device/ipu3-webcam ]; then
+  mkdir -p build; sh tools/build_camera_tools.sh > build/camera-build.log 2>&1 && say "    camera bridge (ipu3-webcam): built" \
+    || printf '\nWARNING: camera bridge not built (build/camera-build.log): IPU3 cameras will not work in this image.\n'
+else say "    camera bridge (ipu3-webcam): present"; fi
 
 if [ "$BUILD_TYPE" = "dualboot" ]; then
   [ -n "$TARGET_DISK" ] || die "Target disk required for dualboot. Pass --target /dev/sdX"

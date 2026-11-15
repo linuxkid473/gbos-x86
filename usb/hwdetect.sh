@@ -90,8 +90,17 @@ gbos_coldplug_pass() {
     | xargs modprobe -a -q 2>/dev/null
 }
 
+gbos_camera_pmic_first() {
+  ls -d /sys/bus/acpi/devices/INT3472:* >/dev/null 2>&1 || return 0
+  grep -q '^intel_skl_int3472' /proc/modules && return 0
+  modprobe -a -q intel_skl_int3472_tps68470 intel_skl_int3472_discrete clk_tps68470 tps68470_regulator gpio_tps68470 2>/dev/null
+  sleep 1
+  log "hwdetect: camera PMIC (INT3472) drivers loaded before coldplug: $(grep -oE '^(intel_skl_int3472[a-z0-9_]*|clk_tps68470|tps68470_regulator|gpio_tps68470) ' /proc/modules | tr -d ' ' | tr '\n' ' ')"
+}
+
 gbos_coldplug() {
   [ -f /lib/modules/$(uname -r)/modules.alias ] || { log "hwdetect: no modules.alias, skipping coldplug"; return 1; }
+  gbos_camera_pmic_first
   # Not loaded by alias: ACPI video (brightness keys), battery already built in.
   p=1; before=$(wc -l < /proc/modules)
   while [ $p -le 4 ]; do
@@ -175,6 +184,17 @@ gbos_hw_report() {
       [ -e $c/status ] && { echo "${c##*/} status=$(cat $c/status) enabled=$(cat $c/enabled 2>/dev/null)"; head -6 $c/modes 2>/dev/null | sed 's/^/    /'; }
     done
     echo "== video devices (cameras)"; for v in /sys/class/video4linux/*; do [ -e $v ] && echo "${v##*/} $(cat $v/name)"; done
+    echo "== mipi cameras (acpi: status, i2c device: driver)"
+    for a in /sys/bus/acpi/devices/INT3472:* /sys/bus/acpi/devices/INT347* /sys/bus/acpi/devices/INT33BE:* /sys/bus/acpi/devices/OVTI* \
+             /sys/bus/acpi/devices/INT3537:* /sys/bus/acpi/devices/INT3446:*; do
+      [ -e "$a" ] || continue
+      echo "${a##*/} status=$(cat $a/status 2>/dev/null) phys=$(readlink $a/physical_node 2>/dev/null | sed 's#.*/##')"
+    done | sort -u
+    for d in /sys/bus/i2c/devices/i2c-INT34* /sys/bus/i2c/devices/i2c-INT33BE* /sys/bus/i2c/devices/i2c-OVTI*; do
+      [ -e "$d" ] && echo "${d##*/} driver=$(readlink $d/driver 2>/dev/null | sed 's#.*/##')"
+    done
+    [ -x $G/device/ipu3-webcam ] && { echo "-- ipu3-webcam --probe"; $G/device/ipu3-webcam --probe 2>&1; }
+    dmesg | grep -iE 'int3472|tps68470|ipu3|cio2|ipu.bridge|ov5670|ov8858|ov5693|ov8865|ov7251|dw9714|INT3446|INT347|lpss.*conflict|GNVS' | head -n 60
     for m in xe i915; do
       [ -d /sys/module/$m/parameters ] && { echo "== $m parameters"; for p in /sys/module/$m/parameters/*; do echo "${p##*/}=$(cat $p 2>/dev/null)"; done; }
     done

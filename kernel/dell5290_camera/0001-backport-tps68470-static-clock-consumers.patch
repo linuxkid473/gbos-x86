@@ -1,0 +1,52 @@
+--- a/drivers/platform/x86/intel/int3472/tps68470.h
++++ b/drivers/platform/x86/intel/int3472/tps68470.h
+@@ -12,11 +12,18 @@
+ #define _INTEL_SKL_INT3472_TPS68470_H
+ 
+ struct gpiod_lookup_table;
++struct tps68470_clk_consumer;
+ struct tps68470_regulator_platform_data;
+ 
+ struct int3472_tps68470_board_data {
+ 	const char *dev_name;
+ 	const struct tps68470_regulator_platform_data *tps68470_regulator_pdata;
++	/*
++	 * Static clock consumers used instead of ACPI dependency traversal on
++	 * systems where sensor _DEP does not list INT3472 correctly.
++	 */
++	unsigned int n_clk_consumers;
++	const struct tps68470_clk_consumer *clk_consumers;
+ 	unsigned int n_gpiod_lookups;
+ 	struct gpiod_lookup_table *tps68470_gpio_lookup_tables[];
+ };
+--- a/drivers/platform/x86/intel/int3472/tps68470.c
++++ b/drivers/platform/x86/intel/int3472/tps68470.c
+@@ -155,9 +155,25 @@
+ 	if (!adev)
+ 		return -ENODEV;
+ 
+-	n_consumers = skl_int3472_fill_clk_pdata(&client->dev, &clk_pdata);
+-	if (n_consumers < 0)
+-		return n_consumers;
++	board_data = int3472_tps68470_get_board_data(dev_name(&client->dev));
++	if (board_data && board_data->n_clk_consumers) {
++		clk_pdata = devm_kzalloc(&client->dev,
++					 struct_size(clk_pdata, consumers,
++						     board_data->n_clk_consumers),
++					 GFP_KERNEL);
++		if (!clk_pdata)
++			return -ENOMEM;
++
++		clk_pdata->n_consumers = board_data->n_clk_consumers;
++		for (i = 0; i < board_data->n_clk_consumers; i++)
++			clk_pdata->consumers[i] = board_data->clk_consumers[i];
++
++		n_consumers = board_data->n_clk_consumers;
++	} else {
++		n_consumers = skl_int3472_fill_clk_pdata(&client->dev, &clk_pdata);
++		if (n_consumers < 0)
++			return n_consumers;
++	}
+ 
+ 	regmap = devm_regmap_init_i2c(client, &tps68470_regmap_config);
+ 	if (IS_ERR(regmap)) {

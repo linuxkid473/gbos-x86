@@ -1,0 +1,38 @@
+diff --git a/drivers/platform/x86/intel/int3472/tps68470.c b/drivers/platform/x86/intel/int3472/tps68470.c
+index 7dfde5b..bed6e5c 100644
+--- a/drivers/platform/x86/intel/int3472/tps68470.c
++++ b/drivers/platform/x86/intel/int3472/tps68470.c
+@@ -416,13 +416,6 @@ static void skl_int3472_tps68470_remove(struct i2c_client *client)
+ 	}
+ }
+ 
+-static int skl_int3472_tps68470_resume(struct device *dev)
+-{
+-	dell5290_gnvs_fix();
+-
+-	return 0;
+-}
+-
+ #define DELL5290_VSIO_SEL_1800600UV	52
+ #define DELL5290_VD_SEL_1200000UV	12
+ #define DELL5290_VA_SEL_2815200UV	109
+@@ -537,7 +530,7 @@ static int dell5290_tps68470_restore_i2c_bridge(struct device *dev,
+ 		return dev_err_probe(dev, ret,
+ 				     "Failed to read TPS68470 secondary I2C bridge\n");
+ 
+-	dev_info(dev, "Dell 5290 2-in-1 restored TPS68470 S_I2C_CTL=0x%02x after hibernate\n",
++	dev_info(dev, "Dell 5290 2-in-1 restored TPS68470 S_I2C_CTL=0x%02x after sleep\n",
+ 		 val);
+ 
+ 	return 0;
+@@ -553,8 +546,8 @@ static int skl_int3472_tps68470_restore(struct device *dev)
+ }
+ 
+ static const struct dev_pm_ops skl_int3472_tps68470_pm_ops = {
+-	.resume = skl_int3472_tps68470_resume,
+-	.thaw = skl_int3472_tps68470_resume,
++	.resume = skl_int3472_tps68470_restore,
++	.thaw = skl_int3472_tps68470_restore,
+ 	.restore = skl_int3472_tps68470_restore,
+ };
+ 

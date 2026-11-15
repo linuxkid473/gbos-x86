@@ -92,6 +92,7 @@ FILES="super.img super.layout hook.sh aidiag.sh native_zygote.sh early_patch.sh 
 DIRS="firmware patched audio installer kmod modules surface ksu"
 for f in $FILES; do [ -f $G/$f ] || die "missing gbos/$f on the stick"; done
 for d in $DIRS; do [ -d $G/$d ] || die "missing gbos/$d/ on the stick"; done
+for d in device; do [ -d $G/$d ] && DIRS="$DIRS $d"; done
 tool sfdisk --version > /dev/null 2>&1 || die "partitioning tools in gbos/installer/ don't run"
 
 # ACTION=update in gbos.cfg: don't erase anything. Save the installed system's last 3 boots of logs
@@ -554,7 +555,7 @@ for f in $FILES; do
 done
 
 say "Copying hardware drivers and firmware ..."
-_tot_kb=$(du -sk $G/firmware $G/modules $G/ksu $G/patched $G/installer $G/kmod $G/audio $G/surface 2>/dev/null | awk '{s+=$1} END {print s}')
+_tot_kb=$(du -sk $G/firmware $G/modules $G/ksu $G/patched $G/installer $G/kmod $G/audio $G/surface $G/device 2>/dev/null | awk '{s+=$1} END {print s}')
 [ -z "$_tot_kb" ] || [ "$_tot_kb" -le 0 ] && _tot_kb=1
 _tot_mb=$(( _tot_kb / 1024 ))
 [ $_tot_mb -le 0 ] && _tot_mb=1
