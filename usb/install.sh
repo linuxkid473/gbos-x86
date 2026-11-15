@@ -88,7 +88,7 @@ done
 # Cache the kernel in RAM and unmount the EFI partition so it does not keep the target disk busy
 mkdir -p /tmp && cp "$KERNEL" /tmp/BOOTX64.EFI && KERNEL=/tmp/BOOTX64.EFI
 umount /mnt/stickefi 2>/dev/null || true
-FILES="super.img super.layout hook.sh aidiag.sh early_patch.sh hwdetect.sh apex_patch.sh crossystem bootdisk.img libkm_compat.so system_ext_manifest.xml soft_gk"
+FILES="super.img super.layout hook.sh aidiag.sh native_zygote.sh early_patch.sh hwdetect.sh apex_patch.sh crossystem bootdisk.img libkm_compat.so system_ext_manifest.xml soft_gk"
 DIRS="firmware patched audio installer kmod modules surface ksu"
 for f in $FILES; do [ -f $G/$f ] || die "missing gbos/$f on the stick"; done
 for d in $DIRS; do [ -d $G/$d ] || die "missing gbos/$d/ on the stick"; done

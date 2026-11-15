@@ -405,6 +405,9 @@ on property:sys.gbos_dri_fixed=1
 
 on post-fs-data
 $IDCRC
+on boot
+    setprop persist.zygote.zygote_next.start_on_boot false
+    start gbos_nativezygote
 on property:sys.boot_completed=1
     # KMS debug was on during the HWC's first modesets (set early in hook.sh); turn it off again.
     write /sys/module/drm/parameters/debug 0
@@ -445,6 +448,16 @@ service gbos_optimize /system/bin/sh /postinstall/gbos/optimize.sh
     group root
     seclabel u:r:shell:s0
     oneshot
+
+# Android 17 zygote_next (Native Framework Prototype): its subspecies children die in "Reinitialization" here, so isolated app processes
+# (Chrome GPU/sandboxed, WebView) never start: blank app windows. usb/native_zygote.sh keeps the framework flag off and logs zygote_next's
+# open fds to logs/boot-N/native-zygote.txt. The script runs for the whole boot (it re-applies the flag every minute), so it is oneshot.
+service gbos_nativezygote /system/bin/sh /postinstall/gbos/native_zygote.sh $N
+    user root
+    group root
+    seclabel u:r:shell:s0
+    oneshot
+    disabled
 
 # AI diagnostics (Magic Pointer / AICore): usb/aidiag.sh writes logs/boot-N/ai-1.txt (90 s) and ai-2.txt (4 min).
 # The gbos_aidns_* services run one ping per app uid so aidiag can compare DNS as AICore (10107) with
