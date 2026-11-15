@@ -1,0 +1,96 @@
+--- a/drivers/platform/x86/intel/int3472/tps68470.c
++++ b/drivers/platform/x86/intel/int3472/tps68470.c
+@@ -424,6 +424,77 @@
+ }
+ 
+ #define DELL5290_VSIO_SEL_1800600UV	52
++#define DELL5290_VD_SEL_1200000UV	12
++#define DELL5290_VA_SEL_2815200UV	109
++#define DELL5290_VAUX1_SEL_1213200UV	19
++#define DELL5290_GPIO_OV5670_MASK	(BIT(3) | BIT(4))
++#define DELL5290_SGPO_OV8858_MASK	(BIT(0) | BIT(2))
++#define DELL5290_PLLCTL_IDLE		\
++	((TPS68470_OSC_EXT_CAP_DEFAULT << TPS68470_OSC_EXT_CAP_SHIFT) | \
++	 (TPS68470_CLK_SRC_XTAL << TPS68470_CLK_SRC_SHIFT))
++
++static int dell5290_tps68470_replay_child_state(struct device *dev,
++						struct regmap *regmap)
++{
++	static const struct reg_sequence dell5290_restore_regs[] = {
++		{ TPS68470_REG_BOOSTDIV, 3 },
++		{ TPS68470_REG_BUCKDIV, 2 },
++		{ TPS68470_REG_PLLSWR, TPS68470_PLLSWR_DEFAULT },
++		{ TPS68470_REG_XTALDIV, 170 },
++		{ TPS68470_REG_PLLDIV, 32 },
++		{ TPS68470_REG_POSTDIV, 1 },
++		{ TPS68470_REG_POSTDIV2, 1 },
++		{ TPS68470_REG_CLKCFG2, TPS68470_CLKCFG2_DRV_STR_2MA },
++		{ TPS68470_REG_PLLCTL, DELL5290_PLLCTL_IDLE },
++		{ TPS68470_REG_VDVAL, DELL5290_VD_SEL_1200000UV },
++		{ TPS68470_REG_VAVAL, DELL5290_VA_SEL_2815200UV },
++		{ TPS68470_REG_VCMVAL, DELL5290_VA_SEL_2815200UV },
++		{ TPS68470_REG_VIOVAL, DELL5290_VSIO_SEL_1800600UV },
++		{ TPS68470_REG_VSIOVAL, DELL5290_VSIO_SEL_1800600UV },
++		{ TPS68470_REG_VAUX1VAL, DELL5290_VAUX1_SEL_1213200UV },
++		{ TPS68470_REG_VAUX2VAL, DELL5290_VSIO_SEL_1800600UV },
++	};
++	int ret;
++
++	/*
++	 * Keep sensors in their runtime-suspended GPIO state.  The sensor
++	 * drivers will deassert reset/powerdown and enable runtime rails when
++	 * libcamera starts streaming.
++	 */
++	ret = regmap_multi_reg_write(regmap, dell5290_restore_regs,
++				     ARRAY_SIZE(dell5290_restore_regs));
++	if (ret)
++		return dev_err_probe(dev, ret,
++				     "Failed to replay TPS68470 clock/regulator state\n");
++
++	ret = regmap_update_bits(regmap, TPS68470_REG_GPCTL3A,
++				 TPS68470_GPIO_MODE_MASK,
++				 TPS68470_GPIO_MODE_OUT_CMOS);
++	if (ret)
++		return dev_err_probe(dev, ret,
++				     "Failed to restore TPS68470 GPIO3 mode\n");
++
++	ret = regmap_update_bits(regmap, TPS68470_REG_GPCTL4A,
++				 TPS68470_GPIO_MODE_MASK,
++				 TPS68470_GPIO_MODE_OUT_CMOS);
++	if (ret)
++		return dev_err_probe(dev, ret,
++				     "Failed to restore TPS68470 GPIO4 mode\n");
++
++	ret = regmap_update_bits(regmap, TPS68470_REG_GPDO,
++				 DELL5290_GPIO_OV5670_MASK, 0);
++	if (ret)
++		return dev_err_probe(dev, ret,
++				     "Failed to restore TPS68470 OV5670 GPIO sleep state\n");
++
++	ret = regmap_update_bits(regmap, TPS68470_REG_SGPO,
++				 DELL5290_SGPO_OV8858_MASK, 0);
++	if (ret)
++		return dev_err_probe(dev, ret,
++				     "Failed to restore TPS68470 OV8858 GPIO sleep state\n");
++
++	return 0;
++}
+ 
+ static int dell5290_tps68470_restore_i2c_bridge(struct device *dev,
+ 						struct regmap *regmap)
+@@ -439,7 +510,15 @@
+ 	 * behind the TPS68470 secondary I2C path.  After S4 the PMIC is still
+ 	 * reachable, but the downstream devices can return -EIO unless the
+ 	 * VSIO/S_I2C state is replayed.
++	 *
++	 * Also replay the static clock, regulator selector and camera GPIO
++	 * child-state.  S4 appears to preserve PMIC I2C reachability while
++	 * losing enough child configuration for downstream sensor I2C to fail.
+ 	 */
++	ret = dell5290_tps68470_replay_child_state(dev, regmap);
++	if (ret)
++		return ret;
++
+ 	ret = regmap_write(regmap, TPS68470_REG_VSIOVAL,
+ 			   DELL5290_VSIO_SEL_1800600UV);
+ 	if (ret)

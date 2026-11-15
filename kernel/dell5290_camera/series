@@ -1,0 +1,15 @@
+0001-backport-tps68470-static-clock-consumers.patch
+0100-5290-intel-lpss-int3446-ignore-conflicts.patch
+0101-5290-tps68470-gnvs-fix.patch
+0102-5290-tps68470-board-data.patch
+0103-5290-ipu-bridge-int3477-ov8858.patch
+0104-5290-ov8858-int3477-vsio.patch
+0105-ov8858-defer-probe-until-endpoint.patch
+0200-dw9714-best-effort-system-sleep.patch
+0201-ov-sensors-force-runtime-pm-system-sleep.patch
+0900-ov5670-retry-stream-after-power-cycle.patch
+0901-ov5670-extend-power-up-settle-delay.patch
+0902-5290-tps68470-reapply-gnvs-after-system-resume.patch
+0903-5290-tps68470-restore-i2c-bridge-after-hibernate.patch
+0904-5290-tps68470-replay-child-state-after-hibernate.patch
+0905-5290-tps68470-replay-state-on-every-resume.patch

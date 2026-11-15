@@ -1,0 +1,60 @@
+--- a/drivers/media/i2c/ov5670.c
++++ b/drivers/media/i2c/ov5670.c
+@@ -2461,6 +2461,43 @@ static int ov5670_stop_streaming(struct ov5670 *ov5670)
+ 	return 0;
+ }
+ 
++static int __maybe_unused ov5670_runtime_resume(struct device *dev);
++static int __maybe_unused ov5670_runtime_suspend(struct device *dev);
++
++static int ov5670_retry_start_streaming(struct ov5670 *ov5670, int first_ret)
++{
++	struct i2c_client *client = v4l2_get_subdevdata(&ov5670->sd);
++	int ret;
++
++	/*
++	 * On some ACPI/IPU3 systems, especially after S4, the runtime PM state
++	 * can say the sensor is powered while the first SCCB write still fails.
++	 * Force a local power cycle and retry once before surfacing the error to
++	 * the pipeline, otherwise userspace is left with a dead camera until the
++	 * next reboot.
++	 */
++	dev_warn(&client->dev,
++		 "Stream start failed (%d), retrying after sensor power cycle\n",
++		 first_ret);
++
++	ov5670_runtime_suspend(&client->dev);
++	usleep_range(20000, 25000);
++
++	ret = ov5670_runtime_resume(&client->dev);
++	if (ret) {
++		dev_err(&client->dev,
++			"Sensor power-cycle resume failed during stream retry: %d\n",
++			ret);
++		return ret;
++	}
++
++	ret = ov5670_start_streaming(ov5670);
++	if (ret)
++		dev_err(&client->dev, "Stream retry after power cycle failed: %d\n",
++			ret);
++	return ret;
++}
++
+ static int ov5670_set_stream(struct v4l2_subdev *sd, int enable)
+ {
+ 	struct ov5670 *ov5670 = to_ov5670(sd);
+@@ -2475,8 +2512,11 @@ static int ov5670_set_stream(struct v4l2_subdev *sd, int enable)
+ 			goto unlock_and_return;
+ 
+ 		ret = ov5670_start_streaming(ov5670);
+-		if (ret)
+-			goto error;
++		if (ret) {
++			ret = ov5670_retry_start_streaming(ov5670, ret);
++			if (ret)
++				goto error;
++		}
+ 	} else {
+ 		ret = ov5670_stop_streaming(ov5670);
+ 		pm_runtime_put(&client->dev);

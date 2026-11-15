@@ -73,3 +73,6 @@ __pycache__/
 # (the kernel only accepts a manager APK with the official signing certificate)
 /usb/ksu/manager.apk
 /usb/ksu/ksud
+
+/usb/device/ipu3-webcam
+/usb/device/gbos-autorotate

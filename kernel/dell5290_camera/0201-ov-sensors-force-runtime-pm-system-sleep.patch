@@ -1,0 +1,82 @@
+--- a/drivers/media/i2c/ov5670.c
++++ b/drivers/media/i2c/ov5670.c
+@@ -2539,6 +2539,32 @@ static int __maybe_unused ov5670_runtime_suspend(struct device *dev)
+ 	return 0;
+ }
+ 
++static int __maybe_unused ov5670_system_suspend(struct device *dev)
++{
++	int ret;
++
++	ret = pm_runtime_force_suspend(dev);
++	if (ret)
++		dev_warn(dev,
++			 "Failed to force runtime suspend for system sleep: %d\n",
++			 ret);
++
++	return ret;
++}
++
++static int __maybe_unused ov5670_system_resume(struct device *dev)
++{
++	int ret;
++
++	ret = pm_runtime_force_resume(dev);
++	if (ret)
++		dev_warn(dev,
++			 "Failed to force runtime resume after system sleep: %d\n",
++			 ret);
++
++	return ret;
++}
++
+ static const struct v4l2_subdev_core_ops ov5670_core_ops = {
+ 	.log_status = v4l2_ctrl_subdev_log_status,
+ 	.subscribe_event = v4l2_ctrl_subdev_subscribe_event,
+@@ -2801,6 +2825,8 @@ static void ov5670_remove(struct i2c_client *client)
+ }
+ 
+ static const struct dev_pm_ops ov5670_pm_ops = {
++	SET_SYSTEM_SLEEP_PM_OPS(ov5670_system_suspend,
++				ov5670_system_resume)
+ 	SET_RUNTIME_PM_OPS(ov5670_runtime_suspend, ov5670_runtime_resume, NULL)
+ };
+ 
+--- a/drivers/media/i2c/ov8858.c
++++ b/drivers/media/i2c/ov8858.c
+@@ -1683,7 +1683,35 @@ static int ov8858_runtime_suspend(struct device *dev)
+ 	return 0;
+ }
+ 
++static int __maybe_unused ov8858_system_suspend(struct device *dev)
++{
++	int ret;
++
++	ret = pm_runtime_force_suspend(dev);
++	if (ret)
++		dev_warn(dev,
++			 "Failed to force runtime suspend for system sleep: %d\n",
++			 ret);
++
++	return ret;
++}
++
++static int __maybe_unused ov8858_system_resume(struct device *dev)
++{
++	int ret;
++
++	ret = pm_runtime_force_resume(dev);
++	if (ret)
++		dev_warn(dev,
++			 "Failed to force runtime resume after system sleep: %d\n",
++			 ret);
++
++	return ret;
++}
++
+ static const struct dev_pm_ops ov8858_pm_ops = {
++	SET_SYSTEM_SLEEP_PM_OPS(ov8858_system_suspend,
++				ov8858_system_resume)
+ 	SET_RUNTIME_PM_OPS(ov8858_runtime_suspend,
+ 			   ov8858_runtime_resume, NULL)
+ };
