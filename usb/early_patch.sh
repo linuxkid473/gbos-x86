@@ -13,6 +13,10 @@ if [ -f "$_cfg" ] && grep -q '^MODE=live' "$_cfg" 2>/dev/null; then
 fi
 unset _cfg
 gbos_early_patch() {
+  if [ -f "$G/sensor_vendor_overlay.sh" ]; then
+    . "$G/sensor_vendor_overlay.sh"
+    gbos_prepare_sensor_vendor_overlay || true
+  fi
   [ -f "$G/patched/MANIFEST" ] || return 0
   while read -r ep_kind ep_target ep_want ep_file ep_rest; do
     [ "$ep_kind" = early ] || continue

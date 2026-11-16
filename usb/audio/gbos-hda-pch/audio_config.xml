@@ -1,12 +1,9 @@
 <?xml version='1.0' encoding='utf-8'?>
 <audio_config>
-	<!-- gbos: Latitude 5300, snd_hda_intel card PCH (ALC3254). Section layout mirrors Google's
-	     sof-soundwire config field for field: dras rejects the whole file on a missing field
-	     (e.g. Headphone without JackSwitch).
-	     Analog is PCM 0 (the codec auto-mutes the speaker when the jack is used); HDMI/DP is PCM 3/7/8.
-	     The jack is a headset combo: one input device "HDA Intel PCH Headphone Mic" reports both
-	     SW_HEADPHONE_INSERT (2) and SW_MICROPHONE_INSERT (4). The internal mic is on the codec
-	     (pin 0x12), so it works with the legacy HDA driver too. -->
+	<!-- gbos: base template for legacy HDA card PCH. gen_config.sh remaps card ids,
+	     PCM endpoints, and jack names for non-PCH cards using detected device data.
+	     Section fields mirror Google's config because dras rejects missing fields.
+	     Mixer controls remain codec-specific; generated non-PCH routes are best effort. -->
 	<SoundCardName>hw:PCH</SoundCardName>
 	<HiFi>
 		<Speaker>

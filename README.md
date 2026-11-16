@@ -73,6 +73,9 @@ Fedora/RHEL with SELinux enforcing: the scripts add `:z` to the docker bind moun
 | Auth-bound keystore keys | `soft_gk`'s auth tokens aren't trusted by the software KeyMint |
 | Google's on-device AI (Magic Pointer, AICore) | Google's servers refuse it without hardware key attestation, which no non-Google laptop can provide |
 | OS updates | Built-in OTA can't work; moving to a new Google build is semi-automated: `tools/port_build.sh`, see [`porting.md`](porting.md) |
+| Fingerprint reader (Latitude 7320 Detachable, Goodix `27c6:6384`) | Experimental Goodix userspace AIDL HAL is built and enabled by default for this exact USB ID in the next image (`FINGERPRINT=0` disables it); the existing CrosFP service is left unchanged on other devices. This is not a support claim: Android ABI/version compatibility, sensor firmware, service registration, enrollment, and enforcing-mode SELinux USB access remain unverified. See [`HANDOFF.md`](HANDOFF.md) |
+| Auto-rotation (Latitude 7320 Detachable) | Experimental, DMI-scoped Sensors 2.1 sub-HAL and display-policy trial. Confirmed working by the user on the 2026-11-15 Live boot; logs show accelerometer enumeration and sensor-driven transitions through all four display rotations. The axis mapping has been validated for that test, but the physical full-scale range remains unknown and the HAL's ±2 g range is provisional. `SENSOR_HAL=0` disables both changes. See [`sensors/trogdor/`](sensors/trogdor/). |
+| Intel IPU6 cameras | Experimental Latitude 7320-only UVC loopback bridge is available in an opt-in test image (`GBOS_IPU6_CAMERA_BRIDGE=1`). It converts the OV5675 RGB-IR raw stream to YUYV for Android's USB camera provider. Only three raw buffers have been observed so far; image content, Android enumeration/preview, output quality, and clean firmware shutdown are not hardware-verified. The bridge keeps the sensor streaming until reboot because IPU6 stream-stop/close timed out in the last test. Rear capture is not included. See [`docs/latitude-7320-camera-test.md`](docs/latitude-7320-camera-test.md) for the current test image and instructions. |
 | Other laptops | Eight of twenty-one tried machines work fully, ten partly, one pending, two not; see [Tested laptops](#tested-laptops). The CPU-emulation kernel should help any pre-2021 Intel CPU |
 
 ## How it works
@@ -89,6 +92,13 @@ UEFI firmware
          ├─ mounts /data, /metadata (ext4 partitions if present, else tmpfs)
          └─ switch_root → /system/bin/init selinux_setup   (Google's Android init, unmodified)
 ```
+
+Boot diagnostics are quiet by default: `hook.sh` skips the non-Google GSC startup wait and the
+duplicate `/data` fstab wait after stage0 has mounted it. `DEBUG_LOGS=1` in `gbos/gbos.cfg`
+enables rotating full logcat, KMS debug, and delayed audio/display/AI reports; `KVM_TRACE=1`
+separately enables the high-volume Trusty VM trace. Kernel logs, crash-buffer logs, and focused
+camera/sensor diagnostics remain enabled by default. A diagnostic image can opt into full logs
+without changing the source config with `GBOS_DEBUG_LOGS=1 sh tools/make_gbos86_image.sh <output-directory>`.
 
 **The core problem:** lapis binaries use CPU instructions this CPU lacks: GFNI, AVX-VNNI, SHA-NI,
 256-bit VAES/VPCLMULQDQ, AVX-IFMA. Two layers deal with that:
@@ -204,6 +214,7 @@ The kernel (#31) builds drivers for most Intel-era laptops as **modules**, and b
 | Bluetooth | `btusb` with Intel/Realtek/MediaTek/Qualcomm/Broadcom, Intel PCIe BT |
 | Sound | Legacy HDA with every common codec, **or** SOF (Intel DSP, DMIC, SoundWire); the kernel picks per machine (`snd_intel_dspcfg`). The audio HAL config is generated for the card that appears (`hook.sh`) |
 | Touchpad / keyboard | Intel LPSS I2C-HID, ISH, PS/2 (Synaptics, ALPS, Elan, ...), Synaptics RMI4 |
+| Motion sensors / auto-rotate | HID-over-ISH accel/gyro IIO drivers expose live `accel_3d`/`gyro_3d` values, but the vendor Desktop-IIO Sensors HAL binary has no matching device identifiers and reports no sensors. Its `hals.conf` selects only that HAL; there is no sensor XML override or HAL source/build tree here. A compatible Sensors 2.1 sub-HAL and validated Latitude axis/mount calibration are still required; renaming IIO devices or guessing a matrix is unsafe |
 | Hotkeys, fans, rfkill | Dell, HP, ThinkPad, IdeaPad, Asus, Acer, Samsung, MSI, Sony, Fujitsu, LG, Intel HID/VBTN |
 | Other | SD card readers (Realtek, SDHCI), USB webcams (UVC), Ethernet (r8169, e1000e, igc, USB r8152 and friends) |
 

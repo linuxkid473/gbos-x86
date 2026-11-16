@@ -36,6 +36,9 @@
 /usb/stage0.cpio
 /gatekeeper/libs/
 /gatekeeper/soft_gk
+/fingerprint/libs/
+/fingerprint/gbos_fp
+/fingerprint/goodix_test
 *.o
 __pycache__/
 
