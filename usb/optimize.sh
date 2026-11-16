@@ -78,7 +78,11 @@ sysctl -w vm.vfs_cache_pressure=100 2>/dev/null
 # User 0 is headless (system only); User 10 is the interactive human user.
 # Disable duplicate client apps & Google services in User 0 ONLY.
 # User 10 remains 100% untouched so the user can run all apps normally.
+# NOT com.android.vending: Play Store in user 10 binds its MultiUserCoordinatorService in user 0 before every download, and with
+# the user-0 copy disabled every update and "system services" update stayed "Pending" (HANDOFF.md 2026-11-17).
 # ==============================================================================
+# Installs that ran this script from 2026-11-04 on keep the user-0 disable in /data, so undo it (no-op when already enabled).
+pm enable --user 0 com.android.vending >/dev/null 2>&1
 USER0_BLOAT="
 com.google.android.apps.messaging
 com.google.android.apps.photos
@@ -92,7 +96,6 @@ com.google.android.ondevicepersonalization.services
 com.google.android.aicore
 com.google.android.marvin.talkback
 com.google.android.googlequicksearchbox
-com.android.vending
 com.android.chrome
 "
 for pkg in $USER0_BLOAT; do
