@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <time.h>
 #include <unistd.h>
 
 static int goodix_test_ioctl(int fd, unsigned long request, ...);
@@ -16,6 +17,9 @@ static int goodix_test_ioctl(int fd, unsigned long request, ...);
 
 static struct goodix *mock_sensor;
 static int mock_reads;
+static unsigned int mock_empty_reads;
+static unsigned int mock_empty_count;
+static bool mock_empty_forever;
 static bool mock_cancel_after_ack;
 static bool mock_write_timeout;
 
@@ -39,6 +43,12 @@ static int goodix_test_ioctl(int fd, unsigned long request, ...)
 		return (int)bulk->len;
 	}
 	assert(bulk->ep == GOODIX_EP_IN);
+	if (mock_empty_forever || mock_empty_reads) {
+		if (mock_empty_reads)
+			mock_empty_reads--;
+		mock_empty_count++;
+		return 0;
+	}
 	if (mock_reads++ == 0) {
 		payload[0] = GOODIX_SUCCESS;
 		payload[1] = GOODIX_CMD_VERSION;
@@ -66,18 +76,35 @@ static void test_command_transport(void)
 	sensor.fd = 1;
 	mock_sensor = &sensor;
 	mock_reads = 0;
+	mock_empty_reads = 2;
+	mock_empty_count = 0;
+	mock_empty_forever = false;
 	mock_cancel_after_ack = false;
 	mock_write_timeout = false;
 	assert(goodix_command(&sensor, GOODIX_CMD_VERSION, 0, &payload, 1, false, &response) == 0);
-	assert(mock_reads == 2 && response.result == GOODIX_SUCCESS && response.len == 2);
+	assert(mock_reads == 2 && mock_empty_reads == 0 && mock_empty_count == 2);
+	assert(response.result == GOODIX_SUCCESS && response.len == 2);
 	assert(response.data[0] == 0x5a && response.data[1] == 0xa5);
 
 	mock_reads = 0;
+	mock_empty_reads = 1;
+	mock_empty_count = 0;
 	mock_cancel_after_ack = true;
 	assert(goodix_command(&sensor, GOODIX_CMD_VERSION, 0, &payload, 1, true, &response) == -ECANCELED);
-	assert(mock_reads == 1 && sensor.need_reset);
+	assert(mock_reads == 1 && mock_empty_reads == 0 && mock_empty_count == 1 && sensor.need_reset);
 
 	goodix_clear_cancel(&sensor);
+	sensor.need_reset = false;
+	mock_empty_count = 0;
+	mock_empty_forever = true;
+	{
+		uint8_t buffer[GOODIX_HEADER_SIZE + GOODIX_MAX_PAYLOAD + GOODIX_CRC_SIZE];
+		struct goodix_packet packet;
+
+		assert(goodix_receive(&sensor, &packet, buffer, sizeof(buffer), false, 1) == -ETIMEDOUT);
+		assert(mock_empty_count > 0 && sensor.need_reset);
+	}
+	mock_empty_forever = false;
 	sensor.need_reset = false;
 	mock_write_timeout = true;
 	assert(goodix_command(&sensor, GOODIX_CMD_VERSION, 0, &payload, 1, false, &response) == -ETIMEDOUT);

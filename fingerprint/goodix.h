@@ -142,13 +142,47 @@ static inline int goodix_receive(struct goodix *s, struct goodix_packet *packet,
 				 uint8_t *buffer, size_t buffer_size,
 				 bool cancellable, unsigned int timeout_ms)
 {
+	struct timespec deadline = {0}, now;
 	int n;
 
+	if (!cancellable) {
+		if (clock_gettime(CLOCK_MONOTONIC, &deadline) < 0)
+			return -GOODIX_ERRNO;
+		deadline.tv_sec += timeout_ms / 1000;
+		deadline.tv_nsec += (long)(timeout_ms % 1000) * 1000000L;
+		if (deadline.tv_nsec >= 1000000000L) {
+			deadline.tv_sec++;
+			deadline.tv_nsec -= 1000000000L;
+		}
+	}
+
 	for (;;) {
-		unsigned int timeout = cancellable ? 250 : timeout_ms;
+		unsigned int timeout;
 
 		if (cancellable && goodix_cancel_requested(s))
 			return -ECANCELED;
+		if (cancellable) {
+			timeout = 250;
+		} else {
+			long seconds, nanoseconds;
+
+			if (clock_gettime(CLOCK_MONOTONIC, &now) < 0)
+				return -GOODIX_ERRNO;
+			seconds = deadline.tv_sec - now.tv_sec;
+			nanoseconds = deadline.tv_nsec - now.tv_nsec;
+			if (nanoseconds < 0) {
+				seconds--;
+				nanoseconds += 1000000000L;
+			}
+			if (seconds < 0 || (seconds == 0 && nanoseconds == 0)) {
+				s->need_reset = true;
+				return -ETIMEDOUT;
+			}
+			timeout = (unsigned int)(seconds * 1000 +
+						 (nanoseconds + 999999) / 1000000);
+			if (timeout == 0)
+				timeout = 1;
+		}
 		n = goodix_bulk(s, GOODIX_EP_IN, buffer, (unsigned int)buffer_size, timeout);
 		if (n == -ETIMEDOUT && cancellable)
 			continue;
@@ -157,7 +191,8 @@ static inline int goodix_receive(struct goodix *s, struct goodix_packet *packet,
 				s->need_reset = true;
 			return n;
 		}
-		if (n == 0 && cancellable)
+		/* Goodix may complete a bulk read with no data; upstream resubmits the read. */
+		if (n == 0)
 			continue;
 		if (goodix_parse_packet(buffer, (size_t)n, packet) < 0) {
 			s->need_reset = true;

@@ -9,6 +9,7 @@ LOGDIR=/postinstall/gbos/logs/boot-$BOOT_ID
 mkdir -p "$LOGDIR" || exit 1
 LOG=$LOGDIR/camera-bridge-setup.txt
 exec >> "$LOG" 2>&1
+LOOPBACK_LABEL=GBOS_IPU6_Camera
 echo "=== Latitude 7320 IPU6 camera bridge $(date) ==="
 
 if ! grep -qx 'Latitude 7320 Detachable' /sys/class/dmi/id/product_name 2>/dev/null; then
@@ -22,17 +23,31 @@ fi
 
 if [ ! -e /dev/video64 ]; then
     insmod /postinstall/gbos/kmod/v4l2loopback.ko \
-        video_nr=64 card_label="GBOS IPU6 Camera" exclusive_caps=1
+        video_nr=64 "card_label=$LOOPBACK_LABEL" exclusive_caps=1 || {
+        status=$?
+        echo "ERROR: v4l2loopback insmod failed (status $status)"
+        exit "$status"
+    }
 fi
 i=0
 while [ ! -e /dev/video64 ] && [ "$i" -lt 10 ]; do
     sleep 1
     i=$((i + 1))
 done
-if [ ! -e /dev/video64 ] ||
-   [ ! -r /sys/devices/virtual/video4linux/video64/name ] ||
-   [ "$(cat /sys/devices/virtual/video4linux/video64/name)" != "GBOS IPU6 Camera" ]; then
-    echo "ERROR: expected loopback node /dev/video64 is unavailable"
+if [ ! -e /dev/video64 ]; then
+    echo "ERROR: /dev/video64 was not created after loading v4l2loopback"
+    grep '^v4l2loopback ' /proc/modules || echo "v4l2loopback is not listed in /proc/modules"
+    ls /sys/class/video4linux 2>&1
+    exit 1
+fi
+LOOPBACK_SYS=/sys/devices/virtual/video4linux/video64
+if [ ! -r "$LOOPBACK_SYS/name" ]; then
+    echo "ERROR: /dev/video64 exists but $LOOPBACK_SYS/name is unavailable"
+    exit 1
+fi
+ACTUAL_LABEL=$(cat "$LOOPBACK_SYS/name")
+if [ "$ACTUAL_LABEL" != "$LOOPBACK_LABEL" ]; then
+    echo "ERROR: loopback label mismatch: got '$ACTUAL_LABEL', expected '$LOOPBACK_LABEL'"
     exit 1
 fi
 
@@ -41,7 +56,7 @@ chown cameraserver:camera /dev/video64 2>/dev/null || true
 chcon u:object_r:video_device:s0 /dev/video64 2>/dev/null || true
 
 FAKE_DIR=/data/local/tmp/ipu6-camera-fake
-VIDEO_SYS=/sys/devices/virtual/video4linux/video64
+VIDEO_SYS=$LOOPBACK_SYS
 mkdir -p "$FAKE_DIR/usb_dev/intf/video4linux/video64" || exit 1
 chmod 755 /data/local/tmp "$FAKE_DIR" "$FAKE_DIR/usb_dev" \
     "$FAKE_DIR/usb_dev/intf" "$FAKE_DIR/usb_dev/intf/video4linux" \

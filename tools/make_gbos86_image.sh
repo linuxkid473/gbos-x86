@@ -144,7 +144,7 @@ gbos_enable_image_debug_logs() {
 # Full logcat and verbose diagnostics are opt-in for a specific image; keep the source config unchanged.
 gbos_enable_image_debug_logs "$G/gbos.cfg"
 
-# Build a deliberately opt-in Latitude 7320 bridge test image without changing usb/gbos.cfg.
+# Build a deliberately opt-in Latitude 7320 camera/fingerprint diagnostic image without changing usb/gbos.cfg.
 if [ "${GBOS_IPU6_CAMERA_BRIDGE:-0}" = 1 ]; then
   for payload in \
       "$G/installer/bin/ipu6-camera-bridge.sh" \
@@ -156,7 +156,7 @@ if [ "${GBOS_IPU6_CAMERA_BRIDGE:-0}" = 1 ]; then
   for setting in CAMERA_BRIDGE FINGERPRINT; do
     case "$setting" in
       CAMERA_BRIDGE) value=1 ;;
-      FINGERPRINT) value=0 ;;
+      FINGERPRINT) value=1 ;;
     esac
     if grep -q "^${setting}=" "$G/gbos.cfg"; then
       sed -i.bak "s/^${setting}=.*/${setting}=${value}/" "$G/gbos.cfg"

@@ -63,5 +63,13 @@ grep -q 'FINGERPRINT=1' "$ROOT/usb/gbos.cfg" &&
   grep -q 'gbos_fp' "$ROOT/usb/install.sh" \
   && ok "build, image, deploy, and install packaging" || bad "HAL packaging wiring"
 
+awk '
+  /^if \[ "\$\{GBOS_IPU6_CAMERA_BRIDGE:-0\}" = 1 \]; then/ { camera=1 }
+  camera && /FINGERPRINT\)/ { found = ($0 ~ /value=1/) }
+  END { exit !found }
+' "$ROOT/tools/make_gbos86_image.sh" \
+  && ok "Latitude camera diagnostic image keeps Goodix HAL enabled" \
+  || bad "camera image disables Goodix HAL"
+
 [ "$fail" = 0 ] && echo GBOS_FP_TEST_PASS
 exit "$fail"
