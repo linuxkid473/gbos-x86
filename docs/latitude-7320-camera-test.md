@@ -8,7 +8,9 @@ This Live image combines the opt-in front-camera bridge with the Latitude 7320
 rotation configuration that was confirmed working on hardware. It sets
 `CAMERA_BRIDGE=1`, `SENSOR_HAL=1`, `DEBUG_LOGS=1`, and `FINGERPRINT=1`. The
 rebuilt experimental Goodix HAL is enabled only for a no-enrollment startup
-diagnostic on USB `27c6:6384`; this does not establish hardware support.
+diagnostic and starts only when USB `27c6:6384` is present; this does not
+establish hardware support. If USB enumeration fails, the custom service will
+not start.
 
 The bridge uses the space-free v4l2loopback card label
 `GBOS_IPU6_Camera`. The prior boot showed the module loading but its option
