@@ -76,4 +76,31 @@ for f in tools/deploy_stick.sh tools/make_gbos86_image.sh tools/install_dualboot
   grep -q 'native_zygote\.sh' $ROOT/$f && ok "$f ships native_zygote.sh" || bad "$f does not ship native_zygote.sh"
 done
 
+# 6. /dev/null: stage0 must mknod it before anything redirects to it (a "2>/dev/null" on the empty tmpfs makes it a regular file,
+#    which breaks every zygote_next subspecies child: HANDOFF.md 2026-11-16)
+ST=$ROOT/usb/stage0_init.sh
+mk=$(grep -n '^mknod .*-m 666 /dev/null c 1 3' $ST | head -1 | cut -d: -f1)
+first=$(grep -n '/dev/null' $ST | grep -v '^[0-9]*:[[:space:]]*#' | grep -v 'mknod .*/dev/null c 1 3' | head -1 | cut -d: -f1)
+[ -n "$mk" ] && [ -n "$first" ] && [ "$mk" -lt "$first" ] && ok "stage0_init.sh: mknod /dev/null (line $mk) comes before its first use (line $first)" || bad "stage0_init.sh: /dev/null is used (line ${first:-?}) before it is created (line ${mk:-?})"
+# no redirect to /dev/null (or any /dev file) before the console is up, other than the mknods themselves
+pre=$(sed -n "1,$((mk - 1))p" $ST | grep -v '^[[:space:]]*#' | grep -c '>[[:space:]]*/dev/')
+[ "$pre" = 0 ] && ok "stage0_init.sh: no redirect into /dev before the nodes exist" || bad "stage0_init.sh: $pre redirect(s) into /dev before the mknods"
+
+# hook.sh repairs it on any kernel: block cut out of hook.sh, /dev/ pointed at a fake dir
+awk '/^if \[ ! -c \/dev\/null \]; then$/{p=1} p{print} p&&/^fi$/{exit}' $H > $T/repair.sh
+[ -s $T/repair.sh ] && ok "hook.sh: /dev/null repair block found" || bad "hook.sh: repair block missing"
+first_hook=$(grep -n -v '^[[:space:]]*#' $H | grep -v '^[0-9]*:$' | head -1 | cut -d: -f1)
+rl=$(grep -n '^if \[ ! -c /dev/null \]; then$' $H | head -1 | cut -d: -f1)
+[ "$rl" = "$first_hook" ] && ok "hook.sh: the repair is the first statement (line $rl)" || bad "hook.sh: the repair is at line $rl, first statement at $first_hook"
+grep -q 'mv -f /dev/.gbos-null /dev/null' $T/repair.sh && ok "repair renames the new node over the file (old one kept if mknod fails)" || bad "repair does not rename over"
+mkdir -p $T/dev; echo junk > $T/dev/null
+sed "s#/dev/#$T/dev/#g" $T/repair.sh > $T/repair_t.sh
+RLOG=$T/repair.log; : > $RLOG
+( log() { echo "$*" >> $RLOG; }; . $T/repair_t.sh )
+if [ -c $T/dev/null ]; then
+  ok "regular-file /dev/null replaced by a character device (running as root)"
+else
+  [ -f $T/dev/null ] && grep -q "could not be recreated" $RLOG && [ ! -e $T/dev/.gbos-null ] && ok "mknod refused (not root): old /dev/null kept, failure logged, no stray node" || bad "failure path: $(cat $RLOG; ls -la $T/dev)"
+fi
+
 [ $fail = 0 ] && echo NATIVE_ZYGOTE_PASS || { echo NATIVE_ZYGOTE_FAIL; exit 1; }

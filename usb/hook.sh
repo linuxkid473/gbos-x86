@@ -1,6 +1,25 @@
 # gbos pre-Android hook: sourced by stage0 just before switch_root (Android root at /new,
 # helpers log/fail/shell and $G=/gbos/gbos available). Edit freely, no kernel rebuild needed.
 
+# /dev/null must be the character device (1,3). Kernel #46's stage0 runs `echo ... > /proc/sys/kernel/printk 2>/dev/null` on the empty /dev
+# tmpfs BEFORE its `mknod /dev/null`: the redirect creates /dev/null as a REGULAR FILE and the mknod then fails with "File exists".
+# Android inherits that file: everything written to "/dev/null" piles up in it, and fds on it have moving offsets. zygote_next audits
+# every fd of each SpawnSubspecies child against what it saved at start (including the file offset of fds 0-2), rejects them, and the
+# child dies with "Reinitialization" / EBADF: Chrome's sandboxed processes and WebView renderers never start, system_server's
+# single process-start thread then stalls, and every app freezes (HANDOFF.md 2026-11-16). Our own logs showed it all along: every AVC
+# on /dev/null in the Vostro 3400 bundle has tclass=file (a character device is chr_file) and tcontext tmpfs, not null_device.
+# Found by itakosu55 (fork branch fix-zygote-next-dev-null). stage0_init.sh now creates the nodes first, but that needs a kernel
+# rebuild; this repairs it on every kernel. New node first, renamed over the file: if mknod fails, the old /dev/null stays.
+if [ ! -c /dev/null ]; then
+  rm -f /dev/.gbos-null
+  if mknod -m 666 /dev/.gbos-null c 1 3 && mv -f /dev/.gbos-null /dev/null && [ -c /dev/null ]; then
+    log "hook: /dev/null was a regular file (stage0 bug), recreated as the character device"
+  else
+    rm -f /dev/.gbos-null
+    log "hook: /dev/null is not a character device and could not be recreated"
+  fi
+fi
+
 # Reset one-shot MODE=live back to MODE=ask so subsequent boots prompt the user
 if [ -f "$G/gbos.cfg" ] && grep -q '^MODE=live' "$G/gbos.cfg" 2>/dev/null; then
   sed -i 's/^MODE=live/MODE=ask/' "$G/gbos.cfg" 2>/dev/null || true

@@ -4,9 +4,11 @@
 export PATH=/bin:/sbin
 /bin/busybox --install -s /bin
 mount -t proc proc /proc; mount -t sysfs sysfs /sys; mount -t tmpfs -o mode=0755 tmpfs /dev
-echo "1 1 1 1" > /proc/sys/kernel/printk 2>/dev/null || true
+# Device nodes BEFORE any redirect: on the empty /dev tmpfs a "2>/dev/null" creates /dev/null as a regular file, the mknod then fails,
+# and Android inherits the file (zygote_next rejects fds 0-2 in every SpawnSubspecies child: HANDOFF.md 2026-11-16). hook.sh repairs it too.
 mknod -m 600 /dev/console c 5 1; mknod -m 600 /dev/kmsg c 1 11; mknod -m 666 /dev/null c 1 3
 mknod -m 620 /dev/tty0 c 4 0; mknod -m 620 /dev/tty1 c 4 1
+echo "1 1 1 1" > /proc/sys/kernel/printk 2>/dev/null || true
 exec </dev/console >/dev/console 2>&1
 log() { echo "<7>gbos-stage0: $*" > /dev/kmsg; }
 shell() {

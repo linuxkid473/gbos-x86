@@ -6,8 +6,10 @@
 # /system/bin/zygote_next, instead of app_zygote. On gbOS86 every SpawnSubspecies child of zygote_next dies in its fd-registry
 # reset ("zygote::file_descriptors: Resetting FileDescriptorRegistry for subspecies" then "Reinitialization", EBADF), so each
 # isolated process fails to start: apps open as blank windows, Chrome's GPU channel times out, and system_server logs 12k-50k
-# "ZygoteProcess: Got error connecting to zygote" lines per boot (Dell Vostro 3400 on R5, HP ENVY x360). The cause inside
-# zygote_next is not known yet (its Rust code reports only "Reinitialization"); this script is the mitigation plus the evidence.
+# "ZygoteProcess: Got error connecting to zygote" lines per boot (Dell Vostro 3400 on R5, HP ENVY x360). Cause (HANDOFF.md
+# 2026-11-16, found by itakosu55): /dev/null was a regular file, created by a redirect in stage0 before its mknod, so the offsets
+# of fds 0-2 moved and zygote_next's per-child fd audit failed. hook.sh now recreates it as the character device. This script stays
+# as a second line of defence (flag off) and as the record: it logs the type of /dev/null and zygote_next's fd table every boot.
 #
 # Mitigation (needs no knowledge of the cause):
 #  1. persist.zygote.zygote_next.start_on_boot=false (zygote_next64.rc starts it on boot only when this is true; it is
@@ -71,6 +73,8 @@ dump_zygote() {
 }
 
 log "native_zygote.sh start: boot $N"
+# must be "crw-rw-rw- ... 1, 3": a regular file here (leading "-") breaks every zygote_next subspecies child
+log "/dev/null: $(ls -l /dev/null 2>&1)"
 tick=0
 while :; do
   # the flag every 12 ticks (a minute), and straight away until it has been set once
