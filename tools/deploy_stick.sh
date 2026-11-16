@@ -23,8 +23,12 @@ put() {  # put SRC DST(relative to gbos/): copy when different
 }
 
 echo "deploying to $VOL"
-for f in hook.sh install.sh aidiag.sh native_zygote.sh early_patch.sh hwdetect.sh apex_patch.sh crossystem libkm_compat.so system_ext_manifest.xml soft_gk; do put "$U/$f" "$f"; done
-for d in patched audio installer kmod ksu a11y; do
+for f in hook.sh install.sh aidiag.sh native_zygote.sh early_patch.sh sensor_vendor_overlay.sh sensor_trial_diag.sh sensor_rotation_policy.sh sensordiag.sh hwdetect.sh mask_vendor_modules.sh apex_patch.sh crossystem libkm_compat.so system_ext_manifest.xml soft_gk gbos_fp; do put "$U/$f" "$f"; done
+if [ -n "${GBOS_ROTATION_POLICY_OVERLAY:-}" ]; then
+  [ -s "$GBOS_ROTATION_POLICY_OVERLAY" ] || { echo "missing or empty rotation policy overlay: $GBOS_ROTATION_POLICY_OVERLAY" >&2; exit 1; }
+  put "$GBOS_ROTATION_POLICY_OVERLAY" "sensors/gbos-latitude7320-rotation-policy.apk"
+fi
+for d in patched audio installer kmod ksu a11y surface; do
   [ -d "$U/$d" ] || continue
   (cd "$U" && find "$d" -type f ! -name '.DS_Store') | while read -r f; do put "$U/$f" "$f"; done
 done
@@ -51,7 +55,13 @@ if [ -n "$DEV" ] && [ -s "$CHANGED" ]; then
 fi
 BAD=0
 while read -r f; do
-  cmp -s "$U/$f" "$G/$f" || { echo "VERIFY FAILED: $f"; BAD=1; }
+  if [ "$f" = "sensors/gbos-latitude7320-rotation-policy.apk" ] &&
+     [ -n "${GBOS_ROTATION_POLICY_OVERLAY:-}" ]; then
+    VERIFY_SOURCE=$GBOS_ROTATION_POLICY_OVERLAY
+  else
+    VERIFY_SOURCE=$U/$f
+  fi
+  cmp -s "$VERIFY_SOURCE" "$G/$f" || { echo "VERIFY FAILED: $f"; BAD=1; }
 done < "$CHANGED"
 [ $BAD = 0 ] || { echo "some files did not verify; the stick is NOT ejected"; exit 1; }
 echo "verified $(wc -l < "$CHANGED" | tr -d ' ') file(s)"

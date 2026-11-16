@@ -124,6 +124,176 @@ else
   fi
 fi
 
+# The HID-IIO sensor HAL runs as system and writes these attributes when activating or batching.
+# The stock ueventd rules cover an unprefixed sampling_frequency, but HID exposes the prefixed names.
+gbos_sensor_ueventd() {
+  _sensor_ueventd_root=${NEWROOT:-/new}
+  _sensor_ueventd_rc=$_sensor_ueventd_root/vendor/etc/ueventd.rc
+  _sensor_ueventd_dir=$_sensor_ueventd_root/vendor/etc/ueventd
+  _sensor_ueventd_tmp=${UEVENTD_TMP:-/tmp/gbos-sensor-ueventd}
+  if [ ! -f "$_sensor_ueventd_rc" ]; then
+    log "hook: IIO permissions NOT fixed (missing $_sensor_ueventd_rc)"
+    return 1
+  fi
+  if [ ! -d "$_sensor_ueventd_dir" ] || ! grep -Eq '^[[:space:]]*import[[:space:]]+/vendor/etc/ueventd([[:space:]]|$)' "$_sensor_ueventd_rc"; then
+    log "hook: IIO permissions NOT fixed (vendor ueventd directory not imported)"
+    return 1
+  fi
+  if ! mkdir -p "$_sensor_ueventd_tmp" ||
+     ! cp -a "$_sensor_ueventd_dir/." "$_sensor_ueventd_tmp/"; then
+    log "hook: IIO permissions NOT fixed (cannot stage vendor ueventd directory)"
+    return 1
+  fi
+  if ! printf '%s\n' \
+    '/sys/bus/iio/devices/iio:device* in_accel_sampling_frequency 0660 system system' \
+    '/sys/bus/iio/devices/iio:device* in_anglvel_sampling_frequency 0660 system system' \
+    > "$_sensor_ueventd_tmp/ueventd.gbos-sensors.rc"; then
+    log "hook: IIO permissions NOT fixed (cannot stage sampling-frequency rules)"
+    return 1
+  fi
+  if ! mount -t tmpfs -o mode=0755,nosuid,nodev tmpfs "$_sensor_ueventd_dir"; then
+    log "hook: IIO permissions NOT fixed (cannot mount vendor ueventd overlay)"
+    return 1
+  fi
+  if ! cp -a "$_sensor_ueventd_tmp/." "$_sensor_ueventd_dir/"; then
+    log "hook: IIO permissions NOT fixed (cannot populate vendor ueventd overlay)"
+    umount "$_sensor_ueventd_dir" || log "hook: ERROR: cannot restore vendor ueventd directory"
+    return 1
+  fi
+  log "hook: IIO accel/gyro sampling-frequency ueventd rules installed"
+}
+
+gbos_enable_latitude7320_sensors() {
+  GBOS_SENSOR_HAL_SELECTED=0
+  GBOS_SENSOR_ROTATION_POLICY_SELECTED=0
+  _sensor_root=${NEWROOT:-/new}
+  _sensor_sysfs=${SYSFS:-/sys}
+  _sensor_hal_name=android.hardware.sensors@2.1-trogdor-subhal.so
+  _sensor_hal_path=/vendor/lib64/$_sensor_hal_name
+  _sensor_policy_name=gbos-latitude7320-rotation-policy.apk
+  _sensor_policy_source=$G/sensors/$_sensor_policy_name
+  _sensor_policy_target=$_sensor_root/vendor/overlay/$_sensor_policy_name
+  _sensor_vendor=$_sensor_root/vendor
+  _sensor_hals=$_sensor_vendor/etc/sensors/hals.conf
+  _sensor_source=$G/sensors/$_sensor_hal_name
+
+  if [ "${SENSOR_HAL:-0}" != 1 ]; then
+    log "hook: experimental Latitude 7320 Sensors HAL disabled (SENSOR_HAL=0)"
+    return 0
+  fi
+  if [ "$(cat "$_sensor_sysfs/class/dmi/id/sys_vendor" 2>/dev/null)" != "Dell Inc." ] ||
+     [ "$(cat "$_sensor_sysfs/class/dmi/id/product_name" 2>/dev/null)" != "Latitude 7320 Detachable" ] ||
+     [ "$(cat "$_sensor_sysfs/class/dmi/id/board_name" 2>/dev/null)" != "0TNW0H" ]; then
+    log "hook: experimental Sensors HAL not selected (DMI is not Latitude 7320 Detachable / 0TNW0H)"
+    return 0
+  fi
+  if [ ! -s "$_sensor_source" ]; then
+    log "hook: experimental Latitude 7320 Sensors HAL unavailable (missing $_sensor_source)"
+    return 0
+  fi
+  if [ ! -s "$_sensor_policy_source" ]; then
+    log "hook: experimental Latitude 7320 Sensors HAL not selected (missing display policy overlay $_sensor_policy_source)"
+    return 0
+  fi
+  if [ ! -d "$_sensor_vendor/lib64" ] || [ ! -f "$_sensor_hals" ] ||
+     ! grep -Fq '/vendor/lib64/android.hardware.sensors@2.1-Desktop-IIO-Subhal.so' "$_sensor_hals"; then
+    log "hook: experimental Latitude 7320 Sensors HAL not selected (unexpected vendor HAL layout)"
+    return 0
+  fi
+  if [ ! -f "$G/sensor_vendor_overlay.sh" ]; then
+    log "hook: experimental Latitude 7320 Sensors HAL unavailable (missing vendor overlay helper)"
+    return 0
+  fi
+  if grep -Fqx "$_sensor_hal_path" "$_sensor_hals"; then
+    if [ -s "$_sensor_vendor/lib64/$_sensor_hal_name" ] && [ -s "$_sensor_policy_target" ]; then
+      GBOS_SENSOR_HAL_SELECTED=1
+      GBOS_SENSOR_ROTATION_POLICY_SELECTED=1
+      log "hook: experimental Latitude 7320 Sensors HAL and rotation policy already selected"
+      return 0
+    fi
+    log "hook: experimental Latitude 7320 Sensors HAL config exists without its library or rotation policy"
+    return 1
+  fi
+
+  . "$G/sensor_vendor_overlay.sh"
+  if ! gbos_prepare_sensor_vendor_overlay; then
+    return 1
+  fi
+  if ! cp "$_sensor_source" "$_sensor_vendor/lib64/$_sensor_hal_name" ||
+     ! chmod 0644 "$_sensor_vendor/lib64/$_sensor_hal_name"; then
+    log "hook: experimental Latitude 7320 Sensors HAL not selected (cannot stage library)"
+    return 1
+  fi
+  if ! mkdir -p "$_sensor_vendor/overlay" ||
+     ! cp "$_sensor_policy_source" "$_sensor_policy_target" ||
+     ! chmod 0644 "$_sensor_policy_target"; then
+    rm -f "$_sensor_vendor/lib64/$_sensor_hal_name" "$_sensor_policy_target"
+    log "hook: experimental Latitude 7320 Sensors HAL not selected (cannot stage display policy overlay)"
+    return 1
+  fi
+  if [ -n "$(tail -c 1 "$_sensor_hals" 2>/dev/null)" ] &&
+     ! printf '\n' >> "$_sensor_hals"; then
+    rm -f "$_sensor_vendor/lib64/$_sensor_hal_name" "$_sensor_policy_target"
+    log "hook: experimental Latitude 7320 Sensors HAL library staged but not selected (cannot update hals.conf)"
+    return 1
+  fi
+  if ! printf '%s\n' "$_sensor_hal_path" >> "$_sensor_hals"; then
+    rm -f "$_sensor_vendor/lib64/$_sensor_hal_name" "$_sensor_policy_target"
+    log "hook: experimental Latitude 7320 Sensors HAL library staged but not selected (cannot update hals.conf)"
+    return 1
+  fi
+  GBOS_SENSOR_HAL_SELECTED=1
+  GBOS_SENSOR_ROTATION_POLICY_SELECTED=1
+  log "hook: experimental Latitude 7320 Sensors HAL and auto-rotation resource overlay selected; range and axis mapping remain provisional"
+}
+gbos_enable_latitude7320_sensors
+
+gbos_sensor_ueventd
+
+# Google's vendor modules are built for Google's kernel and cannot be loaded by the gbOS86 kernel.
+# Use a tmpfs mounted directly over the vendor directory: a bind source in initramfs /tmp is removed
+# by switch_root, allowing ueventd to see the incompatible modules again.
+. $G/mask_vendor_modules.sh
+gbos_mask_vendor_modules || true
+
+gbos_configure_boot_debug() {
+  GBOS_LOGCAT_START=
+  GBOS_DEBUG_DIAGNOSTIC_START=
+  GBOS_DRM_DEBUG_STOP=
+  if [ "${DEBUG_LOGS:-0}" = 1 ]; then
+    GBOS_LOGCAT_START='    start gbos_logcat'
+    GBOS_DEBUG_DIAGNOSTIC_START='    start gbos_audiodiag
+    start gbos_displaydiag
+    start gbos_aidiag'
+    GBOS_DRM_DEBUG_STOP='    write /sys/module/drm/parameters/debug 0'
+  fi
+}
+
+gbos_configure_kvm_trace() {
+  GBOS_KVM_TRACE_SETUP=
+  GBOS_KVM_TRACE_ON=
+  GBOS_KVM_TRACE_STOP=
+  if [ "${KVM_TRACE:-0}" = 1 ]; then
+    GBOS_KVM_TRACE_SETUP='    write /sys/kernel/tracing/buffer_size_kb 8192
+    write /sys/kernel/tracing/events/kvm/kvm_inj_exception/enable 1
+    write /sys/kernel/tracing/events/kvm/kvm_emulate_insn/enable 1
+    write /sys/kernel/tracing/events/kvm/kvm_userspace_exit/enable 1
+    write /sys/kernel/tracing/events/kvm/kvm_exit/enable 1
+    write /sys/kernel/tracing/events/kvm/kvm_pio/enable 1
+    write /sys/kernel/tracing/events/kvm/kvm_mmio/enable 1
+    write /sys/kernel/tracing/events/kvm/kvm_hypercall/enable 1
+    write /sys/kernel/tracing/events/kvm/kvm_fast_mmio/enable 1
+    write /sys/kernel/tracing/events/kvm/kvm_inj_virq/enable 1
+    write /sys/kernel/tracing/events/kvm/kvm_pic_set_irq/enable 1
+    write /sys/kernel/tracing/events/kvm/kvm_ioapic_set_irq/enable 1
+    write /sys/kernel/tracing/events/kvm/kvm_msi_set_irq/enable 1
+    write /sys/kernel/tracing/events/kvm/kvm_set_irq/enable 1
+    write /sys/kernel/tracing/events/kvm/kvm_apic_accept_irq/enable 1'
+    GBOS_KVM_TRACE_ON='    write /sys/kernel/tracing/tracing_on 1'
+    GBOS_KVM_TRACE_STOP='    write /sys/kernel/tracing/tracing_on 0'
+  fi
+}
+
 # --- software rendering for GPUs Google's image has no driver for (AMD) -- gbos_gpu_* functions ---
 # Google's image renders through ANGLE -> Vulkan, and its only Vulkan driver is Intel's ANV (/vendor/lib64/hw/vulkan.intel.so);
 # buffers come from minigbm (gralloc, /vendor/lib64/libminigbm_gralloc.so), which has no amdgpu backend. On a laptop whose GPU
@@ -301,9 +471,14 @@ for _e in /sys/devices/system/cpu/cpu*/cpufreq/energy_performance_preference; do
   echo performance > "$_e" 2>/dev/null || true
 done
 
-# drm.debug=0x04 (KMS only; not ATOMIC, which logs every frame): i915 dumps gamma/CSC mode and range per modeset while
-# drm_hwcomposer first sets up the panel. gbos.rc turns it off at boot_completed. Washed-out colours.
-echo 0x04 > /sys/module/drm/parameters/debug 2>/dev/null && log "hook: drm.debug=0x04 (KMS) until boot_completed"
+gbos_configure_boot_debug
+gbos_configure_kvm_trace
+if [ "${DEBUG_LOGS:-0}" = 1 ]; then
+  # KMS-only diagnostics during initial modesets; disabled again at boot_completed.
+  echo 0x04 > /sys/module/drm/parameters/debug 2>/dev/null && log "hook: drm.debug=0x04 (KMS) until boot_completed"
+else
+  log "hook: verbose diagnostics disabled (DEBUG_LOGS=0)"
+fi
 
 # Fake ChromeOS boot disk for the boot HAL: misc + vbmeta_a/vbmeta_b with cgpt slot attributes.
 if [ -f $G/bootdisk.img ]; then
@@ -347,8 +522,22 @@ gbos_touchpads() {
     if (name ~ /touchpad|trackpad/ && bus != "0003" && v != "" && p != "") print tolower(v) ":" tolower(p)
   }' ${INPUTS:-/proc/bus/input/devices} 2>/dev/null | sort -u
 }
+
+# The Goodix MOC backend supports this exact USB product only. USBDEVS is for regression tests.
+gbos_goodix_fp() {
+  for d in ${USBDEVS:-/sys/bus/usb/devices}/*; do
+    [ "$(cat "$d/idVendor" 2>/dev/null)" = 27c6 ] || continue
+    [ "$(cat "$d/idProduct" 2>/dev/null)" = 6384 ] || continue
+    echo 27c6:6384
+    return
+  done
+}
+
 if mount --bind /gbos /new/postinstall; then
   mkdir -p /tmp/sysinit && cp -a /new/system/etc/init/. /tmp/sysinit/
+if [ -f /tmp/sysinit/gscutil.rc ]; then
+  rm -f /tmp/sysinit/gscutil.rc && log "hook: gscutil disabled (no Google GSC; avoids /dev/tpm0 wait)"
+fi
   rm -f /tmp/sysinit/gscd.rc   # gscd needs Google's security chip (/dev/tpm0); it only crash-loops here
   rm -f /tmp/sysinit/timberslide.rc # timberslide needs ChromeOS EC (/dev/cros_ec); crash-loops on generic PCs
   rm -f /tmp/sysinit/udsattestation.rc # udsattestation needs Titan C security chip; loops on generic PCs
@@ -363,10 +552,16 @@ if mount --bind /gbos /new/postinstall; then
   # The Trusty security VM never answers here (software KeyMint/Gatekeeper replace it) but spins one CPU core at 100%: stopped once
   # booted. TRUSTY_VM=1 in gbos.cfg keeps it running (for debugging).
   if [ "${TRUSTY_VM:-0}" = 1 ]; then TRUSTYSTOP="# gbos: Trusty VM kept (TRUSTY_VM=1)"; else TRUSTYSTOP="stop trusty_security_protected_vm_launcher"; fi
-  # Surface Laptop 7 daemons (camera bridge, lid/sleep guard): started only on a Surface. gbos_sleep_guard is not oneshot (it is a daemon on
-  # a Surface), so on any other laptop it exited at once and init restarted it every 5 s for as long as the system ran.
-  if grep -qi 'Surface' /sys/class/dmi/id/product_name 2>/dev/null; then SURFACESTART="start gbos_camera
-    start gbos_sleep_guard"; else SURFACESTART="# gbos: not a Surface, camera bridge and sleep guard not started"; fi
+  # The Surface sleep guard is a daemon and must not be restarted on other laptops. The Latitude camera bridge is opt-in.
+  if grep -qi 'Surface' /sys/class/dmi/id/product_name 2>/dev/null; then
+    SURFACESTART="start gbos_camera
+    start gbos_sleep_guard"
+  elif grep -qx 'Latitude 7320 Detachable' /sys/class/dmi/id/product_name 2>/dev/null &&
+       [ "${CAMERA_BRIDGE:-0}" = 1 ]; then
+    SURFACESTART="start gbos_camera"
+  else
+    SURFACESTART="# gbos: no DMI-approved camera bridge or Surface sleep guard"
+  fi
   IDCRC=
   if [ "${TOUCHPAD_FLICK:-1}" != 0 ]; then
     for tp in $(gbos_touchpads); do
@@ -386,6 +581,51 @@ if mount --bind /gbos /new/postinstall; then
     [ -n "$IDCRC" ] && IDCRC="    mkdir /data/system 0775 system system
     mkdir /data/system/devices 0775 system system
     mkdir /data/system/devices/idc 0775 system system$IDCRC"
+  fi
+  GBOS_SENSOR_TRIAL_START=
+  GBOS_SENSOR_ROTATION_POLICY_START=
+  GBOS_SENSOR_ROTATION_POLICY_SERVICE=
+  GBOS_CAMERA_CAPTURE_START=
+  GBOS_CAMERA_CAPTURE_SENSOR=${CAMERA_CAPTURE_SENSOR:-ov5675}
+  if [ "${CAMERA_CAPTURE_PROBE:-0}" = 1 ] && [ "${FROM:-}" = stick ] &&
+     { [ "$GBOS_CAMERA_CAPTURE_SENSOR" = ov5675 ] || [ "$GBOS_CAMERA_CAPTURE_SENSOR" = ov8856 ]; }; then
+    GBOS_CAMERA_CAPTURE_START="    start gbos_camera_capture"
+  fi
+  if [ "${GBOS_SENSOR_HAL_SELECTED:-0}" = 1 ] && [ -f "$G/sensor_trial_diag.sh" ]; then
+    GBOS_SENSOR_TRIAL_START="    start gbos_sensor_trial"
+  fi
+  if [ "${GBOS_SENSOR_ROTATION_POLICY_SELECTED:-0}" = 1 ] &&
+     [ -f "$G/sensor_rotation_policy.sh" ]; then
+    GBOS_SENSOR_ROTATION_POLICY_START="    start gbos_rotation_policy"
+    GBOS_SENSOR_ROTATION_POLICY_SERVICE="service gbos_rotation_policy /system/bin/sh /postinstall/gbos/sensor_rotation_policy.sh /postinstall/gbos/logs/boot-$N/rotation-policy.txt
+    user root
+    group root
+    seclabel u:r:shell:s0
+    oneshot
+    disabled"
+  fi
+  FPRC=
+  if [ "${FINGERPRINT:-1}" != 0 ]; then
+    if [ -x "$G/gbos_fp" ]; then
+      FPDEV=$(gbos_goodix_fp)
+      if [ -n "$FPDEV" ]; then
+        FPRC="# Experimental Goodix MOC HAL for the exact USB sensor $FPDEV.
+service gbos_fp /postinstall/gbos/gbos_fp
+    class hal
+    user system
+    group system usb
+    seclabel u:r:hal_fingerprint_default:s0
+    interface aidl android.hardware.biometrics.fingerprint.IFingerprint/default
+on post-fs-data
+    mkdir /data/vendor/crosfp 0770 system system
+    mkdir /data/vendor/crosfp/gbos_fp 0770 system system"
+        log "hook: fingerprint: starting Goodix HAL for $FPDEV"
+      else
+        log "hook: fingerprint: Goodix 27c6:6384 not present; CrosFP left as-is"
+      fi
+    else
+      log "hook: fingerprint: gbos_fp binary missing; CrosFP left as-is"
+    fi
   fi
   cat > /tmp/sysinit/gbos.rc <<RC
 # Rotate at 1 MB: on this stick, data written past ~4 MB of a file that stays open never reaches
@@ -416,6 +656,39 @@ service gbos_audiodiag /system/bin/sh -c "sleep 60; cd /proc/asound; ( head -n 3
     group root audio
     seclabel u:r:shell:s0
     oneshot
+
+# Sensors diagnostics, 60 s after boot: active HAL config, IIO values/access labels, service and framework enumeration.
+service gbos_sensordiag /system/bin/sh /postinstall/gbos/sensordiag.sh /postinstall/gbos/logs/boot-$N/sensors.txt
+    user root
+    group root
+    seclabel u:r:shell:s0
+    oneshot
+    disabled
+
+service gbos_sensor_trial /system/bin/sh /postinstall/gbos/sensor_trial_diag.sh /postinstall/gbos/logs/boot-$N/sensor-trial.txt
+    user root
+    group root
+    seclabel u:r:shell:s0
+    oneshot
+    disabled
+
+$GBOS_SENSOR_ROTATION_POLICY_SERVICE
+
+# Capture camera probe state as soon as Android finishes booting.
+service gbos_cameradiag /system/bin/sh -c ". /postinstall/gbos/hwdetect.sh; ( date; gbos_report_camera_bus_devices; gbos_report_camera_media_graph; gbos_report_camera_debug ) > /postinstall/gbos/logs/boot-$N/camera.txt 2>&1"
+    user root
+    group root
+    seclabel u:r:shell:s0
+    oneshot
+    disabled
+
+service gbos_camera_capture /system/bin/sh /postinstall/gbos/installer/bin/camera-capture-diag.sh /postinstall/gbos/logs/boot-$N/camera-capture.txt $GBOS_CAMERA_CAPTURE_SENSOR
+    user root
+    group root
+    seclabel u:r:shell:s0
+    oneshot
+    disabled
+
 # DRM card0 is configured directly in stage0_init before Android init starts.
 on early-init
     setprop sys.gbos_dri_fixed 1
@@ -428,10 +701,8 @@ on boot
     setprop persist.zygote.zygote_next.start_on_boot false
     start gbos_nativezygote
 on property:sys.boot_completed=1
-    # KMS debug was on during the HWC's first modesets (set early in hook.sh); turn it off again.
-    write /sys/module/drm/parameters/debug 0
-    # The KVM exit trace (kvmtrace.txt) only matters while the Trusty VM boots; left on it costs CPU and writes a lot.
-    write /sys/kernel/tracing/tracing_on 0
+$GBOS_DRM_DEBUG_STOP
+$GBOS_KVM_TRACE_STOP
     # Speakup synth hardware probe causes kernel panic if unassigned
     write /sys/accessibility/speakup/synth none
     # Maximize CPU frequency governor permanently
@@ -442,14 +713,17 @@ on property:sys.boot_completed=1
     $TRUSTYSTOP
     start gbos_skip_setup
     start gbos_optimize
-    start gbos_audiodiag
+    start gbos_sensordiag
+$GBOS_SENSOR_ROTATION_POLICY_START
+$GBOS_SENSOR_TRIAL_START
+    start gbos_cameradiag
+$GBOS_CAMERA_CAPTURE_START
     start gbos_devname
     start gbos_talkback
     start gbos_iptsd
     $SURFACESTART
     start gbos_wmsize
-    start gbos_displaydiag
-    start gbos_aidiag
+$GBOS_DEBUG_DIAGNOSTIC_START
     start gbos_ksu
 
 # update_engine runs normally to satisfy GMS binder without crashing
@@ -553,9 +827,9 @@ service gbos_iptsd /system/bin/sh /postinstall/gbos/surface/iptsd-run.sh $N
     disabled
 
 # Surface Laptop 7 IPU7 webcam bridge daemon
-service gbos_camera /system/bin/sh /postinstall/gbos/surface/surface-camera.sh
+service gbos_camera /system/bin/sh /postinstall/gbos/surface/surface-camera.sh $N
     user root
-    group root video
+    group root
     seclabel u:r:shell:s0
     oneshot
     disabled
@@ -593,6 +867,8 @@ service gbos_soft_gk /postinstall/gbos/soft_gk
     seclabel u:r:hal_gatekeeper_default:s0
     interface aidl android.hardware.gatekeeper.IGatekeeper/default
 
+$FPRC
+
 # Trusty security VM (KeyMint/Gatekeeper TEE) as a plain KVM VM: no pKVM on this laptop.
 # vendor/build.prop's protected_vm.supported=1 is hidden (see below), so the launcher falls back
 # to a non-protected VM; servicemanager starts it on demand for the KeyMint accessors.
@@ -609,33 +885,19 @@ on init && property:trusty.security_vm.enabled=1
     setprop ro.hardware.trusty_ipc_dev.gatekeeper VSOCK:200:0
     setprop storageproxyd_system.trusty_ipc_dev VSOCK:200:0
 
-# atrace.rc resets ftrace at late-init; turn the KVM trace back on before the Trusty VM starts.
+# Start Trusty before clients can connect. KVM tracing is separately opt-in because it is noisy.
 on early-fs
-    write /sys/kernel/tracing/buffer_size_kb 8192
-    write /sys/kernel/tracing/events/kvm/kvm_inj_exception/enable 1
-    write /sys/kernel/tracing/events/kvm/kvm_emulate_insn/enable 1
-    write /sys/kernel/tracing/events/kvm/kvm_userspace_exit/enable 1
-    write /sys/kernel/tracing/events/kvm/kvm_exit/enable 1
-    write /sys/kernel/tracing/events/kvm/kvm_pio/enable 1
-    write /sys/kernel/tracing/events/kvm/kvm_mmio/enable 1
-    write /sys/kernel/tracing/events/kvm/kvm_hypercall/enable 1
-    write /sys/kernel/tracing/events/kvm/kvm_fast_mmio/enable 1
-    write /sys/kernel/tracing/events/kvm/kvm_inj_virq/enable 1
-    write /sys/kernel/tracing/events/kvm/kvm_pic_set_irq/enable 1
-    write /sys/kernel/tracing/events/kvm/kvm_ioapic_set_irq/enable 1
-    write /sys/kernel/tracing/events/kvm/kvm_msi_set_irq/enable 1
-    write /sys/kernel/tracing/events/kvm/kvm_set_irq/enable 1
-    write /sys/kernel/tracing/events/kvm/kvm_apic_accept_irq/enable 1
+$GBOS_KVM_TRACE_SETUP
     # Boot the Trusty VM before any KeyMint/StrongBox client connects (vsock startup race).
     start trusty_security_protected_vm_launcher
-    write /sys/kernel/tracing/tracing_on 1
+$GBOS_KVM_TRACE_ON
 
 on post-fs
-    start gbos_logcat
+$GBOS_LOGCAT_START
     start gbos_sync
     start gbos_crashlog
 on post-fs-data
-    start gbos_logcat
+$GBOS_LOGCAT_START
     start gbos_sync
     start gbos_crashlog
     # KernelSU: the daemon has to be in /data/adb before the kernel's own init.rc runs it.
@@ -835,9 +1097,26 @@ fi
 # Keep vold off USB disks: its voldmanaged=usb rule picks up this stick, and its fsck_msdos
 # "repairs" the FAT while stage0 has it mounted (LOST.DIR, lost/truncated logs, cross-linked
 # clusters). The stick must only ever be mounted by stage0.
+gbos_stage0_fstab_overlay() {
+  sed \
+    -e '/voldmanaged=usb/d' \
+    -e 's#^/dev/block/by-name/userdata[[:space:]][[:space:]]*#LABEL=gbos-data-mounted-by-stage0 #' "$1"
+}
 F=/new/vendor/etc/fstab.android-desktop
-grep -v 'voldmanaged=usb' $F > /tmp/fstab.android-desktop \
-  && mount --bind /tmp/fstab.android-desktop $F && log "hook: vold USB rule removed from fstab"
+if gbos_stage0_fstab_overlay "$F" > /tmp/fstab.android-desktop; then
+  if grep -q '^LABEL=gbos-data-mounted-by-stage0 /data ' /tmp/fstab.android-desktop; then
+    log "hook: duplicate userdata wait skipped (stage0 already mounted /data)"
+  else
+    log "hook: userdata wait skip NOT applied (fstab entry changed)"
+  fi
+  if mount --bind /tmp/fstab.android-desktop "$F"; then
+    log "hook: vold USB rule removed from fstab"
+  else
+    log "hook: fstab overlay FAILED"
+  fi
+else
+  log "hook: fstab overlay generation FAILED"
+fi
 # Audio: the audio HAL (dras) needs a config whose <soundcard> equals the ALSA card id. Google ships only its SOF
 # SoundWire card; gbos/audio/gbos-hda-pch is the legacy-HDA one (card id PCH, true for nearly every Intel PCH HDA
 # laptop). For any other main card (SOF: sof-hda-dsp, sof-rt5682, ...) a copy is generated with that card's id and
@@ -908,6 +1187,9 @@ if [ -f $G/audio/gbos-hda-pch/audio_config.xml ]; then
       log "hook: could not re-probe internal audio card; HDMI audio may be unavailable"
     fi;;
   esac
+  if [ -z "$CID" ]; then
+    log "hook: no ALSA card; leaving vendor audio configuration untouched"
+  else
   mkdir -p /tmp/gbos-audio
   if [ -n "$CID" ] && [ "$CID" != PCH ]; then
     AC=gbos-gen
@@ -932,6 +1214,16 @@ if [ -f $G/audio/gbos-hda-pch/audio_config.xml ]; then
           && log "hook: audio audio_config for the Surface Laptop 7 installed"
       fi
     fi
+    if [ "$CID" = sofsoundwire ] && [ -f $G/audio/mixer_paths_latitude_7320.xml ] \
+       && grep -qi 'Latitude 7320 Detachable' /sys/class/dmi/id/product_name 2>/dev/null \
+       && grep -qi '0TNW0H' /sys/class/dmi/id/board_name 2>/dev/null; then
+      cp $G/audio/mixer_paths_latitude_7320.xml /tmp/gbos-audio/$AC/mixer_paths.xml \
+        && log "hook: audio mixer_paths for Dell Latitude 7320 Detachable (RT1316) installed"
+      if [ -f $G/audio/audio_config_latitude_7320.xml ]; then
+        cp $G/audio/audio_config_latitude_7320.xml /tmp/gbos-audio/$AC/audio_config.xml \
+          && log "hook: audio audio_config for Dell Latitude 7320 Detachable (RT711/RT714) installed"
+      fi
+    fi
     # ASRC lives in /tmp of the initramfs, which switch_root deletes: a bind mount of it is empty in Android (dras: "Failed to read
     # /vendor/etc/audio/gbos-gen/audio_config.xml"), so the files are copied into the tmpfs over /vendor/etc/audio below.
     ASRC=/tmp/gbos-audio/$AC; ADEF=/tmp/gbos-audio/audio_default.xml
@@ -943,6 +1235,7 @@ if [ -f $G/audio/gbos-hda-pch/audio_config.xml ]; then
     && mkdir -p $A/$AC && cp -r $ASRC/. $A/$AC/ \
     && mount --bind $ADEF /new/vendor/etc/data/hal_configs/audio_default.xml \
     && log "hook: audio config $AC (card id ${CID:-none}, name ${CNAME:-none}) active"
+  fi
 fi
 # apgetty (UART shell) has no UART configured here and crash-loops
 : > /tmp/empty.rc && mount --bind /tmp/empty.rc /new/system_ext/etc/init/apgetty.rc && log "hook: apgetty disabled"
@@ -951,17 +1244,20 @@ mount --bind /tmp/empty.rc /new/vendor/etc/init/suspend_notification_service.rc 
 mount --bind /tmp/empty.rc /new/vendor/etc/init/suspend_diagnostics.rc 2>/dev/null && log "hook: suspend_diagnostics disabled"
 log "hook: kvm: $(ls /sys/class/misc | grep -E 'kvm|vhost' | tr '\n' ' ')"
 
-# KVM trace -> kvmtrace.txt: guest exceptions / failed emulation / triple faults, to see why the
-# Trusty VM goes silent. Reader opens trace_pipe now so it survives switch_root.
-T=/tmp/tracing; mkdir -p $T
-if mount -t tracefs tracefs $T; then
-  E=$T/events/kvm
-  echo 8192 > $T/buffer_size_kb
-  for ev in kvm_inj_exception kvm_emulate_insn kvm_userspace_exit kvm_exit kvm_pio kvm_mmio kvm_hypercall kvm_fast_mmio kvm_inj_virq kvm_pic_set_irq kvm_ioapic_set_irq kvm_msi_set_irq kvm_set_irq kvm_apic_accept_irq; do
-    [ -d $E/$ev ] && echo 1 > $E/$ev/enable
-  done
-  ( exec 4<$T/trace_pipe; /gbos/busybox dd bs=4096 count=8000 iflag=fullblock <&4 >> $L/kvmtrace.txt 2>/dev/null ) &
-  log "hook: kvm tracing (all exits) -> kvmtrace.txt"
+# KVM trace -> kvmtrace.txt is opt-in; it can write tens of megabytes while Trusty starts.
+if [ "${KVM_TRACE:-0}" = 1 ]; then
+  T=/tmp/tracing; mkdir -p "$T"
+  if mount -t tracefs tracefs "$T"; then
+    E=$T/events/kvm
+    echo 8192 > "$T/buffer_size_kb"
+    for ev in kvm_inj_exception kvm_emulate_insn kvm_userspace_exit kvm_exit kvm_pio kvm_mmio kvm_hypercall kvm_fast_mmio kvm_inj_virq kvm_pic_set_irq kvm_ioapic_set_irq kvm_msi_set_irq kvm_set_irq kvm_apic_accept_irq; do
+      [ -d "$E/$ev" ] && echo 1 > "$E/$ev/enable"
+    done
+    ( exec 4<"$T/trace_pipe"; /gbos/busybox dd bs=4096 count=8000 iflag=fullblock <&4 >> "$L/kvmtrace.txt" 2>/dev/null ) &
+    log "hook: kvm tracing (all exits) -> kvmtrace.txt"
+  else
+    log "hook: tracefs mount FAILED"
+  fi
 else
-  log "hook: tracefs mount FAILED"
+  log "hook: KVM tracing disabled (KVM_TRACE=0)"
 fi

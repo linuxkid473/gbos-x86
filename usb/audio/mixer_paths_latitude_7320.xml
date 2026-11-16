@@ -1,0 +1,22 @@
+<?xml version='1.0' encoding='utf-8'?>
+<mixer>
+	<!-- RT1316's UCM Speaker enable sequence selects the stereo RX route and enables the DAC. -->
+	<path name="Speaker">
+		<ctl name="rt1316-1 RX Channel Select" value="L,R" />
+		<ctl name="rt1316-1 DAC Switch" value="1 1" />
+	</path>
+	<path name="Headphone">
+	</path>
+	<path name="Mic">
+		<ctl name="rt711 FU0F Capture Switch" value="1" />
+	</path>
+	<path name="InternalMic">
+		<ctl name="rt714 FU02 Capture Switch" value="1" />
+	</path>
+	<path name="HDMI1">
+	</path>
+	<path name="HDMI2">
+	</path>
+	<path name="HDMI3">
+	</path>
+</mixer>

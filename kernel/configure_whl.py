@@ -126,6 +126,12 @@ _m('DELL_LAPTOP', 'DELL_WMI', 'DELL_SMBIOS', 'DELL_WMI_DESCRIPTOR', 'THINKPAD_AC
 _y('MMC', 'USB_VIDEO_CLASS')
 _m('MMC_SDHCI', 'MMC_SDHCI_PCI', 'MMC_REALTEK_PCI', 'MISC_RTSX_PCI', 'MISC_RTSX_USB', 'R8169', 'E1000E', 'IGC',
    'IGB', 'R8152', 'USB_USBNET', 'USB_NET_CDCETHER', 'USB_RTL8152', 'USB_NET_AX88179_178A', 'USB_NET_CDC_NCM')
+# Intel IPU6 cameras (Latitude 7320: PCI 8086:9a19; front OVTI5678 and rear OVTI8856).
+# Board data and sensor/VCM wiring are applied by isa_emu_patch/camera_7320.py.
+# Android Camera3 integration and hardware frame capture remain separate requirements.
+_y('MEDIA_PCI_SUPPORT')
+_m('IPU_BRIDGE', 'VIDEO_INTEL_IPU6', 'VIDEO_OV5675', 'VIDEO_OV8856', 'VIDEO_DW9714', 'INTEL_SKL_INT3472',
+   'GPIO_TPS68470', 'REGULATOR_TPS68470', 'COMMON_CLK_TPS68470')
 # Audio: every common HDA codec, plus SOF for machines with DMIC/SoundWire (HDA is still preferred when it works).
 _m('SND_HDA_CODEC_CIRRUS', 'SND_HDA_CODEC_CS420X', 'SND_HDA_CODEC_CS421X', 'SND_HDA_CODEC_CS8409', 'SND_HDA_CODEC_CONEXANT',
    'SND_HDA_CODEC_SIGMATEL', 'SND_HDA_CODEC_VIA', 'SND_HDA_CODEC_ANALOG', 'SND_HDA_CODEC_CMEDIA', 'SND_HDA_CODEC_SI3054',
@@ -147,7 +153,9 @@ _m('SND_SOC_SOF_PCI', 'SND_SOC_SOF_ACPI', 'SND_SOC_SOF_INTEL_COMMON', 'SND_SOC_S
    'SND_SOC_RT1015', 'SND_SOC_RT1015P', 'SND_SOC_TAS2562')
 
 # These must come out exactly as requested after olddefconfig.
-REQUIRED = ['DRM_I915', 'TRIM_UNUSED_KSYMS', 'MODULE_SIG_PROTECT', 'ANDROID_BINDER_IPC', 'BLK_DEV_NVME', 'KSU', 'VMD']
+REQUIRED = ['DRM_I915', 'TRIM_UNUSED_KSYMS', 'MODULE_SIG_PROTECT', 'ANDROID_BINDER_IPC', 'BLK_DEV_NVME',
+            'KSU', 'VMD', 'IPU_BRIDGE', 'VIDEO_INTEL_IPU6', 'VIDEO_OV5675', 'VIDEO_OV8856', 'VIDEO_DW9714',
+            'INTEL_SKL_INT3472', 'GPIO_TPS68470', 'REGULATOR_TPS68470', 'COMMON_CLK_TPS68470']
 
 
 def parse(text):
@@ -171,7 +179,9 @@ def render(values):
 def main():
     if sys.argv[1] == '--check':
         resolved = parse(open(sys.argv[2]).read())
-        bad = {k: resolved.get(k, 'n') for k in REQUIRED if resolved.get(k, 'n') != OVERRIDES[k]}
+        expected = OVERRIDES.copy()
+        expected.update(GENERIC)
+        bad = {k: resolved.get(k, 'n') for k in REQUIRED if resolved.get(k, 'n') != expected[k]}
         missed = {k: resolved.get(k, 'n') for k, v in OVERRIDES.items() if resolved.get(k, 'n') != v}
         print('not resolved as requested:', missed or 'none')
         gmiss = sorted(k for k, v in GENERIC.items() if resolved.get(k, 'n') != v)

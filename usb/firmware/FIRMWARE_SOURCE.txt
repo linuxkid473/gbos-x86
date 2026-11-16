@@ -1,2 +1,3 @@
 linux-firmware commit: 12dfe670ce7c5987a60fab36d974c4a7d2a6eeeb
 sof-bin: v2026.09.2
+ipu6-camera-bins: commit 30e87664829782811a765b0ca9eea3a878a7ff29, ipu6_fw.bin sha256 70cbe88d075dc03938a94a897912409c5fdd56dc987b3db2a9a2a867bb2f5f99

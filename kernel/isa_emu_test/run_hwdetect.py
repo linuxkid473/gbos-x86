@@ -5,6 +5,20 @@ import pathlib, subprocess, sys, tempfile
 repo = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(repo / 'lapis/qemu'))
 from cpio_tree import pack
+module_root = repo / 'usb/modules/lib/modules/6.18.21-gbos-whl'
+sensor_modules = ('kernel/drivers/hid/hid-sensor-hub.ko',
+                  'kernel/drivers/iio/common/hid-sensors/hid-sensor-iio-common.ko',
+                  'kernel/drivers/iio/common/hid-sensors/hid-sensor-trigger.ko',
+                  'kernel/drivers/iio/accel/hid-sensor-accel-3d.ko',
+                  'kernel/drivers/iio/orientation/hid-sensor-rotation.ko')
+missing = [name for name in sensor_modules if not (module_root / name).is_file()]
+if missing:
+    raise SystemExit(f'gbos module payload is missing HID sensor drivers: {missing}')
+aliases = (module_root / 'modules.alias').read_text()
+for alias in ('alias platform:HID-SENSOR-200073 hid_sensor_accel_3d',
+              'alias platform:HID-SENSOR-20008a hid_sensor_rotation'):
+    if alias not in aliases:
+        raise SystemExit(f'gbos module aliases are missing {alias}')
 init = b'''#!/bin/busybox sh
 /bin/busybox --install -s /bin
 mount -t proc proc /proc; mount -t sysfs sysfs /sys; mount -t devtmpfs dev /dev
@@ -31,4 +45,12 @@ with tempfile.TemporaryDirectory() as tmp:
     r = subprocess.run(cmd, capture_output=True, text=True, errors='replace', timeout=900)
 out = r.stdout + r.stderr
 open('hwdetect_last.log', 'w').write(out)
+preload = out.find('LOG: hwdetect: SoundWire codec modules requested (before coldplug)')
+coldplug = out.find('LOG: hwdetect: coldplug pass 1:')
+if preload < 0 or coldplug < 0 or preload > coldplug:
+    raise SystemExit('SoundWire codec modules were not requested before coldplug')
+for section in ('== iio devices', '== HID sensor platform devices', '== i2c devices',
+                '== media devices', '== video devices (cameras)'):
+    if section not in out:
+        raise SystemExit(f'hwdetect report is missing {section}')
 print('\n'.join(l for l in out.splitlines() if 'warning: TCG' not in l)[-6000:])

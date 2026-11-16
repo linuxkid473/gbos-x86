@@ -1,0 +1,9 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="android.overlay.gbos.latitude7320.rotation">
+    <uses-sdk android:minSdkVersion="37" android:targetSdkVersion="37" />
+    <application android:hasCode="false" />
+    <overlay
+        android:targetPackage="android"
+        android:priority="100"
+        android:isStatic="true" />
+</manifest>

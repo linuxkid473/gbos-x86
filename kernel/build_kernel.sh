@@ -25,8 +25,8 @@
 set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 JOBS=${2:-$(nproc)}
-VOL=gbos-ksrc
-C=/build/inputs/clang-r584948c
+VOL=${GBOS_KERNEL_VOLUME:-gbos-ksrc}
+C=${CLANG_DIR:-/build/inputs/clang-r584948c}
 
 # The base config: the one embedded in the shipped kernel, unless one is given.
 BASE=${1:-}
@@ -38,10 +38,13 @@ if [ -z "$BASE" ]; then
   echo "base config: extracted from $(basename "$ROOT/usb/out/BOOTX64.EFI")"
 else
   echo "base config: $BASE"
+  cp "$BASE" "$W/base.config"
+  BASE=$W/base.config
 fi
 
 docker run --rm -i --platform linux/amd64 -v "$VOL":/build -v "$ROOT":/host:ro -v "$W":/cfg gbos-kbuild bash -s <<EOF
 set -e
+[ -x $C/bin/clang-22 ] || { echo "missing clang-22 in $C (set CLANG_DIR to an installed toolchain)" >&2; exit 1; }
 export PATH=$C/bin:\$PATH LD_LIBRARY_PATH=$C/lib:\$LD_LIBRARY_PATH
 # KernelSU reads its version from its own git checkout; the volume's files are root's, the
 # checkout on the host is not, so git would refuse it without this.
@@ -70,6 +73,7 @@ for s in i915_color_pipeline i915_edp_colorspace i915_edp_no_colorspace i915_edp
   sh \$P/\$s.sh > /dev/null
 done
 python3 \$P/sdw_sl7.py /build/src > /dev/null
+python3 /host/kernel/isa_emu_patch/camera_7320.py /build/src
 P=/host/kernel/kernelsu sh /host/kernel/kernelsu/apply.sh | tail -2
 
 # 2. the config
@@ -109,8 +113,8 @@ rm -f /host/usb/modules/lib/modules/*/build
 # usb/hwdetect.sh binds gbos/modules/lib/modules/\$(uname -r): the directory name has to be the running kernel's release.
 rel=\$(cat /build/out/include/config/kernel.release)
 [ -f /host/usb/modules/lib/modules/\$rel/modules.dep ] || { echo "module tree is not usb/modules/lib/modules/\$rel" >&2; exit 1; }
-# Which build the tree belongs to (exported-symbol CRCs + module signing key): tools/deploy_stick.sh replaces the stick's tree when this differs.
-cat /build/out/Module.symvers /build/out/certs/signing_key.x509 | sha256sum | cut -d' ' -f1 > /host/usb/modules/lib/modules/\$rel/gbos-build-id
+# Include the kernel and actual module tree so added or changed modules trigger deployment.
+sh /host/kernel/module_build_id.sh /host/usb/out/BOOTX64.EFI /host/usb/modules/lib/modules/\$rel > /host/usb/modules/lib/modules/\$rel/gbos-build-id
 # the files were written by root in the container: give them back to the user
 chown -R $(id -u):$(id -g) /host/usb/modules /host/usb/kmod /host/usb/out/BOOTX64.EFI
 for m in btusb btintel btrtl; do
@@ -121,5 +125,5 @@ EOF
 echo "kernel: usb/out/BOOTX64.EFI ($(wc -c < "$ROOT/usb/out/BOOTX64.EFI" | tr -d " ") bytes)"
 echo "modules: $(find "$ROOT/usb/modules" -name '*.ko' | wc -l) in usb/modules/"
 echo
-echo "Test it:  kernel/isa_emu_test/run_qemu.py usb/out/BOOTX64.EFI   (expects ISA_EMU_TEST_PASS)"
+echo "Test it:  kernel/isa_emu_test/run_isa_qemu.py usb/out/BOOTX64.EFI   (expects ISA_EMU_TEST_PASS)"
 echo "Ship it:  copy usb/out/BOOTX64.EFI to both EFI copies on the stick, then '1 Update'."

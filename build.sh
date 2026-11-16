@@ -8,6 +8,8 @@
 #   ./build.sh --dualboot --target /dev/sda -> install directly to disk alongside existing Windows/Linux
 #   ./build.sh -y                  don't ask before downloading (uses standard if not specified)
 #   ./build.sh --dry-run           show what would be downloaded and built, change nothing
+#   GBOS_SENSOR_BUILD_INPUTS=... GBOS_SENSOR_BUILD_CLANG=... ./build.sh
+#                                  also build the experimental Latitude 7320 Sensors sub-HAL
 #
 # What it does (each step is skipped when its result already exists, so re-running is cheap and resumable):
 #   1. Google's OS: downloads Google's public Googlebook recovery image (7.7 GB) and extracts only the six partitions
@@ -217,9 +219,23 @@ have_ksu || NEED="$NEED\n  - $KSU_APK + $KSUD (19 MB, from the KernelSU release 
 if [ -z "$NEED" ]; then say "everything is already downloaded"; else
   printf 'This will download:%b\n' "$NEED"
 fi
+if [ -n "${GBOS_SENSOR_BUILD_INPUTS:-}" ]; then
+  [ "$BUILD_TYPE" != dualboot ] || die "experimental sensor payload is not supported by the dualboot installer"
+  echo "Experimental Sensors sub-HAL: will build; boot hook selects it only on the exact Latitude 7320 DMI."
+else
+  echo "Experimental Sensors sub-HAL: not included (set GBOS_SENSOR_BUILD_INPUTS to the prepared compact build inputs)."
+fi
+echo "Goodix fingerprint HAL: will build from the local Android image and be enabled only for USB 27c6:6384 (set FINGERPRINT=0 to opt out at boot)."
 
 FREE_KB=$(df -k . | awk 'NR==2{print $4}'); [ "$FREE_KB" -gt 36000000 ] || printf '\nWARNING: only %d GB free here; about 35 GB are needed.\n' $((FREE_KB / 1000000))
 [ $DRY = 1 ] && { echo "(dry run: nothing changed)"; exit 0; }
+(
+  CAMERA_CONFIG=$(mktemp)
+  trap 'rm -f "$CAMERA_CONFIG"' EXIT HUP INT TERM
+  python3 tools/extract_ikconfig.py usb/out/BOOTX64.EFI > "$CAMERA_CONFIG" ||
+    die "could not extract the current kernel config; rebuild it with kernel/build_kernel.sh"
+  sh tools/check_camera_payload.sh "$CAMERA_CONFIG" "$KREL" usb
+)
 if [ -n "$NEED" ] && [ $YES = 0 ]; then printf '\nContinue? [y/N] '; read -r a; case $a in y|Y|yes) ;; *) exit 1;; esac; fi
 
 if ! have_parts; then
@@ -259,6 +275,16 @@ if ! have_ksu; then
   chmod 755 usb/ksu/ksud
 else say "    KernelSU manager + ksud: present"; fi
 
+SENSOR_PAYLOAD=
+if [ -n "${GBOS_SENSOR_BUILD_INPUTS:-}" ]; then
+  say "Building experimental Latitude 7320 Sensors sub-HAL"
+  SENSOR_PAYLOAD="$PWD/build/sensor-experimental/android.hardware.sensors@2.1-trogdor-subhal.so"
+  sh sensors/trogdor/image_payload.sh build-docker "$GBOS_SENSOR_BUILD_INPUTS" "$SENSOR_PAYLOAD" "${GBOS_SENSOR_BUILD_CLANG:-}"
+fi
+
+say "Building Goodix 27c6:6384 fingerprint HAL"
+sh fingerprint/build_image.sh lapis/parts
+
 if [ "$BUILD_TYPE" = "dualboot" ]; then
   [ -n "$TARGET_DISK" ] || die "Target disk required for dualboot. Pass --target /dev/sdX"
   say "4/4 installing gbOS86 in dual-boot mode onto $TARGET_DISK"
@@ -270,7 +296,7 @@ else
   say "4/4 building the image ($BUILD_TYPE)"
   MAKE_FLAGS="--type $BUILD_TYPE --data-size $DATA_GB"
   [ "$AUTO_TAILOR" = 1 ] && MAKE_FLAGS="$MAKE_FLAGS --auto"
-  sh tools/make_gbos86_image.sh $MAKE_FLAGS
+  GBOS_SENSOR_PAYLOAD="$SENSOR_PAYLOAD" sh tools/make_gbos86_image.sh $MAKE_FLAGS
   echo
   echo "Done. Flash the .img in dist/ to a USB stick or target drive (balenaEtcher, Rufus, or dd), then boot it."
 fi

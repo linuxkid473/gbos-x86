@@ -5,7 +5,16 @@
 # to Android's USB Camera HAL via v4l2loopback (/dev/video42).
 # Hardware sensor streaming is gated on-demand (LED only lights when an app uses the camera).
 
-# Exit immediately on non-Surface / non-IPU7 hardware so service costs nothing
+# The Latitude 7320 uses a separate, opt-in IPU6 bridge.
+if grep -qx 'Latitude 7320 Detachable' /sys/class/dmi/id/product_name 2>/dev/null; then
+    . /postinstall/gbos/gbos.cfg
+    if [ "${CAMERA_BRIDGE:-0}" = 1 ]; then
+        exec /system/bin/sh /postinstall/gbos/installer/bin/ipu6-camera-bridge.sh "$1"
+    fi
+    exit 0
+fi
+
+# A media node alone does not identify this Surface-specific sensor or pipeline.
 if ! grep -qi 'Surface' /sys/class/dmi/id/product_name 2>/dev/null || [ ! -e /dev/media0 ]; then
     exit 0
 fi

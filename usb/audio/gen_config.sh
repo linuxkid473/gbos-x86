@@ -14,10 +14,11 @@
 # sof-hda-generic*.tplg) numbers its PCMs by the topology and has separate jack input devices:
 #   pcm0 HDA Analog (playback+capture), pcm31 HDA Analog Deep Buffer, pcm3/4/5 HDMI1..3, pcm6 DMIC (48 kHz 2ch), pcm7 DMIC16kHz;
 #   inputs "<name> Headphone", "<name> Mic", "<name> HDMI/DP,pcm=3|4|5".
-# Mapping: Speaker/Headphone = first non-HDMI playback PCM; Mic (headset jack) = first analog capture PCM; InternalMic = the DMIC
-# capture PCM when the card has one (SOF), else the analog capture PCM (legacy HDA: the codec's own mic pin); HDMI1..3 = the
-# HDMI/DP playback PCMs in device order (an HDMI section with no PCM is dropped; sections are optional). JackDev = the real input
-# device names found in INPUTS. Anything that cannot be determined keeps the template value (= the old behaviour).
+# Mapping: Speaker uses a PCM explicitly named "Speaker" when available, else the first non-HDMI playback PCM; Headphone uses the
+# first non-HDMI playback PCM. Mic (headset jack) uses the first analog capture PCM; InternalMic uses the DMIC capture PCM when the
+# card has one (SOF), else analog capture (legacy HDA: the codec's own mic pin). HDMI1..3 use HDMI/DP playback PCMs in device order
+# (an HDMI section with no PCM is dropped; sections are optional). JackDev uses the real input device names found in INPUTS.
+# Anything that cannot be determined keeps the template value (= the old behaviour).
 set -e
 T=$1; DEFX=$2; OUT=$3; AC=$4; CID=$5; CNAME=$6
 ASOUND=${ASOUND:-/proc/asound}; INPUTS=${INPUTS:-/proc/bus/input/devices}
@@ -115,4 +116,4 @@ sedi "$O/mixer_paths.xml" \
   -e '/name="Capture Switch"/{' -e p -e 's/name="Capture Switch"/name="Mic Capture Switch"/' -e p \
   -e 's/name="Mic Capture Switch"/name="Headset Mic Capture Switch"/' -e '}'
 
-echo "pcm map: card=${CARDNO:-?} analog-playback=${APB:--} analog-capture=${ACP:--} dmic=${DMIC:--} internal-mic=${IMIC:--} hdmi=${HDMI:--}; jacks: headphone='${HPJ:--}' mic='${MICJ:--}'"
+echo "pcm map: card=${CARDNO:-?} playback-default=${APB:--} speaker-playback=${SPK:-${APB:--}} headphone-playback=${APB:--} analog-capture=${ACP:--} dmic=${DMIC:--} internal-mic=${IMIC:--} hdmi=${HDMI:--}; jacks: headphone='${HPJ:--}' mic='${MICJ:--}'"
