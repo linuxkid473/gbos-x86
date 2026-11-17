@@ -16,6 +16,15 @@ shell() {
   setsid cttyhack sh </dev/tty1 >/dev/tty1 2>&1
 }
 fail() { log "FATAL: $*"; shell "failure"; }
+# The stage0 screen reader needs a sound card the kernel brings up by itself: a legacy HDA controller (PCI class 0x0403).
+# SOF/SoundWire-only laptops (class 0x0401, e.g. Latitude 7320) never get one this early; there the copy to RAM (~2 s) and
+# the card wait (~3 s) only delayed every boot before ending in "no sound card".
+has_hda_controller() {
+  for _p in ${GBOS_SYSFS_ROOT:-/sys}/bus/pci/devices/*/class; do
+    case "$(cat "$_p" 2>/dev/null)" in 0x0403*) return 0;; esac
+  done
+  return 1
+}
 
 log "=== gbOS86 boot, kernel $(uname -r) ==="
 mdev -s
@@ -77,7 +86,9 @@ if [ -n "$STICK" ]; then
     grep -q '^BOOT_FROM=stick' /gbos/gbos/gbos.cfg 2>/dev/null && CFGMODE=live
     # Screen reader (Speakup + espeakup, gbos/a11y/ on the stick, see usb/a11y/start.sh): copy it to RAM so the stick can be unmounted,
     # and give the menu longer (60 s) when it speaks. gbos.cfg: A11Y=0 off, A11Y_MENU_TIMEOUT=seconds.
-    if [ -f /gbos/gbos/a11y/start.sh ] && ! grep -q '^A11Y=0' /gbos/gbos/gbos.cfg 2>/dev/null; then
+    if [ -f /gbos/gbos/a11y/start.sh ] && ! grep -q '^A11Y=0' /gbos/gbos/gbos.cfg 2>/dev/null && ! has_hda_controller; then
+      log "a11y: no HDA sound controller (SOF/SoundWire audio only), no early speech; skipping the screen reader"
+    elif [ -f /gbos/gbos/a11y/start.sh ] && ! grep -q '^A11Y=0' /gbos/gbos/gbos.cfg 2>/dev/null; then
       mkdir -p /a11y && cp -a /gbos/gbos/a11y/. /a11y/ 2>/dev/null
       MENU_T=$(sed -n 's/^A11Y_MENU_TIMEOUT=\([0-9][0-9]*\)$/\1/p' /gbos/gbos/gbos.cfg 2>/dev/null | tail -1); MENU_T=${MENU_T:-60}
     fi

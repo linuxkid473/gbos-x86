@@ -6,10 +6,11 @@ HOOK=$ROOT/usb/hook.sh
 CFG=$ROOT/usb/gbos.cfg
 BUILDER=$ROOT/tools/make_gbos86_image.sh
 TMP=$(mktemp -d)
-trap 'rm -f "$TMP/functions.sh" "$TMP/fstab" "$TMP/expected" "$TMP/actual" "$TMP/image.cfg" "$TMP/builder-function.sh"; rmdir "$TMP"' EXIT HUP INT TERM
+trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 
 sed -n '/^gbos_configure_boot_debug() {/,/^}/p' "$HOOK" > "$TMP/functions.sh"
 sed -n '/^gbos_configure_kvm_trace() {/,/^}/p' "$HOOK" >> "$TMP/functions.sh"
+sed -n '/^gbos_hide_boot_usb_from_vold() {/,/^}/p' "$HOOK" >> "$TMP/functions.sh"
 sed -n '/^gbos_stage0_fstab_overlay() {/,/^}/p' "$HOOK" >> "$TMP/functions.sh"
 . "$TMP/functions.sh"
 
@@ -41,16 +42,71 @@ cat > "$TMP/fstab" <<'EOF'
 /dev/block/by-name/system /system erofs ro wait,first_stage_mount
 /dev/block/by-name/userdata /data ext4 noatime,nosuid,nodev wait,check,encryptable=userdata
 /dev/block/by-name/metadata /metadata ext4 noatime,nosuid,nodev wait,first_stage_mount
-/dev/block/sda1 /mnt/media_rw/usb vfat nosuid,nodev wait,voldmanaged=usb:auto
+/devices/*/usb* auto auto defaults voldmanaged=usb:auto
 EOF
 cat > "$TMP/expected" <<'EOF'
 /dev/block/by-name/system /system erofs ro wait,first_stage_mount
 LABEL=gbos-data-mounted-by-stage0 /data ext4 noatime,nosuid,nodev wait,check,encryptable=userdata
 /dev/block/by-name/metadata /metadata ext4 noatime,nosuid,nodev wait,first_stage_mount
 EOF
-gbos_stage0_fstab_overlay "$TMP/fstab" > "$TMP/actual"
+gbos_stage0_fstab_overlay "$TMP/fstab" 0 > "$TMP/actual"
 diff -u "$TMP/expected" "$TMP/actual"
+cat > "$TMP/expected-usb" <<'EOF'
+/dev/block/by-name/system /system erofs ro wait,first_stage_mount
+LABEL=gbos-data-mounted-by-stage0 /data ext4 noatime,nosuid,nodev wait,check,encryptable=userdata
+/dev/block/by-name/metadata /metadata ext4 noatime,nosuid,nodev wait,first_stage_mount
+/devices/*/usb* auto auto defaults voldmanaged=usb:auto
+EOF
+gbos_stage0_fstab_overlay "$TMP/fstab" 1 > "$TMP/actual"
+diff -u "$TMP/expected-usb" "$TMP/actual"
+
+BOOT_PART_SYS=$TMP/sys/devices/pci0000:00/usb1/1-2/1-2:1.0/host0/target0:0:0/0:0:0:0/block/sda/sda2
+EXTERNAL_PART_SYS=$TMP/sys/devices/pci0000:00/usb1/1-3/1-3:1.0/host1/target1:0:0/1:0:0:0/block/sdb/sdb1
+mkdir -p "${BOOT_PART_SYS%/*}" "$BOOT_PART_SYS" "${EXTERNAL_PART_SYS%/*}" "$EXTERNAL_PART_SYS"
+: > "$BOOT_PART_SYS/partition"
+: > "$EXTERNAL_PART_SYS/partition"
+readlink() {
+  [ "$1" = -f ] || return 1
+  case $2 in
+    /sys/class/block/sda2) printf '%s\n' "$BOOT_PART_SYS";;
+    /sys/class/block/sdb1) printf '%s\n' "$EXTERNAL_PART_SYS";;
+    *) return 1;;
+  esac
+}
+mkdir() {
+  [ "$1" = -p ] && [ "$2" = /dev/gbos-vold-exclude ]
+}
+log() { :; }
+mount() {
+  [ "$1" = --bind ] && [ "$2" = /dev/gbos-vold-exclude ] || return 1
+  printf '%s\n' "$3" > "$TMP/masked-device"
+  [ "${FAIL_MASK:-0}" = 0 ]
+}
+VOLD_USB_OK=0
+if gbos_hide_boot_usb_from_vold /dev/sda2; then VOLD_USB_OK=1; fi
+[ "$VOLD_USB_OK" = 1 ]
+[ "$(cat "$TMP/masked-device")" = "${BOOT_PART_SYS%/*}" ]
+[ "${BOOT_PART_SYS%/*}" != "${EXTERNAL_PART_SYS%/*}" ]
+gbos_stage0_fstab_overlay "$TMP/fstab" "$VOLD_USB_OK" > "$TMP/actual"
+grep -Fqx '/devices/*/usb* auto auto defaults voldmanaged=usb:auto' "$TMP/actual"
+[ -d "$EXTERNAL_PART_SYS" ]
+VOLD_USB_OK=0
+if FAIL_MASK=1 gbos_hide_boot_usb_from_vold /dev/sda2; then VOLD_USB_OK=1; fi
+if [ "$VOLD_USB_OK" = 1 ]; then
+  echo "FAIL: accepted failure to hide the GBOS boot disk" >&2
+  exit 1
+fi
+if gbos_hide_boot_usb_from_vold /dev/unknown; then
+  echo "FAIL: accepted an unresolved GBOS block device" >&2
+  exit 1
+fi
+gbos_stage0_fstab_overlay "$TMP/fstab" "$VOLD_USB_OK" > "$TMP/actual"
+if grep -q 'voldmanaged=usb' "$TMP/actual"; then
+  echo "FAIL: retained the generic vold rule after boot-disk masking failed" >&2
+  exit 1
+fi
 awk 'BEGIN { exit !(length("gbos-data-mounted-by-stage0") > 16) }'
+grep -q 'gbos_hide_boot_usb_from_vold "${STICK:-}"' "$HOOK"
 grep -q 'gscutil.rc' "$HOOK"
 grep -q '^DEBUG_LOGS=0$' "$CFG"
 grep -q '^KVM_TRACE=0$' "$CFG"
@@ -70,5 +126,103 @@ grep -q '^DEBUG_LOGS=0$' "$TMP/image.cfg"
 GBOS_DEBUG_LOGS=1
 gbos_enable_image_debug_logs "$TMP/image.cfg"
 grep -q '^DEBUG_LOGS=1$' "$TMP/image.cfg"
+
+# drmhwc: the vendor log level is replaced by WARN on every GPU path unless DRMHWC_VERBOSE=1.
+sed -n '/^DROP=/,/^{ grep -v -E "\$DROP"/p' "$HOOK" > "$TMP/drop.sh"
+grep -q 'DRMHWC_VERBOSE:-0}" != 1 ] && DROP="$DROP|^log.tag.drmhwc=|^persist.log.tag.drmhwc="' "$TMP/drop.sh"
+! grep -q 'GPU_SW" = 1 ] && DROP=.*log.tag.drmhwc' "$HOOK"
+for v in 0 1; do
+  ( DRMHWC_VERBOSE=$v; DROP=x; eval "$(grep '^\[ "\${DRMHWC_VERBOSE' "$TMP/drop.sh")" || true; echo "$DROP" ) > "$TMP/drop.$v"
+done
+grep -q 'log.tag.drmhwc' "$TMP/drop.0" && ! grep -q 'log.tag.drmhwc' "$TMP/drop.1"
+[ "$(grep -c 'echo "log.tag.drmhwc=WARN"' "$HOOK")" = 1 ]
+grep -q '^#DRMHWC_VERBOSE=1$' "$CFG"
+
+# Stage0 screen reader: skipped only when no legacy HDA controller (PCI class 0x0403xx) exists.
+sed -n '/^has_hda_controller() {/,/^}/p' "$ROOT/usb/stage0_init.sh" > "$TMP/hda.sh"
+. "$TMP/hda.sh"
+command mkdir -p "$TMP/sys/bus/pci/devices/a" "$TMP/sys/bus/pci/devices/b"
+echo 0x040100 > "$TMP/sys/bus/pci/devices/a/class"
+echo 0x030000 > "$TMP/sys/bus/pci/devices/b/class"
+! GBOS_SYSFS_ROOT="$TMP/sys" has_hda_controller
+for c in 0x040300 0x040380; do
+  echo $c > "$TMP/sys/bus/pci/devices/b/class"
+  GBOS_SYSFS_ROOT="$TMP/sys" has_hda_controller
+done
+grep -q '! has_hda_controller; then' "$ROOT/usb/stage0_init.sh"
+
+# Unimplemented framework HALs: drop only ISnapshot and IVideoChatManager; IAqueduct stays.
+sed -n '/^gbos_drop_vintf_hal() {/,/^}/p' "$HOOK" > "$TMP/hal.sh"
+sed -n '/^gbos_hide_unimplemented_hals() {/,/^}/p' "$HOOK" >> "$TMP/hal.sh"
+. "$TMP/hal.sh"
+command mkdir -p "$TMP/vintf" "$TMP/haltmp"
+cat > "$TMP/vintf/com.google.android.snapshot.xml" <<'XML'
+<!--
+    Input:
+        vendor/google/desktop/desktop-services/snapshot/com.google.android.snapshot.xml
+-->
+<manifest version="9.0" type="framework">
+    <hal format="aidl">
+        <name>com.google.android.aqueduct</name>
+        <fqname>IAqueduct/default</fqname>
+    </hal>
+    <hal format="aidl">
+        <name>com.google.android.snapshot</name>
+        <version>5</version>
+        <fqname>ISnapshot/default</fqname>
+    </hal>
+</manifest>
+XML
+cat > "$TMP/vintf/com.android.desktop.video_chat.xml" <<'XML'
+<manifest version="9.0" type="framework">
+    <hal format="aidl">
+        <name>com.android.desktop.video_chat</name>
+        <version>2</version>
+        <fqname>IVideoChatManager/default</fqname>
+    </hal>
+</manifest>
+XML
+: > "$TMP/mounts"
+mount() { echo "$*" >> "$TMP/mounts"; }
+log() { :; }
+GBOS_HAL_TMP="$TMP/haltmp" gbos_hide_unimplemented_hals "$TMP/vintf"
+grep -q 'IAqueduct/default' "$TMP/haltmp/com.google.android.snapshot.xml"
+! grep -q 'ISnapshot' "$TMP/haltmp/com.google.android.snapshot.xml"
+[ "$(grep -c '<hal ' "$TMP/haltmp/com.google.android.snapshot.xml")" = 1 ]
+grep -q '^<manifest version="9.0" type="framework">$' "$TMP/haltmp/com.android.desktop.video_chat.xml"
+grep -q '^</manifest>$' "$TMP/haltmp/com.android.desktop.video_chat.xml"
+! grep -q '<hal' "$TMP/haltmp/com.android.desktop.video_chat.xml"
+[ "$(wc -l < "$TMP/mounts")" = 2 ]
+# A changed or missing file is left alone.
+: > "$TMP/mounts"; rm "$TMP/vintf/com.android.desktop.video_chat.xml"
+sed -i 's/ISnapshot/ISnapshotV2/' "$TMP/vintf/com.google.android.snapshot.xml"
+GBOS_HAL_TMP="$TMP/haltmp" gbos_hide_unimplemented_hals "$TMP/vintf"
+[ ! -s "$TMP/mounts" ]
+unset -f mount
+grep -q 'HIDE_UNIMPLEMENTED_HALS:-1}" = 1' "$HOOK"
+
+# Coldplug: sleep 1 s only after a pass that loaded new modules.
+sed -n '/^gbos_coldplug() {/,/^}/p' "$ROOT/usb/hwdetect.sh" > "$TMP/coldplug.sh"
+. "$TMP/coldplug.sh"
+GBOS_MODALIAS="$TMP/modules.alias"; : > "$GBOS_MODALIAS"
+GBOS_PROC_MODULES="$TMP/proc_modules"
+gbos_load_opmodes() { :; }
+mdev() { :; }
+log() { :; }
+sleep() { echo s >> "$TMP/sleeps"; }
+gbos_coldplug_pass() {
+  cp_add=$(echo "$CP_PLAN" | cut -d' ' -f1); CP_PLAN=$(echo "$CP_PLAN" | cut -s -d' ' -f2-)
+  i=0; while [ $i -lt "${cp_add:-0}" ]; do echo m >> "$GBOS_PROC_MODULES"; i=$((i+1)); done
+  echo p >> "$TMP/passes"
+}
+cp_case() {
+  : > "$GBOS_PROC_MODULES"; : > "$TMP/sleeps"; : > "$TMP/passes"; CP_PLAN=$1
+  gbos_coldplug
+  [ "$(wc -l < "$TMP/passes")" = "$2" ] && [ "$(wc -l < "$TMP/sleeps")" = "$3" ]
+}
+cp_case "5 3 0" 3 2      # settles: no sleep after the empty pass
+cp_case "0" 1 0          # nothing to load (the hook's second run): no sleep at all
+cp_case "1 1 1 1 1" 4 4  # still loading: capped at 4 passes, each followed by the settle
+unset -f sleep gbos_coldplug_pass mdev
 
 echo "BOOT_TUNING_TEST_PASS"

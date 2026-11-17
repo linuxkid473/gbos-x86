@@ -44,8 +44,11 @@ run_service() (
 RC=$(run_service default)
 printf '%s\n' "$RC" | grep -q 'service gbos_fp /postinstall/gbos/gbos_fp' &&
   printf '%s\n' "$RC" | grep -q 'seclabel u:r:hal_fingerprint_default:s0' &&
-  printf '%s\n' "$RC" | grep -q 'interface aidl android.hardware.biometrics.fingerprint.IFingerprint/default' \
-  && ok "default-enabled HAL service for exact Goodix USB ID" || bad "Goodix service selection"
+  printf '%s\n' "$RC" | grep -q 'disabled' &&
+  printf '%s\n' "$RC" | grep -q 'oneshot' &&
+  printf '%s\n' "$RC" | grep -q 'interface aidl android.hardware.biometrics.fingerprint.IFingerprint/default' &&
+  printf '%s\n' "$RC" | grep -q 'start gbos_fp' \
+  && ok "early-start, lazy oneshot HAL service for exact Goodix USB ID" || bad "Goodix service selection"
 
 [ -z "$(run_service 0)" ] && ok "FINGERPRINT=0 opt-out" || bad "fingerprint opt-out"
 
@@ -62,6 +65,10 @@ grep -q 'FINGERPRINT=1' "$ROOT/usb/gbos.cfg" &&
   grep -q 'gbos_fp' "$ROOT/tools/deploy_stick.sh" &&
   grep -q 'gbos_fp' "$ROOT/usb/install.sh" \
   && ok "build, image, deploy, and install packaging" || bad "HAL packaging wiring"
+
+grep -q 'sensor initialization attempt %d/12' "$ROOT/fingerprint/gbos_fp.c" &&
+  grep -q 'no usable Goodix sensor after 12 attempts' "$ROOT/fingerprint/gbos_fp.c" \
+  && ok "bounded Goodix startup probe reports each result" || bad "Goodix probe diagnostics"
 
 awk '
   /^if \[ "\$\{GBOS_IPU6_CAMERA_BRIDGE:-0\}" = 1 \]; then/ { camera=1 }

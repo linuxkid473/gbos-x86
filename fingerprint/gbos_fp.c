@@ -1311,7 +1311,7 @@ int main(int argc, char **argv, char **envp)
 	AIBinder *binder;
 	pthread_t t;
 	int32_t ex;
-	int i;
+	int i, probe_result = 0;
 
 	(void)argc; (void)argv; (void)envp;
 	goodix_init(&dev);
@@ -1319,11 +1319,19 @@ int main(int argc, char **argv, char **envp)
 		LOGE("mkdir " DATA_DIR ": %d", errno);
 	load_instance();
 
-	/* Wait for the sensor (USB may still be settling); hook.sh only starts this service when it saw one. */
-	for (i = 0; i < 12 && goodix_open(&dev) < 0; i++)
-		usleep(5 * 1000 * 1000);
+	/* hook.sh starts this before system_server; retries cover USB nodes still settling. */
+	for (i = 0; i < 12; i++) {
+		LOGI("sensor initialization attempt %d/12", i + 1);
+		probe_result = goodix_open(&dev);
+		if (probe_result == 0)
+			break;
+		LOGW("sensor initialization attempt %d/12 failed: %d", i + 1, probe_result);
+		if (i < 11)
+			usleep(5 * 1000 * 1000);
+	}
 	if (i == 12) {
-		LOGE("no usable Goodix sensor, not registering " FP_INSTANCE);
+		LOGE("no usable Goodix sensor after 12 attempts (last error %d), not registering " FP_INSTANCE,
+		     probe_result);
 		return 1;
 	}
 	snprintf(hw_version, sizeof(hw_version), "27c6:%04x", dev.pid);

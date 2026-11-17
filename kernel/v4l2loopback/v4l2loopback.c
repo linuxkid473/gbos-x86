@@ -250,6 +250,12 @@ module_param(max_height, int, S_IRUGO);
 MODULE_PARM_DESC(max_height,
 		 "maximum allowed frame height [DEFAULT: " __stringify(
 			 V4L2LOOPBACK_SIZE_DEFAULT_MAX_HEIGHT) "]");
+static int min_width = V4L2LOOPBACK_SIZE_MIN_WIDTH;
+module_param(min_width, int, S_IRUGO);
+MODULE_PARM_DESC(min_width, "minimum allowed frame width");
+static int min_height = V4L2LOOPBACK_SIZE_MIN_HEIGHT;
+module_param(min_height, int, S_IRUGO);
+MODULE_PARM_DESC(min_height, "minimum allowed frame height");
 
 static DEFINE_IDR(v4l2loopback_index_idr);
 static DEFINE_MUTEX(v4l2loopback_ctl_mutex);
@@ -955,27 +961,21 @@ static int vidioc_querycap(struct file *file, void *fh,
 	return 0;
 }
 
-static const struct {
-	u32 width;
-	u32 height;
-} g_v4l2_discrete_sizes[] = {
-	{ 1920, 1080 },
-	{ 1280, 720 },
-	{ 960, 540 },
-	{ 640, 480 },
-	{ 640, 360 },
-	{ 320, 240 },
-};
+#include "frame_sizes.h"
 
 static int vidioc_enum_framesizes(struct file *file, void *fh,
 				  struct v4l2_frmsizeenum *argp)
 {
-	if (argp->index >= ARRAY_SIZE(g_v4l2_discrete_sizes))
+	struct v4l2_loopback_device *dev = v4l2loopback_getdevice(file);
+	struct v4l2l_frame_size size;
+
+	if (v4l2l_frame_size_at(argp->index, dev->min_width, dev->max_width,
+				dev->min_height, dev->max_height, &size))
 		return -EINVAL;
 
 	argp->type = V4L2_FRMSIZE_TYPE_DISCRETE;
-	argp->discrete.width = g_v4l2_discrete_sizes[argp->index].width;
-	argp->discrete.height = g_v4l2_discrete_sizes[argp->index].height;
+	argp->discrete.width = size.width;
+	argp->discrete.height = size.height;
 	return 0;
 }
 
@@ -3056,13 +3056,16 @@ static int v4l2_loopback_add(struct v4l2_loopback_config *conf, int *ret_nr)
 #endif
 
 	/* Default pixel format for Android Camera HAL */
-	dev->pix_format.width = 1920;
-	dev->pix_format.height = 1080;
-	dev->pix_format.pixelformat = V4L2_PIX_FMT_YUYV;
-	dev->pix_format.bytesperline = 1920 * 2;
-	dev->pix_format.sizeimage = 1920 * 1080 * 2;
-	dev->pix_format.colorspace = V4L2_COLORSPACE_SRGB;
-	dev->pix_format.field = V4L2_FIELD_NONE;
+	_fmt.fmt.pix.width = 1920;
+	_fmt.fmt.pix.height = 1080;
+	_fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_YUYV;
+	_fmt.fmt.pix.colorspace = V4L2_COLORSPACE_SRGB;
+	_fmt.fmt.pix.field = V4L2_FIELD_NONE;
+	err = v4l2l_fill_format(&_fmt, _min_width, _max_width, _min_height,
+				_max_height);
+	if (err)
+		goto out_unregister;
+	dev->pix_format = _fmt.fmt.pix;
 	dev->pix_format_has_valid_sizeimage = true;
 	dev->capture_param.timeperframe.numerator = 1;
 	dev->capture_param.timeperframe.denominator = 30;
@@ -3371,8 +3374,6 @@ static void free_devices(void)
 
 static int __init v4l2loopback_init_module(void)
 {
-	const u32 min_width = V4L2LOOPBACK_SIZE_MIN_WIDTH;
-	const u32 min_height = V4L2LOOPBACK_SIZE_MIN_HEIGHT;
 	int err;
 	int i;
 	MARK();
@@ -3417,6 +3418,10 @@ static int __init v4l2loopback_init_module(void)
 		max_openers = 2;
 	}
 
+	if (min_width < V4L2LOOPBACK_SIZE_MIN_WIDTH)
+		min_width = V4L2LOOPBACK_SIZE_MIN_WIDTH;
+	if (min_height < V4L2LOOPBACK_SIZE_MIN_HEIGHT)
+		min_height = V4L2LOOPBACK_SIZE_MIN_HEIGHT;
 	if (max_width < min_width) {
 		max_width = V4L2LOOPBACK_SIZE_DEFAULT_MAX_WIDTH;
 		printk(KERN_INFO "v4l2-loopback init() using max_width %d\n",

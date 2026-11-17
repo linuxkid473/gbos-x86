@@ -16,19 +16,32 @@ if ! grep -qx 'Latitude 7320 Detachable' /sys/class/dmi/id/product_name 2>/dev/n
     echo "Not Latitude 7320 Detachable; refusing to start"
     exit 0
 fi
-if [ ! -s /postinstall/gbos/surface/fake_uvc_desc.bin ]; then
+if [ ! -s /postinstall/gbos/surface/latitude_fake_uvc_desc.bin ]; then
     echo "ERROR: missing UVC descriptors"
     exit 1
 fi
 
 if [ ! -e /dev/video64 ]; then
     insmod /postinstall/gbos/kmod/v4l2loopback.ko \
-        video_nr=64 "card_label=$LOOPBACK_LABEL" exclusive_caps=1 || {
+        video_nr=64 "card_label=$LOOPBACK_LABEL" exclusive_caps=1 \
+        min_width=640 max_width=640 min_height=480 max_height=480 || {
         status=$?
         echo "ERROR: v4l2loopback insmod failed (status $status)"
         exit "$status"
     }
 fi
+for setting in min_width:640 max_width:640 min_height:480 max_height:480; do
+    parameter=${setting%:*}
+    expected=${setting#*:}
+    actual=$(cat "/sys/module/v4l2loopback/parameters/$parameter" 2>/dev/null) || {
+        echo "ERROR: cannot verify v4l2loopback $parameter"
+        exit 1
+    }
+    if [ "$actual" != "$expected" ]; then
+        echo "ERROR: v4l2loopback $parameter is $actual, expected $expected"
+        exit 1
+    fi
+done
 i=0
 while [ ! -e /dev/video64 ] && [ "$i" -lt 10 ]; do
     sleep 1
@@ -61,7 +74,7 @@ mkdir -p "$FAKE_DIR/usb_dev/intf/video4linux/video64" || exit 1
 chmod 755 /data/local/tmp "$FAKE_DIR" "$FAKE_DIR/usb_dev" \
     "$FAKE_DIR/usb_dev/intf" "$FAKE_DIR/usb_dev/intf/video4linux" \
     "$FAKE_DIR/usb_dev/intf/video4linux/video64"
-cp /postinstall/gbos/surface/fake_uvc_desc.bin "$FAKE_DIR/descriptors" || exit 1
+cp /postinstall/gbos/surface/latitude_fake_uvc_desc.bin "$FAKE_DIR/descriptors" || exit 1
 chmod 644 "$FAKE_DIR/descriptors"
 ln -sf ../descriptors "$FAKE_DIR/usb_dev/descriptors"
 ln -sf ../../descriptors "$FAKE_DIR/usb_dev/intf/descriptors"
@@ -90,11 +103,13 @@ if [ ! -x "$BRIDGE" ]; then
     exit 1
 fi
 if pgrep -f '/ipu6-loopback ' >/dev/null 2>&1; then
-    echo "Bridge already running"
+    echo "ERROR: bridge is already running outside this init service"
+    exit 1
 else
-    nohup "$BRIDGE" /dev/media0 /dev/video64 \
+    "$BRIDGE" /dev/media0 /dev/video64 \
         > "$LOGDIR/camera-bridge-runtime.txt" 2>&1 &
-    echo "Started bridge pid=$!"
+    BRIDGE_PID=$!
+    echo "Started bridge pid=$BRIDGE_PID"
 fi
 
 ready=0
@@ -104,7 +119,7 @@ while [ "$i" -lt 15 ]; do
         ready=1
         break
     fi
-    if ! pgrep -f '/ipu6-loopback ' >/dev/null 2>&1; then
+    if ! kill -0 "$BRIDGE_PID" 2>/dev/null; then
         break
     fi
     sleep 1
@@ -112,10 +127,16 @@ while [ "$i" -lt 15 ]; do
 done
 if [ "$ready" != 1 ]; then
     echo "ERROR: IPU6 loopback bridge did not reach streaming state"
+    kill "$BRIDGE_PID" 2>/dev/null || true
+    wait "$BRIDGE_PID" 2>/dev/null || true
     exit 1
 fi
 
 # Rescan the new virtual UVC device after its node and sysfs identity exist.
 killall -9 android.hardware.camera.provider-usb-service.android-desktop 2>/dev/null || true
 killall -9 cameraserver 2>/dev/null || true
-echo "Bridge setup complete; inspect $LOG and camera service logs for actual provider/frame results"
+echo "Bridge ready; init service will supervise pid=$BRIDGE_PID"
+wait "$BRIDGE_PID"
+status=$?
+echo "ERROR: IPU6 loopback bridge exited with status $status"
+exit "$status"

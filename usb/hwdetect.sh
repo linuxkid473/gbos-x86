@@ -138,13 +138,16 @@ gbos_coldplug_pass() {
 }
 
 gbos_coldplug() {
-  [ -f /lib/modules/$(uname -r)/modules.alias ] || { log "hwdetect: no modules.alias, skipping coldplug"; return 1; }
+  [ -f ${GBOS_MODALIAS:-/lib/modules/$(uname -r)/modules.alias} ] || { log "hwdetect: no modules.alias, skipping coldplug"; return 1; }
   # Not loaded by alias: ACPI video (brightness keys), battery already built in.
-  p=1; before=$(wc -l < /proc/modules)
+  p=1; before=$(wc -l < ${GBOS_PROC_MODULES:-/proc/modules})
   while [ $p -le 4 ]; do
     gbos_coldplug_pass || return 1
-    sleep 1; gbos_load_opmodes; mdev -s 2>/dev/null
-    now=$(wc -l < /proc/modules)
+    # The 1 s settle is only for devices created by drivers this pass loaded. A pass that loaded nothing new has
+    # nothing to wait for: the hook's second coldplug spent its whole 1.1 s here ("122 (was 122)", Latitude 7320).
+    if [ "$(wc -l < ${GBOS_PROC_MODULES:-/proc/modules})" -ne $before ]; then sleep 1; fi
+    gbos_load_opmodes; mdev -s 2>/dev/null
+    now=$(wc -l < ${GBOS_PROC_MODULES:-/proc/modules})
     log "hwdetect: coldplug pass $p: $now modules loaded (was $before)"
     [ $now -eq $before ] && break
     before=$now; p=$((p+1))

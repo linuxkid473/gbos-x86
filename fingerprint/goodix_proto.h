@@ -39,6 +39,7 @@
 #define GOODIX_CMD_VERSION 0xd0
 #define GOODIX_CMD_POWER_BUTTON_SHIELD 0xe0
 
+#define GOODIX_CMD_WRITE_CFG_TO_FLASH 0x01
 #define GOODIX_CMD_DELETE_ONE 0x04
 #define GOODIX_CMD_FINGER_UP 0x02
 #define GOODIX_CMD_SHIELD_OFF 0x00
@@ -117,25 +118,25 @@ static inline int goodix_build_packet(uint8_t *out, size_t out_size, size_t *wri
 
 static inline int goodix_parse_packet(const uint8_t *data, size_t len, struct goodix_packet *packet)
 {
-	size_t payload_len, packet_len;
+	size_t payload_len, packet_len, frame_len;
 	uint32_t expected_crc, actual_crc;
 
 	if (!data || !packet || len < GOODIX_HEADER_SIZE + GOODIX_CRC_SIZE)
-		return -1;
-	if (data[6] != goodix_crc8(data, 6) || data[7] != (uint8_t)~data[6])
 		return -1;
 	packet_len = (size_t)data[4] | (size_t)data[5] << 8;
 	if (packet_len < GOODIX_CRC_SIZE)
 		return -1;
 	payload_len = packet_len - GOODIX_CRC_SIZE;
+	frame_len = GOODIX_HEADER_SIZE + packet_len;
 	if (payload_len > GOODIX_MAX_PAYLOAD ||
-	    len != GOODIX_HEADER_SIZE + packet_len)
+	    len < frame_len)
 		return -1;
-	expected_crc = (uint32_t)data[len - 4] |
-		       (uint32_t)data[len - 3] << 8 |
-		       (uint32_t)data[len - 2] << 16 |
-		       (uint32_t)data[len - 1] << 24;
-	actual_crc = goodix_crc32(data, len - GOODIX_CRC_SIZE);
+	/* libfprint validates CRC at the header-declared frame end; USB may pad to max packet size. */
+	expected_crc = (uint32_t)data[frame_len - 4] |
+		       (uint32_t)data[frame_len - 3] << 8 |
+		       (uint32_t)data[frame_len - 2] << 16 |
+		       (uint32_t)data[frame_len - 1] << 24;
+	actual_crc = goodix_crc32(data, frame_len - GOODIX_CRC_SIZE);
 	if (expected_crc != actual_crc)
 		return -1;
 	packet->cmd0 = data[0];

@@ -25,7 +25,6 @@
 #define GOODIX_USB_BULK 0xc0185502
 #define GOODIX_USB_CLAIMINTERFACE 0x8004550f
 #define GOODIX_USB_RELEASEINTERFACE 0x80045510
-#define GOODIX_USB_RESET 0x5514
 #define GOODIX_INTERFACE 0
 #define GOODIX_CFG_SIZE 128
 #define GOODIX_CFG_CRC_OFFSET 124
@@ -53,7 +52,6 @@ struct goodix {
 	int fd;
 	char path[32];
 	uint16_t pid;
-	bool was_reset;
 	bool need_reset;
 	bool cancel;
 	uint8_t sequence;
@@ -196,7 +194,13 @@ static inline int goodix_receive(struct goodix *s, struct goodix_packet *packet,
 			continue;
 		if (goodix_parse_packet(buffer, (size_t)n, packet) < 0) {
 			s->need_reset = true;
-			GOODIX_LOGE("invalid Goodix packet (%d bytes)", n);
+			if (n >= GOODIX_HEADER_SIZE)
+				GOODIX_LOGE("invalid Goodix packet (%d bytes, cmd=%02x%02x len=%u hdr=%02x/%02x)",
+					    n, buffer[0], buffer[1],
+					    (unsigned int)buffer[4] | (unsigned int)buffer[5] << 8,
+					    buffer[6], buffer[7]);
+			else
+				GOODIX_LOGE("invalid short Goodix packet (%d bytes)", n);
 			return -EPROTO;
 		}
 		return 0;
@@ -221,16 +225,21 @@ static inline int goodix_command(struct goodix *s, uint8_t cmd0, uint8_t cmd1,
 	n = goodix_bulk(s, GOODIX_EP_OUT, tx, (unsigned int)tx_len, 1000);
 	if (n < 0) {
 		s->need_reset = true;
+		GOODIX_LOGE("USB OUT command %02x:%02x failed: %d", cmd0, cmd1, n);
 		return n;
 	}
 	if ((size_t)n != tx_len) {
 		s->need_reset = true;
+		GOODIX_LOGE("USB OUT command %02x:%02x short write: %d of %u bytes",
+			    cmd0, cmd1, n, (unsigned int)tx_len);
 		return -EIO;
 	}
 	r = goodix_receive(s, &packet, rx, sizeof(rx), cancellable, 2000);
 	if (r < 0) {
 		if (r == -ECANCELED)
 			s->need_reset = true;
+		GOODIX_LOGE("command %02x:%02x acknowledgement receive failed: %d",
+			    cmd0, cmd1, r);
 		return r;
 	}
 	if (packet.cmd0 != GOODIX_CMD_RESPONSE || packet.payload_len < 2 ||
@@ -246,6 +255,8 @@ static inline int goodix_command(struct goodix *s, uint8_t cmd0, uint8_t cmd1,
 	if (r < 0) {
 		if (r == -ECANCELED)
 			s->need_reset = true;
+		GOODIX_LOGE("command %02x:%02x response receive failed: %d",
+			    cmd0, cmd1, r);
 		return r;
 	}
 	if (packet.cmd0 != cmd0 || packet.payload_len < 1) {
@@ -269,13 +280,18 @@ static inline void goodix_make_config(struct goodix *s, uint8_t out[GOODIX_CFG_S
 
 	memset(out, 0, GOODIX_CFG_SIZE);
 	memcpy(out, defaults, sizeof(defaults));
-	out[6] = GOODIX_ENROLL_STAGES;
 	out[26] = 1;
+	/*
+	 * Byte-identical to libfprint v1.94.9: gx_proto_init_sensor_config() stores the
+	 * CRC over the defaults (byte 6 = 8), then gx_fp_init() sets byte 6 to the
+	 * enroll stage count without recomputing it. The firmware accepts that block.
+	 */
 	crc = goodix_crc32(out, GOODIX_CFG_CRC_OFFSET);
 	out[124] = (uint8_t)crc;
 	out[125] = (uint8_t)(crc >> 8);
 	out[126] = (uint8_t)(crc >> 16);
 	out[127] = (uint8_t)(crc >> 24);
+	out[6] = GOODIX_ENROLL_STAGES;
 	memcpy(s->config, defaults, sizeof(defaults));
 	s->config[6] = GOODIX_ENROLL_STAGES;
 }
@@ -307,18 +323,12 @@ static inline int goodix_open(struct goodix *s)
 	s->fd = open(s->path, O_RDWR | O_CLOEXEC);
 	if (s->fd < 0)
 		return -GOODIX_ERRNO;
-	if (!s->was_reset || s->need_reset) {
-		if (ioctl(s->fd, (int)GOODIX_USB_RESET, 0) < 0) {
-			r = -GOODIX_ERRNO;
-			goto fail;
-		}
-		s->was_reset = true;
-		s->need_reset = false;
-	}
+	/* Match libfprint's interface-claim flow; a USB reset disrupts this sensor. */
 	if (ioctl(s->fd, (int)GOODIX_USB_CLAIMINTERFACE, &interface) < 0) {
 		r = -GOODIX_ERRNO;
 		goto fail;
 	}
+	s->need_reset = false;
 	if ((r = goodix_command(s, GOODIX_CMD_VERSION, 0, &zero, 1, false, &response)) < 0)
 		goto fail;
 	if (response.result != GOODIX_SUCCESS || response.len < 18 ||
@@ -330,17 +340,25 @@ static inline int goodix_open(struct goodix *s)
 	memcpy(s->fw_version, response.data + 10, 8);
 	s->fw_version[8] = 0;
 
-	/* Configure runtime thresholds only; do not write configuration to flash. */
+	/*
+	 * Same CONFIG as libfprint's FP_INIT_CONFIG (cmd1 WRITE_CFG_TO_FLASH). The
+	 * 0x00 "don't write" form is acknowledged by 27c6:6384 firmware but never
+	 * answered (2026-11-17 boot: every attempt timed out on the c0:00 response).
+	 * This stores the matching config only; templates are untouched.
+	 */
 	goodix_make_config(s, config);
-	if ((r = goodix_command(s, GOODIX_CMD_CONFIG, 0, config, sizeof(config),
-			       false, &response)) < 0)
+	if ((r = goodix_command(s, GOODIX_CMD_CONFIG, GOODIX_CMD_WRITE_CFG_TO_FLASH,
+			       config, sizeof(config), false, &response)) < 0)
 		goto fail;
-	if (response.result != GOODIX_SUCCESS) {
-		GOODIX_LOGE("Goodix runtime configuration failed: 0x%02x", response.result);
-		r = -EIO;
-		goto fail;
-	}
-	GOODIX_LOGI("Goodix 27c6:6384 firmware %.8s ready", s->fw_version);
+	/* libfprint's fp_init_config_cb() does not reject a nonzero status either. */
+	if (response.result != GOODIX_SUCCESS)
+		GOODIX_LOGW("Goodix configuration status 0x%02x (continuing, as libfprint does)",
+			    response.result);
+	if (response.len >= 2)
+		GOODIX_LOGI("Goodix 27c6:6384 firmware %.8s ready, max stored prints %u",
+			    s->fw_version, (unsigned int)response.data[1]);
+	else
+		GOODIX_LOGI("Goodix 27c6:6384 firmware %.8s ready", s->fw_version);
 	return 0;
 fail:
 	goodix_close(s);

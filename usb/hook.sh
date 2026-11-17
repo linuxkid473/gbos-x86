@@ -269,6 +269,30 @@ gbos_configure_boot_debug() {
   fi
 }
 
+# Copy a VINTF manifest without the <hal> blocks that declare the given fqname; prints nothing on success.
+gbos_drop_vintf_hal() {
+  awk -v fq="<fqname>$2</fqname>" '
+    /<hal[ >]/ { inhal = 1; buf = ""; drop = 0 }
+    inhal { buf = buf $0 "\n"; if (index($0, fq)) drop = 1
+            if ($0 ~ /<\/hal>/) { inhal = 0; if (!drop) printf "%s", buf }
+            next }
+    { print }' "$1" > "$3"
+}
+
+# Hide framework HAL declarations that nothing in this image implements (see the call site).
+# $1 = system VINTF manifest directory. GBOS_HAL_TMP overrides the scratch directory (tests).
+gbos_hide_unimplemented_hals() {
+  ghu_tmp=${GBOS_HAL_TMP:-/tmp}
+  for ghu in com.google.android.snapshot.xml:com.google.android.snapshot:ISnapshot/default \
+             com.android.desktop.video_chat.xml:com.android.desktop.video_chat:IVideoChatManager/default; do
+    ghu_file=$1/${ghu%%:*}; ghu_fq=${ghu##*:}
+    [ -f "$ghu_file" ] && grep -q "<fqname>$ghu_fq</fqname>" "$ghu_file" || continue
+    gbos_drop_vintf_hal "$ghu_file" "$ghu_fq" "$ghu_tmp/${ghu%%:*}" &&
+      mount --bind "$ghu_tmp/${ghu%%:*}" "$ghu_file" &&
+      log "hook: unimplemented $ghu_fq VINTF declaration hidden"
+  done
+}
+
 gbos_configure_kvm_trace() {
   GBOS_KVM_TRACE_SETUP=
   GBOS_KVM_TRACE_ON=
@@ -616,9 +640,12 @@ service gbos_fp /postinstall/gbos/gbos_fp
     group system usb
     seclabel u:r:hal_fingerprint_default:s0
     interface aidl android.hardware.biometrics.fingerprint.IFingerprint/default
+    disabled
+    oneshot
 on post-fs-data
     mkdir /data/vendor/crosfp 0770 system system
-    mkdir /data/vendor/crosfp/gbos_fp 0770 system system"
+    mkdir /data/vendor/crosfp/gbos_fp 0770 system system
+    start gbos_fp"
         log "hook: fingerprint: starting Goodix HAL for $FPDEV"
       else
         log "hook: fingerprint: Goodix 27c6:6384 not present; CrosFP left as-is"
@@ -978,20 +1005,26 @@ if [ "$DEVICE_MODEL" = "auto" ]; then
   fi
 fi
 DROP='^ro.boot.hypervisor.protected_vm.supported=|^ro.surface_flinger.has_wide_color_display=|^ro.surface_flinger.has_HDR_display='
-[ "$GPU_SW" = 1 ] && DROP="$DROP|^ro.surface_flinger.supports_background_blur=|^persist.sys.sf.disable_blurs=|^ro.launcher.blur.appLaunch=|^log.tag.drmhwc=|^persist.log.tag.drmhwc=|^ro.vendor.hwc.use_overlay_planes=|^vendor.hwc.drm.use_overlay_planes=|^vendor.hwc.drm.scale_with_gpu=|^vendor.hwc.drm.enable_color_pipeline=|^ro.hwui.use_vulkan=|^ro.surface_flinger.default_composition_pixel_format=|^debug.renderengine.backend=|^debug.renderengine.graphite=|^debug.renderengine.graphite_desktop_optin=|^debug.renderengine.vulkan=|^ro.hwui.render_ahead=|^ro.surface_flinger.max_frame_buffer_acquired_buffers=|^debug.sf.enable_gl_backpressure="   # blur on the CPU is far too slow
+[ "$GPU_SW" = 1 ] && DROP="$DROP|^ro.surface_flinger.supports_background_blur=|^persist.sys.sf.disable_blurs=|^ro.launcher.blur.appLaunch=|^ro.vendor.hwc.use_overlay_planes=|^vendor.hwc.drm.use_overlay_planes=|^vendor.hwc.drm.scale_with_gpu=|^vendor.hwc.drm.enable_color_pipeline=|^ro.hwui.use_vulkan=|^ro.surface_flinger.default_composition_pixel_format=|^debug.renderengine.backend=|^debug.renderengine.graphite=|^debug.renderengine.graphite_desktop_optin=|^debug.renderengine.vulkan=|^ro.hwui.render_ahead=|^ro.surface_flinger.max_frame_buffer_acquired_buffers=|^debug.sf.enable_gl_backpressure="   # blur on the CPU is far too slow
+# drm_hwcomposer logs at VERBOSE on every frame on i915 ("Missing optional LOG_GAMMA_LUT property, falling back to
+# GAMMA_LUT": 5,745 lines in two minutes on the Latitude 7320, the largest logcat source). WARN keeps its real warnings,
+# which is what debugging the colour pipeline needs; DRMHWC_VERBOSE=1 in gbos.cfg keeps the vendor level.
+[ "${DRMHWC_VERBOSE:-0}" != 1 ] && DROP="$DROP|^log.tag.drmhwc=|^persist.log.tag.drmhwc="
 [ -n "$DENSITY" ] && DROP="$DROP|^ro.sf.lcd_density="
 [ -n "$DEVICE_MODEL" ] && DROP="$DROP|^ro.product.model=|^ro.product.vendor.model=|^ro.product.marketname=|^ro.product.vendor.marketname="
 { grep -v -E "$DROP" /new/vendor/build.prop
   echo "ro.surface_flinger.has_wide_color_display=false"
   echo "ro.surface_flinger.has_HDR_display=false"
+  if [ "${DRMHWC_VERBOSE:-0}" != 1 ]; then
+    echo "log.tag.drmhwc=WARN"
+    echo "persist.log.tag.drmhwc=WARN"
+  fi
   if [ "$GPU_SW" = 1 ]; then
     echo "ro.surface_flinger.supports_background_blur=0"
     # Read by optimize.sh: animations and window blur are only switched off while the CPU composites (hardware GPUs keep Google's defaults).
     echo "ro.gbos.software_rendering=1"
     echo "persist.sys.sf.disable_blurs=1"
     echo "ro.launcher.blur.appLaunch=0"
-    echo "log.tag.drmhwc=WARN"
-    echo "persist.log.tag.drmhwc=WARN"
     # Hardware cursor & overlay planes:
     # Intel KMS (i915/xe) has a dedicated hardware cursor plane (plane[44], format AR24).
     # DO NOT disable overlay/cursor planes on Intel: disabling them forces drm_hwcomposer to
@@ -1082,6 +1115,14 @@ SK=/new/vendor/etc/vintf/manifest/android.hardware.security.secretkeeper.trusty.
   && mount --bind /tmp/secretkeeper.xml $SK && : > /tmp/empty.rc \
   && mount --bind /tmp/empty.rc /new/vendor/etc/init/android.hardware.security.secretkeeper.trusty.desktop.rc \
   && log "hook: Secretkeeper VINTF declaration hidden"
+# Two framework services are declared in the system VINTF manifest but nothing in this image implements them.
+# Every lookup then makes servicemanager ask init to lazy-start them ("Control message: Could not find
+# 'aidl/com.google.android.snapshot.ISnapshot/default'" 73 times per boot from storage_metrics_service,
+# IVideoChatManager 67 times from the audio HAL, Latitude 7320, 2026-11-17). Undeclared, a lookup returns null at
+# once. IAqueduct, declared in the same snapshot file, stays. HIDE_UNIMPLEMENTED_HALS=0 in gbos.cfg keeps both.
+if [ "${HIDE_UNIMPLEMENTED_HALS:-1}" = 1 ]; then
+  gbos_hide_unimplemented_hals /new/system/etc/vintf/manifest
+fi
 # Gatekeeper is Trusty-backed (VSOCK:200) and enroll never returns, so setting a lock-screen
 # password hangs LockSettingsService (and every Settings screen waiting on it). Keep the VINTF
 # declaration but don't start the Trusty service: gbos_soft_gk (gbos.rc above) registers
@@ -1094,28 +1135,84 @@ else
   echo '<manifest version="9.0" type="device"/>' > /tmp/gatekeeper.xml && mount --bind /tmp/gatekeeper.xml $GK \
     && log "hook: Trusty Gatekeeper hidden, no soft_gk (no lock-screen password)"
 fi
-# Keep vold off USB disks: its voldmanaged=usb rule picks up this stick, and its fsck_msdos
-# "repairs" the FAT while stage0 has it mounted (LOST.DIR, lost/truncated logs, cross-linked
-# clusters). The stick must only ever be mounted by stage0.
+# Vold's generic USB rule must not see the GBOS stick: its fsck_msdos can "repair" the FAT while
+# stage0 has it mounted. Hide only that disk's sysfs block node before Android coldplugs devices;
+# this leaves other USB disks visible to vold. If we cannot identify and hide the boot disk,
+# fail closed by removing the generic rule.
+gbos_hide_boot_usb_from_vold() {
+  gh_dev=${1:-}
+  [ -n "$gh_dev" ] || return 0
+  gh_name=${gh_dev##*/}
+  gh_sys=$(readlink -f "/sys/class/block/$gh_name" 2>/dev/null) || {
+    log "hook: cannot resolve GBOS stick block device $gh_dev; keeping vold USB rule disabled"
+    return 1
+  }
+  [ -d "$gh_sys" ] || {
+    log "hook: GBOS stick sysfs path missing for $gh_dev; keeping vold USB rule disabled"
+    return 1
+  }
+  [ -f "$gh_sys/partition" ] && gh_sys=${gh_sys%/*}
+  case $gh_sys in
+    */usb*) ;;
+    *)
+      log "hook: GBOS stick is not on a USB sysfs path ($gh_sys); keeping vold USB rule disabled"
+      return 1
+      ;;
+  esac
+  [ -d "$gh_sys" ] || {
+    log "hook: GBOS stick parent disk sysfs path missing ($gh_sys); keeping vold USB rule disabled"
+    return 1
+  }
+  mkdir -p /dev/gbos-vold-exclude || {
+    log "hook: cannot create vold exclusion mount source; keeping vold USB rule disabled"
+    return 1
+  }
+  if mount --bind /dev/gbos-vold-exclude "$gh_sys"; then
+    log "hook: GBOS stick block device hidden from Android vold ($gh_sys)"
+    return 0
+  fi
+  log "hook: cannot hide GBOS stick block device from vold; keeping vold USB rule disabled"
+  return 1
+}
 gbos_stage0_fstab_overlay() {
-  sed \
-    -e '/voldmanaged=usb/d' \
-    -e 's#^/dev/block/by-name/userdata[[:space:]][[:space:]]*#LABEL=gbos-data-mounted-by-stage0 #' "$1"
+  if [ "${2:-0}" = 1 ]; then
+    sed -e 's#^/dev/block/by-name/userdata[[:space:]][[:space:]]*#LABEL=gbos-data-mounted-by-stage0 #' "$1"
+  else
+    sed \
+      -e '/voldmanaged=usb/d' \
+      -e 's#^/dev/block/by-name/userdata[[:space:]][[:space:]]*#LABEL=gbos-data-mounted-by-stage0 #' "$1"
+  fi
 }
 F=/new/vendor/etc/fstab.android-desktop
-if gbos_stage0_fstab_overlay "$F" > /tmp/fstab.android-desktop; then
+VOLD_USB_OK=0
+if gbos_hide_boot_usb_from_vold "${STICK:-}"; then VOLD_USB_OK=1; fi
+FSTAB_OVERLAY_OK=0
+if gbos_stage0_fstab_overlay "$F" "$VOLD_USB_OK" > /tmp/fstab.android-desktop; then
   if grep -q '^LABEL=gbos-data-mounted-by-stage0 /data ' /tmp/fstab.android-desktop; then
     log "hook: duplicate userdata wait skipped (stage0 already mounted /data)"
   else
     log "hook: userdata wait skip NOT applied (fstab entry changed)"
   fi
   if mount --bind /tmp/fstab.android-desktop "$F"; then
-    log "hook: vold USB rule removed from fstab"
+    FSTAB_OVERLAY_OK=1
+    if [ "$VOLD_USB_OK" = 1 ] && grep -q 'voldmanaged=usb' /tmp/fstab.android-desktop; then
+      if [ -n "${STICK:-}" ]; then
+        log "hook: GBOS stick excluded; vold USB rule retained for external storage"
+      else
+        log "hook: no GBOS USB stick to exclude; vold USB rule retained"
+      fi
+    else
+      log "hook: vold USB rule removed from fstab (GBOS stick exclusion unavailable)"
+    fi
   else
     log "hook: fstab overlay FAILED"
   fi
 else
   log "hook: fstab overlay generation FAILED"
+fi
+if [ "$VOLD_USB_OK" != 1 ] && [ "$FSTAB_OVERLAY_OK" != 1 ]; then
+  log "FATAL: neither GBOS USB masking nor fstab exclusion succeeded; stopping before Android"
+  while :; do shell "USB storage safety could not be established; power off or reboot"; done
 fi
 # Audio: the audio HAL (dras) needs a config whose <soundcard> equals the ALSA card id. Google ships only its SOF
 # SoundWire card; gbos/audio/gbos-hda-pch is the legacy-HDA one (card id PCH, true for nearly every Intel PCH HDA

@@ -2,6 +2,7 @@
 #define CAMERA_CAPTURE_NO_MAIN
 #include "../tools/camera_capture_probe.c"
 
+#include <math.h>
 #include <signal.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
@@ -12,7 +13,16 @@
 #define OUT_FOURCC V4L2_PIX_FMT_YUYV
 #define OUT_FRAME_BYTES ((size_t)OUT_WIDTH * OUT_HEIGHT * 2)
 #define BLACK_LEVEL 64
+#define RAW_RANGE (1023U - BLACK_LEVEL)
+/* Demosaic and white balance work on 12-bit linear values; gamma maps them to 8-bit sRGB. */
+#define LINEAR_MAX 4095U
 #define MAX_FRAME_BYTES (64U * 1024U * 1024U)
+
+/* Auto-exposure: hold the mean green (raw units above black) near 18% grey. */
+#define AE_TARGET (0.18 * RAW_RANGE)
+#define AE_DEADBAND 0.15
+#define AE_MAX_STEP 1.6
+#define AE_INTERVAL 3	/* frames between updates; sensor settings lag about two frames */
 
 static volatile sig_atomic_t running = 1;
 
@@ -27,15 +37,51 @@ static void stop_bridge(int sig)
 	running = 0;
 }
 
+/* Colour-filter sites in a 4x4 tile: 0 = R, 1 = G, 2 = B, 3 = IR. */
+#define CFA_IR 3
+static unsigned char cfa[4][4];
+
+/*
+ * Latitude 7320 front OV5675 (ACPI OVTI5678): an RGB-IR 4x4 mosaic, although the
+ * driver reports MEDIA_BUS_FMT_SGRBG10_1X10. Measured on hardware 2026-11-17 from
+ * per-phase means: IR sites ~21 vs G ~172; R 123 at (0,1),(2,3); B 100 at (2,1),(0,3).
+ * R and B occupy 2 of 16 sites each, so demosaicing needs a 4x4 window (rgb_at).
+ */
+static const unsigned char ov5675_rgbir[4][4] = {
+	{ 1, 3, 1, 3 },
+	{ 0, 1, 2, 1 },
+	{ 1, 3, 1, 3 },
+	{ 2, 1, 0, 1 },
+};
+
+static void set_rgbir_pattern(void)
+{
+	memcpy(cfa, ov5675_rgbir, sizeof(cfa));
+}
+
+/* Plain 2x2 Bayer from the media bus code, expanded to the 4x4 table. */
+static int set_bayer_pattern(__u32 code)
+{
+	static const struct { __u32 code; unsigned char cfa[2][2]; } patterns[] = {
+		{ MEDIA_BUS_FMT_SGRBG10_1X10, { { 1, 0 }, { 2, 1 } } },
+		{ MEDIA_BUS_FMT_SRGGB10_1X10, { { 0, 1 }, { 1, 2 } } },
+		{ MEDIA_BUS_FMT_SBGGR10_1X10, { { 2, 1 }, { 1, 0 } } },
+		{ MEDIA_BUS_FMT_SGBRG10_1X10, { { 1, 2 }, { 0, 1 } } },
+	};
+
+	for (size_t i = 0; i < sizeof(patterns) / sizeof(patterns[0]); i++)
+		if (patterns[i].code == code) {
+			for (int y = 0; y < 4; y++)
+				for (int x = 0; x < 4; x++)
+					cfa[y][x] = patterns[i].cfa[y & 1][x & 1];
+			return 0;
+		}
+	return -1;
+}
+
 static int channel_at(unsigned int x, unsigned int y)
 {
-	static const unsigned char mosaic[4][4] = {
-		{ 1, 3, 1, 3 },
-		{ 0, 1, 2, 1 },
-		{ 1, 3, 1, 3 },
-		{ 2, 1, 0, 1 }
-	};
-	return mosaic[y & 3][x & 3];
+	return cfa[y & 3][x & 3];
 }
 
 static unsigned int raw_at(const uint16_t *raw, unsigned int width,
@@ -48,8 +94,117 @@ static unsigned int raw_at(const uint16_t *raw, unsigned int width,
 	if ((unsigned int)y >= height) y = (int)height - 1;
 	unsigned int value = raw[(size_t)y * (stride / 2) + (unsigned int)x] & 1023;
 	value = value > BLACK_LEVEL ? value - BLACK_LEVEL : 0;
-	return (value * 255U + (1023U - BLACK_LEVEL) / 2) /
-		(1023U - BLACK_LEVEL);
+	return (value * LINEAR_MAX + RAW_RANGE / 2) / RAW_RANGE;
+}
+
+static unsigned char gamma_lut[LINEAR_MAX + 1];
+
+/* sRGB transfer curve: linear 0..LINEAR_MAX to display-encoded 0..255. */
+static void init_gamma(void)
+{
+	static int ready;
+
+	if (ready)
+		return;
+	for (unsigned int i = 0; i <= LINEAR_MAX; i++) {
+		double x = (double)i / LINEAR_MAX;
+		double v = x <= 0.0031308 ? 12.92 * x : 1.055 * pow(x, 1.0 / 2.4) - 0.055;
+		gamma_lut[i] = (unsigned char)(v * 255.0 + 0.5);
+	}
+	ready = 1;
+}
+
+static double wb_last_mean[3];
+static unsigned int wb_last_gain_q12[3];
+
+static void calculate_white_balance(const uint16_t *raw, unsigned int width,
+				    unsigned int height, unsigned int stride,
+				    unsigned int gain_q12[3], double *mean_green)
+{
+	uint64_t sum[4] = { 0 }, count[4] = { 0 };
+	double mean[4];
+
+	for (unsigned int y = 0; y < height; y += 16) {
+		for (unsigned int x = 0; x < width; x += 16) {
+			for (unsigned int dy = 0; dy < 4 && y + dy < height; dy++) {
+				for (unsigned int dx = 0; dx < 4 && x + dx < width; dx++) {
+					int channel = channel_at(x + dx, y + dy);
+					unsigned int value =
+						raw[(size_t)(y + dy) * (stride / 2) + x + dx] & 1023;
+					if (value > BLACK_LEVEL)
+						sum[channel] += value - BLACK_LEVEL;
+					count[channel]++;
+				}
+			}
+		}
+	}
+
+	for (int channel = 0; channel < 4; channel++)
+		mean[channel] = count[channel] ? (double)sum[channel] / count[channel] : 0;
+	/* AE meters raw green (IR included: it is light the sensor really collects). */
+	if (mean_green)
+		*mean_green = mean[1];
+	/* Balance the colour after removing the IR that leaks into R, G and B. */
+	for (int channel = 0; channel < 3; channel++) {
+		mean[channel] -= mean[CFA_IR];
+		if (mean[channel] < 0)
+			mean[channel] = 0;
+	}
+	gain_q12[0] = gain_q12[2] = 4096;
+	if (mean[0] > 0 && mean[1] > 0) {
+		double gain = mean[1] / mean[0];
+		if (gain < 0.25) gain = 0.25;
+		if (gain > 4.0) gain = 4.0;
+		gain_q12[0] = (unsigned int)(gain * 4096.0 + 0.5);
+	}
+	if (mean[2] > 0 && mean[1] > 0) {
+		double gain = mean[1] / mean[2];
+		if (gain < 0.25) gain = 0.25;
+		if (gain > 4.0) gain = 4.0;
+		gain_q12[2] = (unsigned int)(gain * 4096.0 + 0.5);
+	}
+	memcpy(wb_last_mean, mean, sizeof(wb_last_mean));
+	memcpy(wb_last_gain_q12, gain_q12, sizeof(wb_last_gain_q12));
+}
+
+/*
+ * Diagnostic: mean level above black at each of the 16 positions of a 4x4 tile.
+ * Plain Bayer repeats every 2 pixels; an RGB-IR mosaic repeats every 4 and has
+ * dim IR sites. Logged to the runtime file so the real layout can be read off.
+ */
+static void cfa_phase_means(const uint16_t *raw, unsigned int width,
+			    unsigned int height, unsigned int stride, double means[4][4])
+{
+	uint64_t sum[4][4] = { { 0 } }, count[4][4] = { { 0 } };
+
+	for (unsigned int y = 0; y + 4 <= height; y += 16)
+		for (unsigned int x = 0; x + 4 <= width; x += 16)
+			for (unsigned int dy = 0; dy < 4; dy++)
+				for (unsigned int dx = 0; dx < 4; dx++) {
+					unsigned int value =
+						raw[(size_t)(y + dy) * (stride / 2) + x + dx] & 1023;
+					sum[dy][dx] += value > BLACK_LEVEL ? value - BLACK_LEVEL : 0;
+					count[dy][dx]++;
+				}
+	for (int dy = 0; dy < 4; dy++)
+		for (int dx = 0; dx < 4; dx++)
+			means[dy][dx] = count[dy][dx] ? (double)sum[dy][dx] / count[dy][dx] : 0;
+}
+
+static void log_cfa_phases(const uint16_t *raw, unsigned int width,
+			   unsigned int height, unsigned int stride, unsigned int frame)
+{
+	double m[4][4];
+
+	cfa_phase_means(raw, width, height, stride, m);
+	printf("cfa4x4 frame=%u (mean above black; rows y%%4, cols x%%4):\n", frame);
+	for (int dy = 0; dy < 4; dy++)
+		printf("cfa4x4 y%d: %6.1f %6.1f %6.1f %6.1f\n", dy, m[dy][0], m[dy][1], m[dy][2], m[dy][3]);
+	printf("wb: mean R=%.1f G=%.1f B=%.1f gain R=%.2f B=%.2f%s\n",
+	       wb_last_mean[0], wb_last_mean[1], wb_last_mean[2],
+	       wb_last_gain_q12[0] / 4096.0, wb_last_gain_q12[2] / 4096.0,
+	       wb_last_gain_q12[0] >= 16384 || wb_last_gain_q12[2] >= 16384 ||
+	       wb_last_gain_q12[0] <= 1024 || wb_last_gain_q12[2] <= 1024 ? " (clamped)" : "");
 }
 
 static unsigned char clamp8(int value)
@@ -60,34 +215,46 @@ static unsigned char clamp8(int value)
 }
 
 static void rgb_at(const uint16_t *raw, unsigned int width, unsigned int height,
-		   unsigned int stride, unsigned int x, unsigned int y,
+		   unsigned int stride, const unsigned int gain_q12[3],
+		   unsigned int x, unsigned int y,
 		   int rgb[3])
 {
-	unsigned int rsum = 0, gsum = 0, bsum = 0;
-	unsigned int rn = 0, gn = 0, bn = 0;
-	for (int dy = -1; dy <= 1; dy++) {
-		for (int dx = -1; dx <= 1; dx++) {
-			int sx = (int)x + dx, sy = (int)y + dy;
-			if (sx < 0 || sy < 0 || (unsigned int)sx >= width ||
-			    (unsigned int)sy >= height)
-				continue;
-			unsigned int value = raw_at(raw, width, height, stride, sx, sy);
-			switch (channel_at((unsigned int)sx, (unsigned int)sy)) {
-			case 0: rsum += value; rn++; break;
-			case 1: gsum += value; gn++; break;
-			case 2: bsum += value; bn++; break;
-			default: break;
-			}
+	/*
+	 * A 4x4 window holds every site of the 4x4 mosaic exactly once (2 R, 2 B, 8 G,
+	 * 4 IR; for Bayer 4/8/4). The old 3x3 window often held no R or no B site, so
+	 * red or blue read as zero in drifting patches: the cyan/yellow grid.
+	 * The window is shifted inward at the frame edges so it is always complete.
+	 */
+	unsigned int sum[4] = { 0 }, n[4] = { 0 };
+	unsigned int x0 = x > 0 ? x - 1 : 0, y0 = y > 0 ? y - 1 : 0;
+
+	if (x0 > width - 4) x0 = width - 4;
+	if (y0 > height - 4) y0 = height - 4;
+	for (unsigned int sy = y0; sy < y0 + 4; sy++)
+		for (unsigned int sx = x0; sx < x0 + 4; sx++) {
+			int channel = channel_at(sx, sy);
+			sum[channel] += raw_at(raw, width, height, stride, (int)sx, (int)sy);
+			n[channel]++;
 		}
+	/* Remove the infrared that leaks into the colour sites (zero for plain Bayer). */
+	int ir = n[CFA_IR] ? (int)(sum[CFA_IR] / n[CFA_IR]) : 0;
+	int lin[3];
+	for (int channel = 0; channel < 3; channel++) {
+		lin[channel] = n[channel] ? (int)(sum[channel] / n[channel]) - ir : 0;
+		if (lin[channel] < 0)
+			lin[channel] = 0;
 	}
-	rgb[0] = rn ? (int)(rsum / rn) : 0;
-	rgb[1] = gn ? (int)(gsum / gn) : 0;
-	rgb[2] = bn ? (int)(bsum / bn) : 0;
+	rgb[0] = (int)(((uint64_t)lin[0] * gain_q12[0] + 2048) / 4096);
+	rgb[1] = lin[1];
+	rgb[2] = (int)(((uint64_t)lin[2] * gain_q12[2] + 2048) / 4096);
+	for (int channel = 0; channel < 3; channel++)
+		rgb[channel] = gamma_lut[rgb[channel] > (int)LINEAR_MAX ? LINEAR_MAX
+							      : (unsigned int)rgb[channel]];
 }
 
-static int convert_rgbir_yuyv(const uint16_t *raw, unsigned int width,
+static int convert_bayer_yuyv(const uint16_t *raw, unsigned int width,
 			      unsigned int height, unsigned int stride,
-			      unsigned char *out, size_t out_size)
+			      unsigned char *out, size_t out_size, double *mean_green)
 {
 	if (!raw || !out || width < 8 || height < 8 ||
 	    (width & 1) || (height & 1) ||
@@ -96,6 +263,10 @@ static int convert_rgbir_yuyv(const uint16_t *raw, unsigned int width,
 	    out_size < OUT_FRAME_BYTES)
 		return -1;
 
+	unsigned int gain_q12[3];
+	init_gamma();
+	calculate_white_balance(raw, width, height, stride, gain_q12, mean_green);
+
 	for (unsigned int oy = 0; oy < OUT_HEIGHT; oy++) {
 		unsigned int sy = (unsigned int)(((uint64_t)oy * height) / OUT_HEIGHT);
 		unsigned char *dst = out + (size_t)oy * OUT_WIDTH * 2;
@@ -103,8 +274,8 @@ static int convert_rgbir_yuyv(const uint16_t *raw, unsigned int width,
 			unsigned int sx0 = (unsigned int)(((uint64_t)ox * width) / OUT_WIDTH);
 			unsigned int sx1 = (unsigned int)(((uint64_t)(ox + 1) * width) / OUT_WIDTH);
 			int a[3], b[3];
-			rgb_at(raw, width, height, stride, sx0, sy, a);
-			rgb_at(raw, width, height, stride, sx1, sy, b);
+			rgb_at(raw, width, height, stride, gain_q12, sx0, sy, a);
+			rgb_at(raw, width, height, stride, gain_q12, sx1, sy, b);
 			int y0 = (77 * a[0] + 150 * a[1] + 29 * a[2] + 128) >> 8;
 			int y1 = (77 * b[0] + 150 * b[1] + 29 * b[2] + 128) >> 8;
 			int r = (a[0] + b[0]) / 2;
@@ -119,8 +290,160 @@ static int convert_rgbir_yuyv(const uint16_t *raw, unsigned int width,
 	return 0;
 }
 
+struct ae_control {
+	__u32 id;
+	int min, max, saved, value, present;
+};
+
+struct ae_state {
+	int fd, enabled;
+	unsigned int frames;
+	struct ae_control exposure, again, dgain;
+};
+
+/* Brightness relative to minimum exposure and gains: lines x analogue x digital multiplier. */
+static double ae_total(const struct ae_state *ae)
+{
+	double total = ae->exposure.value;
+
+	total *= (double)ae->again.value / ae->again.min;
+	if (ae->dgain.present)
+		total *= (double)ae->dgain.value / ae->dgain.min;
+	return total;
+}
+
+static int ae_clamp(double value, int min, int max)
+{
+	if (value < min) return min;
+	if (value > max) return max;
+	return (int)(value + 0.5);
+}
+
+/* Split a total into exposure time first (no added noise), then analogue, then digital gain. */
+static void ae_plan(struct ae_state *ae, double total)
+{
+	double rest;
+
+	ae->exposure.value = ae_clamp(total, ae->exposure.min, ae->exposure.max);
+	rest = total / ae->exposure.value;
+	ae->again.value = ae_clamp(rest * ae->again.min, ae->again.min, ae->again.max);
+	rest = rest * ae->again.min / ae->again.value;
+	if (ae->dgain.present)
+		ae->dgain.value = ae_clamp(rest * ae->dgain.min, ae->dgain.min, ae->dgain.max);
+}
+
+/* Returns 1 when the plan changed, 0 when the scene is within the deadband or at a limit. */
+static int ae_update(struct ae_state *ae, double mean_green)
+{
+	double ratio, before = ae_total(ae);
+	int exposure = ae->exposure.value, again = ae->again.value, dgain = ae->dgain.value;
+
+	ratio = mean_green > 1.0 ? AE_TARGET / mean_green : AE_MAX_STEP;
+	if (ratio > 1.0 - AE_DEADBAND && ratio < 1.0 + AE_DEADBAND)
+		return 0;
+	if (ratio > AE_MAX_STEP) ratio = AE_MAX_STEP;
+	if (ratio < 1.0 / AE_MAX_STEP) ratio = 1.0 / AE_MAX_STEP;
+	ae_plan(ae, before * ratio);
+	return exposure != ae->exposure.value || again != ae->again.value ||
+	       dgain != ae->dgain.value;
+}
+
+static int ae_query(int fd, struct ae_control *c, __u32 id)
+{
+	struct v4l2_queryctrl q = { .id = id };
+	struct v4l2_control v = { .id = id };
+
+	c->id = id;
+	if (ioctl(fd, VIDIOC_QUERYCTRL, &q) || (q.flags & (V4L2_CTRL_FLAG_DISABLED |
+						   V4L2_CTRL_FLAG_READ_ONLY)) ||
+	    q.minimum <= 0 || q.maximum < q.minimum || ioctl(fd, VIDIOC_G_CTRL, &v))
+		return -1;
+	c->min = q.minimum;
+	c->max = q.maximum;
+	c->saved = c->value = v.value;
+	c->present = 1;
+	return 0;
+}
+
+static int ae_set(int fd, const struct ae_control *c, int value)
+{
+	struct v4l2_control v = { .id = c->id, .value = value };
+
+	return c->present ? ioctl(fd, VIDIOC_S_CTRL, &v) : 0;
+}
+
+static void ae_init(struct ae_state *ae, int fd)
+{
+	memset(ae, 0, sizeof(*ae));
+	ae->fd = fd;
+	if (ae_query(fd, &ae->exposure, V4L2_CID_EXPOSURE) ||
+	    ae_query(fd, &ae->again, V4L2_CID_ANALOGUE_GAIN)) {
+		printf("ae: sensor exposure/analogue gain controls unavailable; auto-exposure off\n");
+		return;
+	}
+	(void)ae_query(fd, &ae->dgain, V4L2_CID_DIGITAL_GAIN);
+	ae->enabled = 1;
+	printf("ae: exposure %d..%d (now %d) again %d..%d (now %d) dgain %s %d..%d (now %d)\n",
+	       ae->exposure.min, ae->exposure.max, ae->exposure.value,
+	       ae->again.min, ae->again.max, ae->again.value,
+	       ae->dgain.present ? "on" : "absent", ae->dgain.min, ae->dgain.max, ae->dgain.value);
+}
+
+static void ae_frame(struct ae_state *ae, double mean_green)
+{
+	if (!ae->enabled)
+		return;
+	ae->frames++;
+	if (ae->frames % 150 == 0)
+		printf("ae: mean=%.0f target=%.0f exposure=%d again=%d dgain=%d\n", mean_green,
+		       AE_TARGET, ae->exposure.value, ae->again.value, ae->dgain.value);
+	if (ae->frames % AE_INTERVAL || !ae_update(ae, mean_green))
+		return;
+	if (ae_set(ae->fd, &ae->exposure, ae->exposure.value) ||
+	    ae_set(ae->fd, &ae->again, ae->again.value) ||
+	    ae_set(ae->fd, &ae->dgain, ae->dgain.value)) {
+		perror("ae: set sensor control; auto-exposure off");
+		ae->enabled = 0;
+	}
+}
+
+static void ae_restore(struct ae_state *ae)
+{
+	if (!ae->exposure.present || !ae->again.present)
+		return;
+	if (ae_set(ae->fd, &ae->exposure, ae->exposure.saved) ||
+	    ae_set(ae->fd, &ae->again, ae->again.saved) ||
+	    ae_set(ae->fd, &ae->dgain, ae->dgain.saved))
+		perror("ae: restore sensor controls");
+}
+
+/*
+ * v4l2loopback's read-only "readers_active" control (V4L2LOOPBACK_CID_BASE + 4):
+ * 1 while a capture stream holds the device, 0 when nothing is streaming from it.
+ * Returns -1 when the control is missing (an older module): then always convert.
+ */
+#define LOOPBACK_CID_READERS ((V4L2_CID_USER_BASE | 0xf000) + 4)
+
+static int loopback_readers(int fd)
+{
+	struct v4l2_control c = { .id = LOOPBACK_CID_READERS };
+
+	return ioctl(fd, VIDIOC_G_CTRL, &c) ? -1 : c.value;
+}
+
+/*
+ * The IPU6 firmware cannot stop a stream cleanly, so the sensor keeps streaming;
+ * but with no consumer the ~12 ms/frame conversion (about a third of a core at
+ * 30 fps) is skipped. The next frame after a consumer starts is converted.
+ */
+static int bridge_should_convert(int readers)
+{
+	return readers != 0;
+}
+
 static int capture_to_loopback(const char *media_dev, const char *out_dev)
 {
+	struct ae_state ae = { .fd = -1 };
 	struct graph graph = { 0 };
 	struct media_v2_topology topology;
 	struct media_device_info info = { 0 };
@@ -136,7 +459,8 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev)
 		.count = 3, .type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
 		.memory = V4L2_MEMORY_MMAP
 	};
-	unsigned int buffer_count = 0;
+	unsigned int buffer_count = 0, frame_count = 0;
+	int last_readers = -2;
 	unsigned char *output = NULL;
 	enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 
@@ -168,6 +492,18 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev)
 		goto done;
 	}
 	__u32 fourcc = pixel_format(sensor.format.code);
+	/*
+	 * The measured RGB-IR layout is relative to the orientation the driver reports
+	 * as GRBG; a flip would move the sites, so refuse any other code.
+	 */
+	if (sensor.format.code != MEDIA_BUS_FMT_SGRBG10_1X10) {
+		fprintf(stderr, "unexpected OV5675 bus code 0x%x (RGB-IR layout measured for GRBG10)\n",
+			sensor.format.code);
+		goto done;
+	}
+	set_rgbir_pattern();
+	printf("cfa: OV5675 RGB-IR 4x4 (bus code 0x%x): %s\n", sensor.format.code,
+	       "GIGI/RGBG/GIGI/BGRG");
 	if (!fourcc || setup_link(mfd, &path, path.output->flags | MEDIA_LNK_FL_ENABLED))
 		goto done;
 	linked = 1;
@@ -256,9 +592,10 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev)
 		perror("prime V4L2 loopback");
 		goto done;
 	}
+	ae_init(&ae, sfd);
 	signal(SIGINT, stop_bridge);
 	signal(SIGTERM, stop_bridge);
-	printf("bridge active: %ux%u RGB-IR to %ux%u YUYV; sensor remains streaming until stop\n",
+	printf("bridge active: %ux%u Bayer to %ux%u YUYV; sensor remains streaming until stop\n",
 	       video.fmt.pix.width, video.fmt.pix.height, OUT_WIDTH, OUT_HEIGHT);
 	result = 0;
 	while (running) {
@@ -287,14 +624,33 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev)
 			result = 1;
 			break;
 		}
-		if (convert_rgbir_yuyv(buffers[b.index].data, video.fmt.pix.width,
-				       video.fmt.pix.height, video.fmt.pix.bytesperline,
-				       output, OUT_FRAME_BYTES) ||
-		    write(outfd, output, OUT_FRAME_BYTES) != (ssize_t)OUT_FRAME_BYTES) {
+		double mean_green = 0;
+		int readers = loopback_readers(outfd);
+		if (readers != last_readers) {
+			printf("bridge: %s\n", readers < 0 ? "readers_active unavailable; converting every frame" :
+			       readers ? "consumer streaming; converting frames" :
+			       "no consumer; idle (sensor and auto-exposure keep running)");
+			last_readers = readers;
+		}
+		if (!bridge_should_convert(readers)) {
+			/* Idle: only the cheap sampled statistics, so exposure is right on resume. */
+			unsigned int unused_gain[3];
+			calculate_white_balance(buffers[b.index].data, video.fmt.pix.width,
+						video.fmt.pix.height, video.fmt.pix.bytesperline,
+						unused_gain, &mean_green);
+		} else if (convert_bayer_yuyv(buffers[b.index].data, video.fmt.pix.width,
+					      video.fmt.pix.height, video.fmt.pix.bytesperline,
+					      output, OUT_FRAME_BYTES, &mean_green) ||
+			   write(outfd, output, OUT_FRAME_BYTES) != (ssize_t)OUT_FRAME_BYTES) {
 			fprintf(stderr, "convert or write loopback frame failed: %s\n", strerror(errno));
 			result = 1;
 			break;
 		}
+		ae_frame(&ae, mean_green);
+		frame_count++;
+		if (frame_count == 30 || frame_count % 900 == 0)
+			log_cfa_phases(buffers[b.index].data, video.fmt.pix.width,
+				       video.fmt.pix.height, video.fmt.pix.bytesperline, frame_count);
 		if (ioctl(vfd, VIDIOC_QBUF, &b)) {
 			perror("requeue IPU6 frame");
 			result = 1;
@@ -304,6 +660,8 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev)
 done:
 	if (streaming && ioctl(vfd, VIDIOC_STREAMOFF, &type))
 		perror("VIDIOC_STREAMOFF");
+	if (ae.fd >= 0)
+		ae_restore(&ae);
 	for (unsigned int i = 0; i < buffer_count; i++)
 		if (buffers[i].data) munmap(buffers[i].data, buffers[i].length);
 	if (vfd >= 0) {
