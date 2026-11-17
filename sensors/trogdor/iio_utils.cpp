@@ -253,11 +253,62 @@ bool isLatitude7320System() {
 }
 
 bool applyProvisionalLatitude7320Range(iio_device_data* sensor) {
-    if (!sensor || sensor->name != "accel_3d" || !sensor->provisional_latitude7320_profile)
-        return false;
-    sensor->resolution = 1.0f;
-    sensor->max_range = 2000000;
-    return true;
+    if (!sensor || !sensor->provisional_latitude7320_profile) return false;
+    if (sensor->name == "accel_3d") {
+        sensor->resolution = 1.0f;
+        sensor->max_range = 2000000;
+        return true;
+    }
+    if (sensor->name == "gyro_3d" && std::isfinite(sensor->scale) && sensor->scale > 0) {
+        sensor->resolution = 1.0f;
+        sensor->max_range = static_cast<int64_t>(kProvisionalGyroFullScaleRadPerSec / sensor->scale);
+        return sensor->max_range > 0;
+    }
+    return false;
+}
+
+int read_illuminance_lux(const light_sensor_data& light, double* lux) {
+    float raw = 0;
+    if (!lux) return -EINVAL;
+    int err = sysfs_read_float(light.sysfspath + "/in_illuminance_raw", &raw);
+    if (err) return err;
+    if (!std::isfinite(raw)) return -EINVAL;
+    *lux = illuminanceLux(raw, light.scale, light.offset);
+    return 0;
+}
+
+int find_light_sensor(const std::string& iio_dir, light_sensor_data* light) {
+    DirPtr dp(nullptr, closedir);
+    const struct dirent* ent;
+
+    if (!light) return -EINVAL;
+    int ret = sysfs_opendir(iio_dir, &dp);
+    if (ret) return ret;
+    std::vector<std::string> candidates;
+    while (ent = readdir(dp.get()), ent != nullptr) {
+        if (strncmp(ent->d_name, "iio:device", strlen("iio:device")) == 0)
+            candidates.push_back(ent->d_name);
+    }
+    std::sort(candidates.begin(), candidates.end(), [](const std::string& a, const std::string& b) {
+        return a.size() != b.size() ? a.size() < b.size() : a < b;
+    });
+    for (const auto& name : candidates) {
+        const std::string dir = iio_dir + (iio_dir.empty() || iio_dir.back() == '/' ? "" : "/") + name;
+        std::string sensor_name;
+        float scale = 0, offset = 0, raw = 0;
+        if (get_sensor_name(dir, &sensor_name) || sensor_name != "als") continue;
+        if (sysfs_read_float(dir + "/in_illuminance_raw", &raw) ||
+            sysfs_read_float(dir + "/in_illuminance_scale", &scale) || !std::isfinite(scale) ||
+            scale <= 0)
+            continue;
+        if (sysfs_read_float(dir + "/in_illuminance_offset", &offset) || !std::isfinite(offset))
+            offset = 0;
+        light->sysfspath = dir;
+        light->scale = scale;
+        light->offset = offset;
+        return 0;
+    }
+    return -ENOENT;
 }
 
 int set_sampling_frequency(const std::string& device_dir, const double frequency) {
@@ -342,7 +393,7 @@ int load_iio_devices(std::string iio_dir, std::vector<iio_device_data>* iio_data
         if (!filter(&iio_dev_data)) continue;
 
         iio_dev_data.provisional_latitude7320_profile =
-                latitude7320_profile && iio_dev_data.name == "accel_3d";
+                latitude7320_profile && isHidMotionSensor(iio_dev_data.name);
         ALOGI("found sensor %s at path %s", iio_dev_data.name.c_str(), path_device.c_str());
         err = get_sampling_frequency_available(iio_dev_data.sysfspath,
                                                &iio_dev_data.sampling_freq_avl);
@@ -354,11 +405,12 @@ int load_iio_devices(std::string iio_dir, std::vector<iio_device_data>* iio_data
 
         if (iio_dev_data.provisional_latitude7320_profile) {
             float current_frequency = 0.0f;
-            err = sysfs_read_float(iio_dev_data.sysfspath + "/in_accel_sampling_frequency",
+            err = sysfs_read_float(iio_dev_data.sysfspath + "/" +
+                                           hidSamplingFrequencyAttribute(iio_dev_data.name),
                                    &current_frequency);
             if (err || !std::isfinite(current_frequency) || current_frequency <= 0.0f) {
                 ALOGE("No valid current sampling frequency for provisional Latitude 7320 "
-                      "accelerometer %s", path_device.c_str());
+                      "sensor %s", path_device.c_str());
                 continue;
             }
             iio_dev_data.sampling_freq_avl.assign(1, current_frequency);
@@ -390,8 +442,9 @@ int load_iio_devices(std::string iio_dir, std::vector<iio_device_data>* iio_data
         if (err || !std::isfinite(iio_dev_data.resolution) ||
             iio_dev_data.resolution <= 0.0f || iio_dev_data.max_range <= 0) {
             if (err == -ENOENT && applyProvisionalLatitude7320Range(&iio_dev_data)) {
-                ALOGW("Using provisional Latitude 7320 accelerometer range (2 g); "
-                      "configured full-scale is unverified");
+                ALOGW("Using provisional Latitude 7320 %s range (%s); configured full-scale "
+                      "is unverified", iio_dev_data.name.c_str(),
+                      iio_dev_data.name == "gyro_3d" ? "2000 deg/s" : "2 g");
                 err = 0;
             } else if (isHidMotionSensor(iio_dev_data.name)) {
                 ALOGE("No valid IIO range for HID sensor %s", path_device.c_str());

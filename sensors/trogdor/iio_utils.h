@@ -78,6 +78,17 @@ int load_iio_devices(std::string iio_dir, std::vector<iio_device_data>* iio_data
 bool isLatitude7320Dmi(const std::string& sys_vendor, const std::string& product_name,
                        const std::string& board_name);
 bool isLatitude7320System();
+
+/* Ambient light sensor read by polling sysfs (HID "als": in_illuminance_raw/_scale/_offset). */
+struct light_sensor_data {
+    std::string sysfspath;
+    double scale = 0;
+    double offset = 0;
+};
+/* First "als" IIO device with a readable illuminance value and positive scale; -ENOENT if none. */
+int find_light_sensor(const std::string& iio_dir, light_sensor_data* light);
+/* Current illuminance in lux (raw read from the sensor hub, then offset and scale). */
+int read_illuminance_lux(const light_sensor_data& light, double* lux);
 bool applyProvisionalLatitude7320Range(iio_device_data* sensor);
 int scan_elements(const std::string& device_dir, struct iio_device_data* iio_data);
 int parse_scan_type(const std::string& type, iio_info_channel* channel);

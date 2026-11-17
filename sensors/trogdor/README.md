@@ -1,5 +1,17 @@
 # Experimental HID IIO Sensors sub-HAL
 
+**2026-11-17: gyroscope and ambient light added (Latitude 7320).** On the Latitude profile the
+`gyro_3d` device now gets the same treatment as the accelerometer: its own current
+`in_anglvel_sampling_frequency` as the only rate, a provisional ±2000 °/s range (no range
+attribute is exposed), and the identity axis mapping. The accelerometer's `(-x,-y,-z)` is the
+gravity sign convention (HID/Windows report -1 g on the axis facing up, Android +9.81) on the
+same axes, which angular velocity does not have. A `LightSensor` (Android `LIGHT`, on-change)
+polls the first HID `als` device's `in_illuminance_raw` at 5 Hz while active, converts with
+`in_illuminance_scale`/`_offset`, and reports on activation and whenever the value moves by more
+than 1 lux and more than 2%; it needs no IIO buffer or extra permissions. Both are unverified on
+hardware: check that rotating the laptop gives gyroscope readings with the right signs and that
+Settings offers adaptive brightness.
+
 These files are based on the Apache-2.0 Trogdor Sensors 2.1 sub-HAL at
 [`a8a85fe07e1489a48eb5ac519fd8f400e21d2307`](https://github.com/YAJATapps/android_device_google_trogdor/tree/a8a85fe07e1489a48eb5ac519fd8f400e21d2307/hal/sensors).
 
@@ -52,6 +64,18 @@ was produced with Android 17 `xsdc` and the public
 [sensor schema](https://github.com/boundarydevices/android_hardware_imx/blob/257f3930d5a95045d3618ad91e7d2d5cf53aa135/sensor/config/sensor_hal_configuration.xsd).
 The shared libraries were copied read-only from the exact target vendor image,
 not the repository. Do not commit the image or extracted libraries.
+
+Without `xsdc-output/` the script uses `xsdc_stub/` instead: the same parser types with a
+`read()` that finds no `sensor_hal_configuration.xml`, which is what Google's desktop images
+(none ship that file) always produced. That removes the `xsdc-output/`, `icu/` and `libxml2.so`
+inputs. The 2026-11-17 build used: Android NDK r27d (`android-ndk-r27d-linux.zip`, SHA-256
+`601246087a682d1944e1e16dd85bc6e49560fe8b6d61255be2829178c8ed15d9`, sysroot only);
+`platform/prebuilts/vndk/v30` at `5f9884aa352825291757dfd6694b874ad8c1805e` (`x86_64/include` only, as `vndk-headers/`);
+`platform/hardware/interfaces` at `1a56e38edc2f2f6189ef405ee1edce554e15cbc0`
+(`sensors/common/default/2.X/multihal/include` as `multihal-headers/`); the libc++ headers of the
+local Android clang r584948b (`include/c++/v1`, `std::__1`, ABI 1) as `libcxx17/`; and the
+thirteen libraries from the target `vendor_a.img` (liblog from `system_a.img`). Keep the inputs
+under the ignored `build/sensor-hal-inputs/`.
 
 With an Android-capable clang and the inputs available in the same environment:
 

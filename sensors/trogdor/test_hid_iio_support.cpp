@@ -6,6 +6,7 @@
 #include "iio_utils.h"
 
 #include <cassert>
+#include <cerrno>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -27,6 +28,13 @@ using android::hardware::sensors::V2_1::subhal::implementation::scan_elements;
 using android::hardware::sensors::V2_1::subhal::implementation::set_sampling_frequency;
 using android::hardware::sensors::V2_1::subhal::implementation::validHidAxisMapping;
 using android::hardware::sensors::V2_1::subhal::implementation::valid_hid_scan_layout;
+using android::hardware::sensors::V2_1::subhal::implementation::find_light_sensor;
+using android::hardware::sensors::V2_1::subhal::implementation::hidSamplingFrequencyAttribute;
+using android::hardware::sensors::V2_1::subhal::implementation::illuminanceChanged;
+using android::hardware::sensors::V2_1::subhal::implementation::illuminanceLux;
+using android::hardware::sensors::V2_1::subhal::implementation::kProvisionalGyroFullScaleRadPerSec;
+using android::hardware::sensors::V2_1::subhal::implementation::light_sensor_data;
+using android::hardware::sensors::V2_1::subhal::implementation::read_illuminance_lux;
 
 int main() {
     assert(isHidMotionSensor("accel_3d"));
@@ -41,6 +49,21 @@ int main() {
            provisionalMapping.zMap == 2);
     assert(provisionalMapping.xNegate && provisionalMapping.yNegate &&
            provisionalMapping.zNegate);
+    // Gyroscope: same axes as the accelerometer, no gravity sign convention to undo.
+    const auto gyroMapping = latitude7320ProvisionalAxisMapping("gyro_3d");
+    assert(gyroMapping.xMap == 0 && gyroMapping.yMap == 1 && gyroMapping.zMap == 2);
+    assert(!gyroMapping.xNegate && !gyroMapping.yNegate && !gyroMapping.zNegate);
+    assert(latitude7320ProvisionalAxisMapping("accel_3d").xNegate);
+    assert(std::string(hidSamplingFrequencyAttribute("gyro_3d")) == "in_anglvel_sampling_frequency");
+    assert(std::string(hidSamplingFrequencyAttribute("accel_3d")) == "in_accel_sampling_frequency");
+    // Light: lux = (raw + offset) * scale, clamped at 0; reports past both 1 lux and 2%.
+    assert(illuminanceLux(1500, 0.1, 0) == 150);
+    assert(illuminanceLux(10, 1, -20) == 0);
+    assert(!illuminanceChanged(150, 150.5));
+    assert(!illuminanceChanged(1000, 1015));
+    assert(illuminanceChanged(1000, 1025));
+    assert(illuminanceChanged(10, 11.5));
+    assert(illuminanceChanged(0, 2));
     assert(validHidAxisMapping(true, 2, 0, 1));
     assert(!validHidAxisMapping(false, 0, 1, 2));
     assert(!validHidAxisMapping(true, 0, 0, 2));
@@ -191,5 +214,55 @@ int main() {
     fs::create_directory(root / "buffer");
     fs::create_symlink("/dev/full", root / "buffer" / "enable");
     assert(enable_sensor(root.string(), false) < 0);
+
+    // A complete Latitude gyroscope gets the profile, its own frequency and a 2000 deg/s range.
+    const auto gyroRoot = root / "latitude7320gyro";
+    fs::create_directory(gyroRoot);
+    auto gyro = gyroRoot / "iio:device3";
+    fs::create_directory(gyro);
+    std::ofstream(gyro / "name") << "gyro_3d\n";
+    std::ofstream(gyro / "in_anglvel_scale") << "0.000000174\n";
+    std::ofstream(gyro / "in_anglvel_offset") << "0\n";
+    std::ofstream(gyro / "in_anglvel_sampling_frequency") << "10.000000\n";
+    std::vector<iio_device_data> gyros;
+    assert(load_iio_devices(gyroRoot.string(), &gyros,
+                            [](iio_device_data* sensor) { return isHidMotionSensor(sensor->name); },
+                            true) == 0);
+    assert(gyros.size() == 1 && gyros[0].name == "gyro_3d");
+    assert(gyros[0].provisional_latitude7320_profile);
+    assert(gyros[0].sampling_freq_avl.size() == 1 && gyros[0].sampling_freq_avl[0] == 10.0);
+    const double gyroFullScale = gyros[0].max_range * static_cast<double>(gyros[0].scale);
+    assert(gyroFullScale > kProvisionalGyroFullScaleRadPerSec * 0.999 &&
+           gyroFullScale < kProvisionalGyroFullScaleRadPerSec * 1.001);
+
+    // Light sensor discovery: first "als" (numeric order) with a raw value and a positive scale.
+    const auto lightRoot = root / "light";
+    fs::create_directory(lightRoot);
+    auto als = [&](int number, const char* name, const char* raw, const char* scale,
+                   const char* offset) {
+        const auto path = lightRoot / ("iio:device" + std::to_string(number));
+        fs::create_directory(path);
+        std::ofstream(path / "name") << name << '\n';
+        if (raw) std::ofstream(path / "in_illuminance_raw") << raw << '\n';
+        if (scale) std::ofstream(path / "in_illuminance_scale") << scale << '\n';
+        if (offset) std::ofstream(path / "in_illuminance_offset") << offset << '\n';
+    };
+    als(0, "accel_3d", "5", "1", "0");
+    als(1, "als", "5", "0", "0");         // scale 0: unusable
+    als(2, "als", nullptr, "1", "0");     // no value
+    als(10, "als", "999", "1", "0");
+    als(3, "als", "1500", "0.1", nullptr); // offset optional
+    light_sensor_data light;
+    assert(find_light_sensor(lightRoot.string(), &light) == 0);
+    assert(light.sysfspath == (lightRoot / "iio:device3").string());
+    assert(light.scale > 0.0999 && light.scale < 0.1001 && light.offset == 0);
+    double lux = 0;
+    assert(read_illuminance_lux(light, &lux) == 0 && lux > 149.9 && lux < 150.1);
+    std::ofstream(lightRoot / "iio:device3" / "in_illuminance_raw") << "30\n";
+    assert(read_illuminance_lux(light, &lux) == 0 && lux > 2.99 && lux < 3.01);
+    const auto noLight = root / "nolight";
+    fs::create_directory(noLight);
+    assert(find_light_sensor(noLight.string(), &light) == -ENOENT);
+
     fs::remove_all(root);
 }

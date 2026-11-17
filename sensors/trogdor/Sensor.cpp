@@ -20,7 +20,9 @@
 #include <hardware/sensors.h>
 #include <log/log.h>
 #include <utils/SystemClock.h>
+#include <chrono>
 #include <cmath>
+#include <thread>
 #include <limits>
 #include <time.h>
 
@@ -59,6 +61,9 @@ SensorBase::SensorBase(int32_t sensorHandle, ISensorsEventCallback* callback, Se
             break;
         case SensorType::GYROSCOPE:
             mSensorInfo.typeAsString = SENSOR_STRING_TYPE_GYROSCOPE;
+            break;
+        case SensorType::LIGHT:
+            mSensorInfo.typeAsString = SENSOR_STRING_TYPE_LIGHT;
             break;
         default:
             ALOGE("unsupported sensor type %d", type);
@@ -584,7 +589,7 @@ HWSensorBase::HWSensorBase(int32_t sensorHandle, ISensorsEventCallback* callback
     mSensorInfo.power = 0;
     mIioData = data;
     if (data.provisional_latitude7320_profile) {
-        const auto mapping = latitude7320ProvisionalAxisMapping();
+        const auto mapping = latitude7320ProvisionalAxisMapping(data.name);
         mXMap = mapping.xMap;
         mYMap = mapping.yMap;
         mZMap = mapping.zMap;
@@ -625,6 +630,68 @@ HWSensorBase::HWSensorBase(int32_t sensorHandle, ISensorsEventCallback* callback
     mPollFdIio.events = POLLIN;
     mSensorRawData.resize(mScanSize);
     mSensorThread.start();
+}
+
+LightSensor::LightSensor(int32_t sensorHandle, ISensorsEventCallback* callback,
+                         const struct light_sensor_data& data)
+    : SensorBase(sensorHandle, callback, SensorType::LIGHT), mData(data) {
+    mSensorInfo.name = "als";
+    mSensorInfo.vendor = "gbos (HID sensor hub)";
+    mSensorInfo.flags |= SensorFlagBits::ON_CHANGE_MODE;
+    mSensorInfo.resolution = static_cast<float>(data.scale);
+    mSensorInfo.maxRange = 100000.0f;
+    mSensorInfo.power = 0;
+    mSensorInfo.minDelay = static_cast<int32_t>(kPollPeriodNs / 1000);
+    mSensorInfo.maxDelay = 1000000;
+    mSamplingPeriodNs = kPollPeriodNs;
+    mSensorThread.start();
+}
+
+LightSensor::~LightSensor() {
+    {
+        std::unique_lock<std::mutex> lock(mSensorThread.lock());
+        mSensorThread.stop();
+        mSensorThread.notifyAll();
+    }
+    mSensorThread.join();
+}
+
+Result LightSensor::batch(int64_t samplingPeriodNs) {
+    if (samplingPeriodNs <= 0) return Result::BAD_VALUE;
+    return Result::OK;  // fixed 5 Hz polling with on-change reporting
+}
+
+Result LightSensor::activate(bool enable) {
+    std::unique_lock<std::mutex> lock(mSensorThread.lock());
+    if (mIsEnabled != enable) {
+        mIsEnabled = enable;
+        mHaveLast = false;  // an on-change sensor reports its value right after activation
+        mSensorThread.notifyAll();
+    }
+    return Result::OK;
+}
+
+void LightSensor::pollSensor() {
+    if (!mIsEnabled || mMode == OperationMode::DATA_INJECTION) {
+        mSensorThread.wait([this] {
+            return (mIsEnabled && mMode == OperationMode::NORMAL) || mSensorThread.isStopped();
+        });
+        return;
+    }
+    double lux = 0;
+    if (read_illuminance_lux(mData, &lux) == 0) {
+        if (!mHaveLast || illuminanceChanged(mLastLux, lux)) {
+            Event event{};
+            event.sensorHandle = mSensorInfo.sensorHandle;
+            event.sensorType = SensorType::LIGHT;
+            event.timestamp = android::elapsedRealtimeNano();
+            event.u.scalar = static_cast<float>(lux);
+            mLastLux = lux;
+            mHaveLast = true;
+            mCallback->postEvents({event}, mCallback->createScopedWakelock(isWakeUpSensor()));
+        }
+    }
+    std::this_thread::sleep_for(std::chrono::nanoseconds(kPollPeriodNs));
 }
 
 }  // namespace implementation

@@ -19,23 +19,31 @@ def main():
     source_dir = Path(__file__).resolve().parent
     sysroot = inputs / "ndk/android-ndk-r27d/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
     vndk = inputs / "vndk-headers"
+    # With INPUTS/xsdc-output the generated XML placement parser is built (needs libxml2
+    # and ICU headers). Without it, xsdc_stub/ provides the same types with a read() that
+    # finds no file, which is what Google's desktop images (no sensor_hal_configuration.xml)
+    # always produced; that drops the xsdc, libxml2 and ICU inputs.
+    xsdc = inputs / "xsdc-output"
+    use_generated = xsdc.exists()
     include_roots = [
         inputs / "libcxx17",
         inputs / "multihal-headers/V2_1",
         inputs / "multihal-headers",
-        inputs / "xsdc-output/include",
-        inputs / "icu",
     ]
+    if use_generated:
+        include_roots += [xsdc / "include", inputs / "icu"]
+    else:
+        include_roots.append(source_dir / "xsdc_stub")
     sources = [
         source_dir / name
         for name in ("iio_utils.cpp", "MultiPoll.cpp", "Sensor.cpp",
                      "SensorThread.cpp", "SensorsSubHal.cpp")
     ]
     generated_sources = [
-        inputs / "xsdc-output" / name
+        xsdc / name
         for name in ("sensor_hal_configuration_V1_0.cpp",
                      "sensor_hal_configuration_V1_0_enums.cpp")
-    ]
+    ] if use_generated else []
     libraries = [
         inputs / "vendor-lib64" / name
         for name in (
@@ -44,7 +52,8 @@ def main():
             "android.hardware.sensors@2.1.so",
             "android.hardware.sensors@2.0-ScopedWakelock.so",
             "libcutils.so", "libfmq.so", "libhardware.so", "libhidlbase.so",
-            "libbase.so", "libpower.so", "libutils.so", "libxml2.so", "libc++.so",
+            "libbase.so", "libpower.so", "libutils.so",
+            *(["libxml2.so"] if use_generated else []), "libc++.so",
         )
     ]
     for path in [args.clang, sysroot, vndk, *include_roots, *sources,

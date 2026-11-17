@@ -139,7 +139,8 @@ SensorsSubHal::SensorsSubHal() : mCallback(nullptr), mNextHandle(1) {
                 continue;
             }
             if (iio_device.provisional_latitude7320_profile) {
-                ALOGW("Using uncalibrated Latitude 7320 accelerometer axis mapping");
+                ALOGW("Using uncalibrated Latitude 7320 axis mapping for %s",
+                      iio_device.name.c_str());
             }
             err = scan_elements(iio_device.sysfspath, &iio_device);
             if (err == 0) {
@@ -162,6 +163,17 @@ SensorsSubHal::SensorsSubHal() : mCallback(nullptr), mNextHandle(1) {
         }
     } else {
         ALOGE("SensorsSubHal: load_iio_devices returned error %d", err);
+    }
+    if (latitude7320_profile) {
+        light_sensor_data light;
+        if (find_light_sensor(DEFAULT_IIO_DIR, &light) == 0) {
+            const int32_t handle = mNextHandle++;
+            mSensors[handle] = std::make_unique<LightSensor>(handle, this /* callback */, light);
+            ALOGI("Added ambient light sensor %s (scale %f, offset %f)", light.sysfspath.c_str(),
+                  light.scale, light.offset);
+        } else {
+            ALOGI("No HID ambient light sensor found");
+        }
     }
 }
 

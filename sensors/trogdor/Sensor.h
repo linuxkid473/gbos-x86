@@ -149,6 +149,30 @@ class HWSensorBase : public SensorBase {
     status_t getSensorPlacement(AdditionalInfo* sensorPlacement,
                                 const std::optional<std::vector<Configuration>>& config);
 };
+/*
+ * Ambient light (Android LIGHT, on-change) read by polling the HID "als" IIO device's
+ * in_illuminance_raw: the HID sensor hub returns a fresh value on each read, so no IIO
+ * buffer or extra sysfs permissions are needed. Reports on activation and then whenever
+ * the value moves by more than 1 lux and more than 2%.
+ */
+class LightSensor : public SensorBase {
+  public:
+    LightSensor(int32_t sensorHandle, ISensorsEventCallback* callback,
+                const struct light_sensor_data& data);
+    ~LightSensor();
+    Result batch(int64_t samplingPeriodNs) override;
+    Result activate(bool enable) override;
+
+  protected:
+    void pollSensor() override;
+
+  private:
+    static constexpr int64_t kPollPeriodNs = 200000000;	// 5 Hz
+    struct light_sensor_data mData;
+    double mLastLux = 0;
+    bool mHaveLast = false;
+};
+
 }  // namespace implementation
 }  // namespace subhal
 }  // namespace V2_1
