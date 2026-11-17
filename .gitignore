@@ -80,3 +80,6 @@ __pycache__/
 /usb/camera/
 *.aiqb
 ov5678_ccm.txt
+ov8856_ccm.txt
+ov8856_lsc.txt
+ov5678_lsc.txt

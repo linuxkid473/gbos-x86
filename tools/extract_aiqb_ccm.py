@@ -19,11 +19,13 @@ The first such table in the file is used; each illuminant's matrix is the mean o
 Output, one illuminant per line:  id r_over_g b_over_g x y m00 m01 m02 m10 m11 m12 m20 m21 m22
 
 Lens shading (--lsc) is the record whose header is (u32 size, u16 100, u16 28): a 16-byte 4x4
-colour-filter map (0 G, 1 IR, 2 R, 3 G, 4 B on the Latitude's OV5678, matching the measured mosaic),
-u16 illuminants, u16 channels, u16 grid width, u16 grid height, then per illuminant: u32 id, f32 R/G,
-f32 B/G, 8 bytes, u16 channels, and one u16 gain grid per channel (row-major). Grids are written
-normalised to 1.0 at the centre (auto exposure sets the overall level); green is the mean of both
-green phases, and the IR grid (a constant-clamped placeholder in this file) is not used.
+colour-filter map, u16 illuminants, u16 channels, u16 grid width, u16 grid height, then per
+illuminant: u32 id, f32 R/G, f32 B/G, 8 bytes, a u16 (5 in both files seen; not the channel count),
+and one u16 gain grid per channel (row-major, 2048 = 1.0 at the centre). The front OV5678 is RGB-IR
+(map 0 G, 1 IR, 2 R, 3 G, 4 B, matching the measured mosaic; its IR grid is a clamped placeholder and
+not used); the rear OV8856 is Bayer GRBG (map 0 1 / 2 3 = Gr R / B Gb; its two green grids agree to
+~1-2% and the red one shows the strongest corner fall-off). Grids are written normalised to 1.0 at
+the centre (auto exposure sets the overall level); green is the mean of both green phases.
 """
 import struct
 import sys
@@ -44,7 +46,7 @@ def record_at(data, off):
         return None
     ident = struct.unpack_from("<I", data, off)[0]
     rg, bg, x, y = struct.unpack_from("<4f", data, off + 4)
-    if not (0 < ident < 256 and 0.05 < rg < 3 and 0.05 < bg < 3 and 0.2 < x < 0.6 and 0.2 < y < 0.6):
+    if not (0 <= ident < 256 and 0.05 < rg < 3 and 0.05 < bg < 3 and 0.2 < x < 0.6 and 0.2 < y < 0.6):
         return None
     mats = [struct.unpack_from("<9f", data, off + 20 + 36 * i) for i in range(SECTORS)]
     good = [m for m in mats if plausible_matrix(m)]
@@ -71,7 +73,25 @@ def first_table(data):
     return []
 
 
+def record(data, rec_id, fmt):
+    """First top-level record (u32 size, u16 format, u16 id) with this id and format."""
+    for off in range(0, len(data) - 8, 4):
+        size, f, r = struct.unpack_from("<IHH", data, off)
+        if r == rec_id and f == fmt and 8 <= size and off + size <= len(data):
+            return off, size
+    return None
+
+
 def lens_shading(data):
+    """Returns (description, gw, gh, [(id, rg, bg, R, G, B)]) or None.
+
+    5 channels: the RGB-IR map (0 G, 1 IR, 2 R, 3 G, 4 B), as on the Latitude's OV5678.
+    4 channels: a 2x2 Bayer map (unused 4x4 entries 0xff) whose colours follow the sensor's
+    colour order in the general record (id 2); only order 0 = GRBG (the OV8856, matching its
+    Linux bus code) is known. The per-illuminant u16 after the 8 zero bytes is not the channel
+    count (it reads 5 in both files); the record header's count is used, and a record may end
+    with a few bytes of padding.
+    """
     for off in range(0, len(data) - 32, 4):
         size, fmt, rec = struct.unpack_from("<IHH", data, off)
         if rec != 28 or fmt != 100 or size < 1000 or off + size > len(data):
@@ -79,26 +99,42 @@ def lens_shading(data):
         h = off + 8
         cfa = list(data[h:h + 16])
         n_ill, n_ch, gw, gh = struct.unpack_from("<4H", data, h + 16)
-        if not (0 < n_ill < 32 and n_ch == 5 and 4 < gw <= 128 and 4 < gh <= 128):
+        if not (0 < n_ill < 32 and n_ch in (4, 5) and 4 < gw <= 128 and 4 < gh <= 128):
             continue
-        if 8 + 24 + n_ill * (22 + n_ch * gw * gh * 2) != size:
+        stride = 22 + n_ch * gw * gh * 2
+        if not 0 <= size - (8 + 24 + n_ill * stride) < 8:
             continue
-        if sorted(set(cfa)) != [0, 1, 2, 3, 4]:
-            continue
+        if n_ch == 5:
+            if sorted(set(cfa)) != [0, 1, 2, 3, 4]:
+                continue
+            red, greens, blue = 2, (0, 3), 4
+            what = "RGB-IR 4x4 cfa %s" % cfa
+        else:
+            if [cfa[0], cfa[1], cfa[4], cfa[5]] != [0, 1, 2, 3] or \
+               any(v != 0xFF for i, v in enumerate(cfa) if i not in (0, 1, 4, 5)):
+                continue
+            general = record(data, 2, 102)
+            order = struct.unpack_from("<H", data, general[0] + 14)[0] if general else None
+            if order != 0:
+                sys.exit("unsupported Bayer colour order %r (only 0 = GRBG is verified)" % order)
+            red, greens, blue = 1, (0, 3), 2
+            what = "Bayer GRBG (Gr R / B Gb)"
         out, o = [], h + 24
         for _ in range(n_ill):
             ident, rg, bg = struct.unpack_from("<Iff", data, o)
-            grids = []
-            for c in range(n_ch):
-                grids.append(struct.unpack_from("<%dH" % (gw * gh), data, o + 22 + c * gw * gh * 2))
+            grids = [struct.unpack_from("<%dH" % (gw * gh), data, o + 22 + c * gw * gh * 2)
+                     for c in range(n_ch)]
             centre = (gh // 2) * gw + gw // 2
 
             def norm(g):
                 return [v / g[centre] for v in g]
-            green = [(a + b) / 2 for a, b in zip(norm(grids[0]), norm(grids[3]))]
-            out.append((ident, rg, bg, norm(grids[2]), green, norm(grids[4])))
-            o += 22 + n_ch * gw * gh * 2
-        return cfa, gw, gh, out
+            g0, g1 = norm(grids[greens[0]]), norm(grids[greens[1]])
+            if sum(abs(a - b) for a, b in zip(g0, g1)) / len(g0) > 0.05:
+                sys.exit("green grids of illuminant %d disagree: channel map not understood" % ident)
+            out.append((ident, rg, bg, norm(grids[red]), [(a + b) / 2 for a, b in zip(g0, g1)],
+                        norm(grids[blue])))
+            o += stride
+        return what, gw, gh, out
     return None
 
 
@@ -107,8 +143,8 @@ def main():
         found = lens_shading(open(sys.argv[2], "rb").read())
         if not found:
             sys.exit("no lens-shading record found")
-        cfa, gw, gh, table = found
-        print("# lens shading, gains normalised to 1.0 at the centre; cfa %s; channels R G B" % cfa)
+        what, gw, gh, table = found
+        print("# lens shading, gains normalised to 1.0 at the centre; %s; channels R G B" % what)
         for ident, rg, bg, r, g, b in table:
             print("lsc %d %.5f %.5f %d %d" % (ident, rg, bg, gw, gh))
             for grid in (r, g, b):
