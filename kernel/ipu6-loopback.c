@@ -424,6 +424,7 @@ static unsigned char clamp8(int value)
 /* Image tuning (static so the host tests can vary them). */
 static int chroma_radius = 2;		/* 5x5 U/V box filter */
 #define TNR_THRESHOLD 14		/* luma steps (0..255) still treated as noise */
+#define HIGHLIGHT_START (LINEAR_MAX * 85 / 100)	/* raw level where clipping handling starts */
 
 static int16_t plane_y[OUT_HEIGHT][OUT_WIDTH], plane_u[OUT_HEIGHT][OUT_WIDTH],
 	plane_v[OUT_HEIGHT][OUT_WIDTH], plane_tmp[OUT_HEIGHT][OUT_WIDTH];
@@ -485,11 +486,15 @@ static void rgb_at(const uint16_t *raw, unsigned int width, unsigned int height,
 
 	if (x0 > width - 4) x0 = width - 4;
 	if (y0 > height - 4) y0 = height - 4;
+	unsigned int peak = 0;
 	for (unsigned int sy = y0; sy < y0 + 4; sy++)
 		for (unsigned int sx = x0; sx < x0 + 4; sx++) {
 			int channel = channel_at(sx, sy);
-			sum[channel] += raw_at(raw, width, height, stride, (int)sx, (int)sy);
+			unsigned int v = raw_at(raw, width, height, stride, (int)sx, (int)sy);
+			sum[channel] += v;
 			n[channel]++;
+			if (v > peak)
+				peak = v;
 		}
 	/*
 	 * Lens shading (shading_q12: R, G, B gains for this position; NULL = none). The IR
@@ -535,6 +540,22 @@ static void rgb_at(const uint16_t *raw, unsigned int width, unsigned int height,
 		for (int channel = 0; channel < 3; channel++) {
 			int v = luma + (int)(((int64_t)(rgb[channel] - luma) * saturation_q12 + 2048) >> 12);
 			rgb[channel] = v < 0 ? 0 : v;
+		}
+	}
+	/*
+	 * Highlights: where any site in the window is near the sensor's full scale, its
+	 * colour is no longer measured. On the RGB-IR sensor the IR sites clip too, and
+	 * "clipped colour minus clipped IR" is zero: lamps turned black with a magenta rim
+	 * (green clips first; 2026-11-17 photo). Fade such windows towards white, from no
+	 * effect at HIGHLIGHT_START of full scale to pure white when a site is at full scale.
+	 */
+	if (peak > HIGHLIGHT_START) {
+		int t = (int)(((peak - HIGHLIGHT_START) * 4096u) / (LINEAR_MAX - HIGHLIGHT_START));
+		if (t > 4096)
+			t = 4096;
+		for (int channel = 0; channel < 3; channel++) {
+			int v = rgb[channel] > (int)LINEAR_MAX ? (int)LINEAR_MAX : rgb[channel];
+			rgb[channel] = (v * (4096 - t) + (int)LINEAR_MAX * t + 2048) >> 12;
 		}
 	}
 	for (int channel = 0; channel < 3; channel++)

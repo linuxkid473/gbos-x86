@@ -423,6 +423,41 @@ static int test_lens_shading(void)
 	return hi - lo <= 6 ? 0 : 8;
 }
 
+
+/* Highlights: a fully clipped RGB-IR area (lamp) is white, not black; green-only clipping is not magenta. */
+static int clipped_frame(unsigned int r, unsigned int g, unsigned int b, unsigned int ir,
+			 int *luma, int *u, int *v)
+{
+	static uint16_t frame[64 * 64];
+	static unsigned char out[OUT_FRAME_BYTES];
+
+	set_rgbir_pattern();
+	for (unsigned int y = 0; y < 64; y++)
+		for (unsigned int x = 0; x < 64; x++)
+			frame[y * 64 + x] = (uint16_t)(unsigned int[]){ r, g, b, ir }[channel_at(x, y)];
+	tnr_reset();
+	if (convert_bayer_yuyv(frame, 64, 64, 128, out, sizeof(out), NULL))
+		return -1;
+	size_t at = (240 * OUT_WIDTH + 320) * 2;
+	*luma = out[at]; *u = out[at + 1] - 128; *v = out[at + 3] - 128;
+	return 0;
+}
+
+static int test_highlights(void)
+{
+	int y, u, v;
+
+	if (clipped_frame(1023, 1023, 1023, 1023, &y, &u, &v) || y < 250 || abs(u) > 2 || abs(v) > 2)
+		return 1;
+	/* Green at full scale, R/B/IR well below: the window is mostly faded to white. */
+	if (clipped_frame(700, 1023, 650, 300, &y, &u, &v) || y < 235 || abs(u) > 12 || abs(v) > 12)
+		return 2;
+	/* Below the threshold nothing changes: a mid grey stays mid grey. */
+	if (clipped_frame(500, 500, 500, 100, &y, &u, &v) || y > 235 || abs(u) > 2 || abs(v) > 2)
+		return 3;
+	return 0;
+}
+
 int main(void)
 {
 	(void)capture_to_loopback;
@@ -454,6 +489,8 @@ int main(void)
 		return 100 + test_ccm_table();
 	if (test_lens_shading())
 		return 110 + test_lens_shading();
+	if (test_highlights())
+		return 120 + test_highlights();
 	for (unsigned int y = 0; y < 8; y++)
 		for (unsigned int x = 0; x < 8; x++)
 			raw[y * 8 + x] = (uint16_t)(x + y * 8);
