@@ -295,6 +295,45 @@ static int test_temporal_filter(void)
 	return f_big == b_big ? 0 : 3;
 }
 
+
+/* Calibrated matrices: load, pick the nearest illuminants, keep greys grey. Synthetic data only. */
+static int test_ccm_table(void)
+{
+	char path[] = "/tmp/ccm.XXXXXX";
+	int fd = mkstemp(path);
+	FILE *f;
+
+	if (fd < 0 || !(f = fdopen(fd, "w")))
+		return 1;
+	fputs("# id r/g b/g x y ccm\n"
+	      "1 0.90 0.45 0.44 0.41 1.8 -0.4 -0.4 -0.3 2.0 -0.7 -0.5 -0.8 2.3\n"
+	      "2 0.50 0.65 0.31 0.33 1.5 -0.5 0.0 -0.1 1.4 -0.3 0.0 -0.6 1.6\n"
+	      "3 0.70 0.50 0.40 0.40 2.0 -1.0 0.0 -0.2 1.5 -0.3 -0.2 -1.0 2.2\n"
+	      "4 0.70 0.50 0.40 0.40 9.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0\n"   /* rows must sum to 1 */
+	      "garbage line\n", f);
+	fclose(f);
+	int n = load_ccm_table(path);
+	unlink(path);
+	if (n != 3)
+		return 2;
+	select_ccm(0.70, 0.50);			/* exactly illuminant 3 */
+	if (!ccm_active || ccm_pick[0] != 3 || ccm_weight < 0.999 || ccm_q12[0] != 8192)
+		return 3;
+	select_ccm(0.80, 0.475);		/* halfway between 1 and 3 */
+	if (!((ccm_pick[0] == 1 && ccm_pick[1] == 3) || (ccm_pick[0] == 3 && ccm_pick[1] == 1)) ||
+	    ccm_weight < 0.45 || ccm_weight > 0.55)
+		return 4;
+	for (int r = 0; r < 3; r++)
+		if (abs(ccm_q12[r * 3] + ccm_q12[r * 3 + 1] + ccm_q12[r * 3 + 2] - 4096) > 3)
+			return 5;
+	/* With a table loaded, a uniform frame still converts to neutral grey. */
+	int luma;
+	if (uniform_frame_worst_chroma(1, 120, &luma) > 2 || luma < 0)
+		return 6;
+	ccm_count = 0; ccm_active = 0;		/* back to generic saturation for later tests */
+	return load_ccm_table("/nonexistent/ccm.txt") == 0 ? 0 : 7;
+}
+
 int main(void)
 {
 	(void)capture_to_loopback;
@@ -322,6 +361,8 @@ int main(void)
 		return 85 + test_chroma_smoothing();
 	if (test_temporal_filter())
 		return 90 + test_temporal_filter();
+	if (test_ccm_table())
+		return 100 + test_ccm_table();
 	for (unsigned int y = 0; y < 8; y++)
 		for (unsigned int x = 0; x < 8; x++)
 			raw[y * 8 + x] = (uint16_t)(x + y * 8);

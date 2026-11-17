@@ -106,8 +106,16 @@ if pgrep -f '/ipu6-loopback ' >/dev/null 2>&1; then
     echo "ERROR: bridge is already running outside this init service"
     exit 1
 else
-    "$BRIDGE" /dev/media0 /dev/video64 \
-        > "$LOGDIR/camera-bridge-runtime.txt" 2>&1 &
+    # Optional colour calibration extracted from the module's Windows tuning file
+    # (tools/extract_aiqb_ccm.py). Proprietary data: only ever on the stick, never in git.
+    CCM=/postinstall/gbos/camera/ov5678_ccm.txt
+    if [ -f "$CCM" ]; then
+        "$BRIDGE" /dev/media0 /dev/video64 "$CCM" \
+            > "$LOGDIR/camera-bridge-runtime.txt" 2>&1 &
+    else
+        "$BRIDGE" /dev/media0 /dev/video64 \
+            > "$LOGDIR/camera-bridge-runtime.txt" 2>&1 &
+    fi
     BRIDGE_PID=$!
     echo "Started bridge pid=$BRIDGE_PID"
 fi

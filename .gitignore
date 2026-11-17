@@ -76,3 +76,7 @@ __pycache__/
 # (the kernel only accepts a manager APK with the official signing certificate)
 /usb/ksu/manager.apk
 /usb/ksu/ksud
+# Camera calibration extracted from proprietary Windows tuning files (tools/extract_aiqb_ccm.py): stick only
+/usb/camera/
+*.aiqb
+ov5678_ccm.txt

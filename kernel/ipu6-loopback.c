@@ -114,8 +114,82 @@ static void init_gamma(void)
 	ready = 1;
 }
 
+/* Generic colour boost when no calibrated matrix is loaded: 1.6x in linear light. */
+static int saturation_q12 = 6554;
 static double wb_last_mean[3];
 static unsigned int wb_last_gain_q12[3];
+
+/*
+ * Calibrated colour matrices, one per illuminant, from the camera module's Windows
+ * tuning file (tools/extract_aiqb_ccm.py; proprietary, so loaded from the stick at run
+ * time and never part of this repository). Each entry has the sensor's raw white point
+ * (R/G, B/G after IR removal) under that illuminant.
+ */
+#define CCM_MAX 16
+struct ccm_entry {
+	int id;
+	double rg, bg, m[9];
+};
+static struct ccm_entry ccm_table[CCM_MAX];
+static int ccm_count, ccm_active, ccm_q12[9], ccm_pick[2];
+static double ccm_weight;
+
+/* Returns the number of illuminants loaded (0 if the file is missing or malformed). */
+static int load_ccm_table(const char *path)
+{
+	FILE *f = fopen(path, "r");
+	char line[512];
+
+	ccm_count = 0;
+	if (!f)
+		return 0;
+	while (ccm_count < CCM_MAX && fgets(line, sizeof(line), f)) {
+		struct ccm_entry e;
+		double x, y;
+		if (line[0] == '#')
+			continue;
+		if (sscanf(line, "%d %lf %lf %lf %lf %lf %lf %lf %lf %lf %lf %lf %lf %lf", &e.id, &e.rg,
+			   &e.bg, &x, &y, &e.m[0], &e.m[1], &e.m[2], &e.m[3], &e.m[4], &e.m[5], &e.m[6],
+			   &e.m[7], &e.m[8]) != 14 || e.rg <= 0 || e.bg <= 0)
+			continue;
+		int ok = 1;
+		for (int r = 0; r < 3; r++)
+			if (fabs(e.m[r * 3] + e.m[r * 3 + 1] + e.m[r * 3 + 2] - 1.0) > 0.1)
+				ok = 0;
+		if (ok)
+			ccm_table[ccm_count++] = e;
+	}
+	fclose(f);
+	return ccm_count;
+}
+
+/*
+ * Blend the matrices of the two calibrated illuminants whose white points lie nearest
+ * the measured one (inverse-distance weights), as an ISP interpolates between them.
+ */
+static void select_ccm(double rg, double bg)
+{
+	int a = -1, b = -1;
+	double da = 1e9, db = 1e9;
+
+	ccm_active = 0;
+	if (ccm_count == 0 || rg <= 0 || bg <= 0)
+		return;
+	for (int i = 0; i < ccm_count; i++) {
+		double d = hypot(ccm_table[i].rg - rg, ccm_table[i].bg - bg);
+		if (d < da) { b = a; db = da; a = i; da = d; }
+		else if (d < db) { b = i; db = d; }
+	}
+	double wa = (b < 0 || da < 1e-9) ? 1.0 : db / (da + db);
+	for (int k = 0; k < 9; k++) {
+		double v = wa * ccm_table[a].m[k] + (b < 0 ? 0 : (1 - wa) * ccm_table[b].m[k]);
+		ccm_q12[k] = (int)lround(v * 4096.0);
+	}
+	ccm_pick[0] = ccm_table[a].id;
+	ccm_pick[1] = b < 0 ? ccm_table[a].id : ccm_table[b].id;
+	ccm_weight = wa;
+	ccm_active = 1;
+}
 
 static void calculate_white_balance(const uint16_t *raw, unsigned int width,
 				    unsigned int height, unsigned int stride,
@@ -164,6 +238,9 @@ static void calculate_white_balance(const uint16_t *raw, unsigned int width,
 		gain_q12[2] = (unsigned int)(gain * 4096.0 + 0.5);
 	}
 	memcpy(wb_last_mean, mean, sizeof(wb_last_mean));
+	/* The calibrated white points are IR-free raw ratios, the same as mean[] here. */
+	if (mean[1] > 0)
+		select_ccm(mean[0] / mean[1], mean[2] / mean[1]);
 	memcpy(wb_last_gain_q12, gain_q12, sizeof(wb_last_gain_q12));
 }
 
@@ -205,6 +282,13 @@ static void log_cfa_phases(const uint16_t *raw, unsigned int width,
 	       wb_last_gain_q12[0] / 4096.0, wb_last_gain_q12[2] / 4096.0,
 	       wb_last_gain_q12[0] >= 16384 || wb_last_gain_q12[2] >= 16384 ||
 	       wb_last_gain_q12[0] <= 1024 || wb_last_gain_q12[2] <= 1024 ? " (clamped)" : "");
+	if (ccm_active)
+		printf("ccm: illuminant %d (%.0f%%) + %d, white R/G=%.3f B/G=%.3f\n", ccm_pick[0],
+		       ccm_weight * 100.0, ccm_pick[1],
+		       wb_last_mean[1] > 0 ? wb_last_mean[0] / wb_last_mean[1] : 0.0,
+		       wb_last_mean[1] > 0 ? wb_last_mean[2] / wb_last_mean[1] : 0.0);
+	else
+		printf("ccm: no calibration table; generic saturation %.2f\n", saturation_q12 / 4096.0);
 }
 
 static unsigned char clamp8(int value)
@@ -215,7 +299,6 @@ static unsigned char clamp8(int value)
 }
 
 /* Image tuning (static so the host tests can vary them). */
-static int saturation_q12 = 6554;	/* 1.6x in linear light */
 static int chroma_radius = 2;		/* 5x5 U/V box filter */
 #define TNR_THRESHOLD 14		/* luma steps (0..255) still treated as noise */
 
@@ -298,14 +381,25 @@ static void rgb_at(const uint16_t *raw, unsigned int width, unsigned int height,
 	rgb[2] = (int)(((uint64_t)lin[2] * gain_q12[2] + 2048) / 4096);
 	/*
 	 * Colour correction: the raw R/G/B responses overlap (and carry residual IR), so
-	 * colours come out muted. Without a calibrated matrix, scale each channel's
+	 * colours come out muted. With the module's calibration table (ccm_active) use the
+	 * matrix blended for the measured illuminant; otherwise scale each channel's
 	 * distance from linear luminance (Rec. 709 weights) by saturation_q12/4096.
-	 * Rows sum to one, so greys stay grey.
+	 * Rows sum to one either way, so greys stay grey.
 	 */
-	int luma = (871 * rgb[0] + 2929 * rgb[1] + 296 * rgb[2] + 2048) >> 12;
-	for (int channel = 0; channel < 3; channel++) {
-		int v = luma + (int)(((int64_t)(rgb[channel] - luma) * saturation_q12 + 2048) >> 12);
-		rgb[channel] = v < 0 ? 0 : v;
+	if (ccm_active) {
+		int in[3] = { rgb[0], rgb[1], rgb[2] };
+		for (int row = 0; row < 3; row++) {
+			int64_t v = (int64_t)ccm_q12[row * 3] * in[0] + (int64_t)ccm_q12[row * 3 + 1] * in[1] +
+				    (int64_t)ccm_q12[row * 3 + 2] * in[2];
+			v = (v + 2048) >> 12;
+			rgb[row] = v < 0 ? 0 : (int)v;
+		}
+	} else {
+		int luma = (871 * rgb[0] + 2929 * rgb[1] + 296 * rgb[2] + 2048) >> 12;
+		for (int channel = 0; channel < 3; channel++) {
+			int v = luma + (int)(((int64_t)(rgb[channel] - luma) * saturation_q12 + 2048) >> 12);
+			rgb[channel] = v < 0 ? 0 : v;
+		}
 	}
 	for (int channel = 0; channel < 3; channel++)
 		rgb[channel] = gamma_lut[rgb[channel] > (int)LINEAR_MAX ? LINEAR_MAX
@@ -782,11 +876,17 @@ done:
 int main(int argc, char **argv)
 {
 	(void)probe;
-	if (argc != 3) {
-		fprintf(stderr, "usage: %s /dev/mediaN /dev/videoN\n", argv[0]);
+	if (argc != 3 && argc != 4) {
+		fprintf(stderr, "usage: %s /dev/mediaN /dev/videoN [colour-matrix table]\n", argv[0]);
 		return 2;
 	}
 	setvbuf(stdout, NULL, _IOLBF, 0);
+	if (argc == 4) {
+		if (load_ccm_table(argv[3]) > 0)
+			printf("ccm: loaded %d calibrated illuminants from %s\n", ccm_count, argv[3]);
+		else
+			printf("ccm: no usable table at %s; generic saturation\n", argv[3]);
+	}
 	return capture_to_loopback(argv[1], argv[2]);
 }
 #endif
