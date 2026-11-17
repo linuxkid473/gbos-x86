@@ -214,6 +214,55 @@ static unsigned char clamp8(int value)
 	return (unsigned char)value;
 }
 
+/* Image tuning (static so the host tests can vary them). */
+static int saturation_q12 = 6554;	/* 1.6x in linear light */
+static int chroma_radius = 2;		/* 5x5 U/V box filter */
+#define TNR_THRESHOLD 14		/* luma steps (0..255) still treated as noise */
+
+static int16_t plane_y[OUT_HEIGHT][OUT_WIDTH], plane_u[OUT_HEIGHT][OUT_WIDTH],
+	plane_v[OUT_HEIGHT][OUT_WIDTH], plane_tmp[OUT_HEIGHT][OUT_WIDTH];
+static unsigned char tnr_previous[OUT_HEIGHT][OUT_WIDTH];
+static int tnr_have_previous;
+
+/* Forget the previous frame (start, or resuming after idle): no blending with stale content. */
+static void tnr_reset(void)
+{
+	tnr_have_previous = 0;
+}
+
+static void box_filter_plane(int16_t plane[OUT_HEIGHT][OUT_WIDTH], int r)
+{
+	/* Separable running-sum box filter, edges clamped. */
+	for (int y = 0; y < OUT_HEIGHT; y++) {
+		int sum = 0;
+		for (int k = -r; k <= r; k++)
+			sum += plane[y][k < 0 ? 0 : (k >= OUT_WIDTH ? OUT_WIDTH - 1 : k)];
+		for (int x = 0; x < OUT_WIDTH; x++) {
+			plane_tmp[y][x] = (int16_t)(sum / (2 * r + 1));
+			int out_x = x - r, in_x = x + r + 1;
+			sum -= plane[y][out_x < 0 ? 0 : out_x];
+			sum += plane[y][in_x >= OUT_WIDTH ? OUT_WIDTH - 1 : in_x];
+		}
+	}
+	for (int x = 0; x < OUT_WIDTH; x++) {
+		int sum = 0;
+		for (int k = -r; k <= r; k++)
+			sum += plane_tmp[k < 0 ? 0 : (k >= OUT_HEIGHT ? OUT_HEIGHT - 1 : k)][x];
+		for (int y = 0; y < OUT_HEIGHT; y++) {
+			plane[y][x] = (int16_t)(sum / (2 * r + 1));
+			int out_y = y - r, in_y = y + r + 1;
+			sum -= plane_tmp[out_y < 0 ? 0 : out_y][x];
+			sum += plane_tmp[in_y >= OUT_HEIGHT ? OUT_HEIGHT - 1 : in_y][x];
+		}
+	}
+}
+
+static void smooth_chroma(int r)
+{
+	box_filter_plane(plane_u, r);
+	box_filter_plane(plane_v, r);
+}
+
 static void rgb_at(const uint16_t *raw, unsigned int width, unsigned int height,
 		   unsigned int stride, const unsigned int gain_q12[3],
 		   unsigned int x, unsigned int y,
@@ -247,6 +296,17 @@ static void rgb_at(const uint16_t *raw, unsigned int width, unsigned int height,
 	rgb[0] = (int)(((uint64_t)lin[0] * gain_q12[0] + 2048) / 4096);
 	rgb[1] = lin[1];
 	rgb[2] = (int)(((uint64_t)lin[2] * gain_q12[2] + 2048) / 4096);
+	/*
+	 * Colour correction: the raw R/G/B responses overlap (and carry residual IR), so
+	 * colours come out muted. Without a calibrated matrix, scale each channel's
+	 * distance from linear luminance (Rec. 709 weights) by saturation_q12/4096.
+	 * Rows sum to one, so greys stay grey.
+	 */
+	int luma = (871 * rgb[0] + 2929 * rgb[1] + 296 * rgb[2] + 2048) >> 12;
+	for (int channel = 0; channel < 3; channel++) {
+		int v = luma + (int)(((int64_t)(rgb[channel] - luma) * saturation_q12 + 2048) >> 12);
+		rgb[channel] = v < 0 ? 0 : v;
+	}
 	for (int channel = 0; channel < 3; channel++)
 		rgb[channel] = gamma_lut[rgb[channel] > (int)LINEAR_MAX ? LINEAR_MAX
 							      : (unsigned int)rgb[channel]];
@@ -267,24 +327,51 @@ static int convert_bayer_yuyv(const uint16_t *raw, unsigned int width,
 	init_gamma();
 	calculate_white_balance(raw, width, height, stride, gain_q12, mean_green);
 
+	/* 1. Demosaic every output pixel to full-range BT.601 Y/U/V. */
 	for (unsigned int oy = 0; oy < OUT_HEIGHT; oy++) {
 		unsigned int sy = (unsigned int)(((uint64_t)oy * height) / OUT_HEIGHT);
+		for (unsigned int ox = 0; ox < OUT_WIDTH; ox++) {
+			unsigned int sx = (unsigned int)(((uint64_t)ox * width) / OUT_WIDTH);
+			int c[3];
+			rgb_at(raw, width, height, stride, gain_q12, sx, sy, c);
+			plane_y[oy][ox] = (int16_t)((77 * c[0] + 150 * c[1] + 29 * c[2] + 128) >> 8);
+			plane_u[oy][ox] = (int16_t)((-43 * c[0] - 85 * c[1] + 128 * c[2]) >> 8);
+			plane_v[oy][ox] = (int16_t)((128 * c[0] - 107 * c[1] - 21 * c[2]) >> 8);
+		}
+	}
+	/*
+	 * 2. Chroma noise: R and B are only 2 of 16 sites, so at high gain colour speckle
+	 * dominates. Average U/V over a (2r+1)^2 neighbourhood; luma keeps full detail.
+	 */
+	if (chroma_radius > 0)
+		smooth_chroma(chroma_radius);
+	/*
+	 * 3. Luma noise: recursive temporal filter. Where a pixel changed by no more than
+	 * TNR_THRESHOLD since the last output it moves only a third of the way, averaging
+	 * noise in still areas; larger changes (motion) pass through at once, so no ghosts.
+	 */
+	for (unsigned int oy = 0; oy < OUT_HEIGHT; oy++)
+		for (unsigned int ox = 0; ox < OUT_WIDTH; ox++) {
+			int y = plane_y[oy][ox];
+			if (tnr_have_previous) {
+				int d = y - tnr_previous[oy][ox];
+				if (d >= -TNR_THRESHOLD && d <= TNR_THRESHOLD)
+					y = tnr_previous[oy][ox] + (d >= 0 ? (d + 1) / 3 : -((-d + 1) / 3));
+			}
+			y = clamp8(y);
+			tnr_previous[oy][ox] = (unsigned char)y;
+			plane_y[oy][ox] = (int16_t)y;
+		}
+	tnr_have_previous = 1;
+
+	/* 4. Pack YUYV 4:2:2: U/V of each pixel pair averaged. */
+	for (unsigned int oy = 0; oy < OUT_HEIGHT; oy++) {
 		unsigned char *dst = out + (size_t)oy * OUT_WIDTH * 2;
 		for (unsigned int ox = 0; ox < OUT_WIDTH; ox += 2) {
-			unsigned int sx0 = (unsigned int)(((uint64_t)ox * width) / OUT_WIDTH);
-			unsigned int sx1 = (unsigned int)(((uint64_t)(ox + 1) * width) / OUT_WIDTH);
-			int a[3], b[3];
-			rgb_at(raw, width, height, stride, gain_q12, sx0, sy, a);
-			rgb_at(raw, width, height, stride, gain_q12, sx1, sy, b);
-			int y0 = (77 * a[0] + 150 * a[1] + 29 * a[2] + 128) >> 8;
-			int y1 = (77 * b[0] + 150 * b[1] + 29 * b[2] + 128) >> 8;
-			int r = (a[0] + b[0]) / 2;
-			int g = (a[1] + b[1]) / 2;
-			int bl = (a[2] + b[2]) / 2;
-			dst[ox * 2] = clamp8(y0);
-			dst[ox * 2 + 1] = clamp8(128 + ((-43 * r - 85 * g + 128 * bl) >> 8));
-			dst[ox * 2 + 2] = clamp8(y1);
-			dst[ox * 2 + 3] = clamp8(128 + ((128 * r - 107 * g - 21 * bl) >> 8));
+			dst[ox * 2] = (unsigned char)plane_y[oy][ox];
+			dst[ox * 2 + 1] = clamp8(128 + (plane_u[oy][ox] + plane_u[oy][ox + 1]) / 2);
+			dst[ox * 2 + 2] = (unsigned char)plane_y[oy][ox + 1];
+			dst[ox * 2 + 3] = clamp8(128 + (plane_v[oy][ox] + plane_v[oy][ox + 1]) / 2);
 		}
 	}
 	return 0;
@@ -631,6 +718,7 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev)
 			       readers ? "consumer streaming; converting frames" :
 			       "no consumer; idle (sensor and auto-exposure keep running)");
 			last_readers = readers;
+			tnr_reset();	/* the scene may have changed while idle */
 		}
 		if (!bridge_should_convert(readers)) {
 			/* Idle: only the cheap sampled statistics, so exposure is right on resume. */

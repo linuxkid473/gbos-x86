@@ -173,6 +173,128 @@ static int test_cfa_phase_means(void)
 	return 0;
 }
 
+
+/* Fill a GRBG Bayer frame from per-channel raw levels chosen by a callback. */
+static void fill_bayer(uint16_t *frame, unsigned int w, unsigned int h,
+		       void (*levels)(unsigned int x, unsigned int y, unsigned int rgb[3]))
+{
+	for (unsigned int y = 0; y < h; y++)
+		for (unsigned int x = 0; x < w; x++) {
+			unsigned int rgb[3];
+			levels(x, y, rgb);
+			frame[y * w + x] = (uint16_t)(BLACK_LEVEL + rgb[channel_at(x, y)]);
+		}
+}
+
+static void warm_cool_halves(unsigned int x, unsigned int y, unsigned int rgb[3])
+{
+	(void)y;
+	rgb[0] = x < 32 ? 500 : 300; rgb[1] = 300; rgb[2] = x < 32 ? 300 : 500;
+}
+
+static unsigned int noise_state = 12345;
+static void noisy_grey(unsigned int x, unsigned int y, unsigned int rgb[3])
+{
+	(void)x; (void)y;
+	for (int c = 0; c < 3; c++) {
+		noise_state = noise_state * 1103515245u + 12345u;
+		rgb[c] = 300 + (noise_state >> 16) % 120;
+	}
+}
+
+static unsigned int grey_level;
+static void flat_grey(unsigned int x, unsigned int y, unsigned int rgb[3])
+{
+	(void)x; (void)y;
+	rgb[0] = rgb[1] = rgb[2] = grey_level;
+}
+
+/* Saturation widens chroma for coloured areas (greys stay grey: test_no_cfa_grid). */
+static int test_saturation(void)
+{
+	static uint16_t frame[64 * 64];
+	static unsigned char out[OUT_FRAME_BYTES];
+	int saved_s = saturation_q12, saved_r = chroma_radius, v[2];
+
+	set_bayer_pattern(MEDIA_BUS_FMT_SGRBG10_1X10);
+	fill_bayer(frame, 64, 64, warm_cool_halves);
+	chroma_radius = 0;
+	for (int i = 0; i < 2; i++) {
+		saturation_q12 = i ? 6554 : 4096;
+		tnr_reset();
+		if (convert_bayer_yuyv(frame, 64, 64, 128, out, sizeof(out), NULL))
+			return 1;
+		v[i] = out[(240 * OUT_WIDTH + 100) * 2 + 3] - 128;	/* warm half: V > 0 */
+	}
+	saturation_q12 = saved_s; chroma_radius = saved_r;
+	return v[0] > 0 && v[1] > v[0] + 2 ? 0 : 2;
+}
+
+static double chroma_variance(const unsigned char *out)
+{
+	double sum = 0, sq = 0, n = 0;
+	for (size_t i = 0; i < OUT_FRAME_BYTES; i += 4) {
+		double u = out[i + 1];
+		sum += u; sq += u * u; n++;
+	}
+	return sq / n - (sum / n) * (sum / n);
+}
+
+/* The chroma box filter lowers colour noise. */
+static int test_chroma_smoothing(void)
+{
+	const unsigned int w = 2592, h = 1944;
+	static unsigned char out[OUT_FRAME_BYTES];
+	uint16_t *frame = malloc((size_t)w * h * sizeof(*frame));
+	int saved_r = chroma_radius;
+	double var[2];
+
+	if (!frame)
+		return 1;
+	set_bayer_pattern(MEDIA_BUS_FMT_SGRBG10_1X10);
+	noise_state = 12345;
+	fill_bayer(frame, w, h, noisy_grey);
+	for (int i = 0; i < 2; i++) {
+		chroma_radius = i ? 2 : 0;
+		tnr_reset();
+		convert_bayer_yuyv(frame, w, h, w * 2, out, sizeof(out), NULL);
+		var[i] = chroma_variance(out);
+	}
+	chroma_radius = saved_r;
+	free(frame);
+	return var[1] < var[0] / 4 ? 0 : 2;
+}
+
+/* Temporal filter: a small change moves a third of the way, a large one passes at once. */
+static int luma_after(unsigned int first, unsigned int second, int filtered)
+{
+	static uint16_t frame[64 * 64];
+	static unsigned char out[OUT_FRAME_BYTES];
+
+	set_bayer_pattern(MEDIA_BUS_FMT_SGRBG10_1X10);
+	tnr_reset();
+	if (filtered) {
+		grey_level = first; fill_bayer(frame, 64, 64, flat_grey);
+		convert_bayer_yuyv(frame, 64, 64, 128, out, sizeof(out), NULL);
+	}
+	grey_level = second; fill_bayer(frame, 64, 64, flat_grey);
+	convert_bayer_yuyv(frame, 64, 64, 128, out, sizeof(out), NULL);
+	return out[(240 * OUT_WIDTH + 320) * 2];
+}
+
+static int test_temporal_filter(void)
+{
+	int a = luma_after(0, 300, 0), b_small = luma_after(0, 320, 0), b_big = luma_after(0, 600, 0);
+	int f_small = luma_after(300, 320, 1), f_big = luma_after(300, 600, 1);
+	int expect = a + (b_small - a + 1) / 3;
+
+	if (b_small - a < 3 || b_small - a > TNR_THRESHOLD || b_big - a <= TNR_THRESHOLD)
+		return 1;	/* fixture levels must straddle the threshold */
+	if (f_small < expect - 1 || f_small > expect + 1)
+		return 2;
+	return f_big == b_big ? 0 : 3;
+}
+
 int main(void)
 {
 	(void)capture_to_loopback;
@@ -194,6 +316,12 @@ int main(void)
 	/* Idle only when the module positively reports no streaming consumer. */
 	if (bridge_should_convert(0) || !bridge_should_convert(1) || !bridge_should_convert(-1))
 		return 70;
+	if (test_saturation())
+		return 80 + test_saturation();
+	if (test_chroma_smoothing())
+		return 85 + test_chroma_smoothing();
+	if (test_temporal_filter())
+		return 90 + test_temporal_filter();
 	for (unsigned int y = 0; y < 8; y++)
 		for (unsigned int x = 0; x < 8; x++)
 			raw[y * 8 + x] = (uint16_t)(x + y * 8);
