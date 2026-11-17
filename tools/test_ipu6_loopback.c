@@ -334,6 +334,95 @@ static int test_ccm_table(void)
 	return load_ccm_table("/nonexistent/ccm.txt") == 0 ? 0 : 7;
 }
 
+
+/* Synthetic lens-shading grid: 1.0 at the centre rising to `corner` at the edges (radial). */
+static double synthetic_shading(double fx, double fy, double corner)
+{
+	double r2 = ((fx - 0.5) * (fx - 0.5) + (fy - 0.5) * (fy - 0.5)) / 0.5;
+	return 1.0 + (corner - 1.0) * r2;
+}
+
+static int write_lsc_table(const char *path, double corner)
+{
+	FILE *f = fopen(path, "w");
+	const int gw = 17, gh = 13;
+
+	if (!f)
+		return -1;
+	fputs("# synthetic\n", f);
+	for (int ill = 0; ill < 2; ill++) {
+		fprintf(f, "lsc %d %.3f %.3f %d %d\n", ill + 1, ill ? 0.5 : 0.9, ill ? 0.6 : 0.45, gw, gh);
+		for (int c = 0; c < 3; c++) {
+			for (int y = 0; y < gh; y++)
+				for (int x = 0; x < gw; x++)
+					fprintf(f, "%.4f ", synthetic_shading((double)x / (gw - 1), (double)y / (gh - 1), corner));
+			fputc('\n', f);
+		}
+	}
+	fclose(f);
+	return 0;
+}
+
+static int test_lens_shading(void)
+{
+	char path[] = "/tmp/lsc.XXXXXX";
+	int fd = mkstemp(path);
+	const unsigned int w = 2592, h = 1944;
+
+	if (fd < 0)
+		return 1;
+	close(fd);
+	if (write_lsc_table(path, 4.0) || load_lsc_table(path) != 2 || lsc_table[0].gw != 17)
+		return 2;
+	unlink(path);
+
+	/* Gain map: ~1.0 at the centre, ~4.0 near a corner at low sensor gain. */
+	sensor_total_gain = 1.0;
+	update_lsc(0.9, 0.45, w, h);
+	if (!lsc_active || lsc_pick[0] != 1 || lsc_strength != 1.0)
+		return 3;
+	double centre = lsc_map[1][OUT_HEIGHT / 2][OUT_WIDTH / 2] / 4096.0;
+	double corner = lsc_map[0][0][0] / 4096.0;
+	if (centre < 0.98 || centre > 1.03 || corner < 3.7 || corner > 4.05)
+		return 4;
+	/* At 64x sensor gain the correction eases to 60%: 4^0.6 ~ 2.3 at the corner. */
+	sensor_total_gain = 64.0;
+	update_lsc(0.9, 0.45, w, h);
+	corner = lsc_map[0][0][0] / 4096.0;
+	if (lsc_strength > 0.61 || corner < 2.1 || corner > 2.35)
+		return 5;
+
+	/* A vignetted flat grey field (raw = flat / shading) comes out flat after correction. */
+	sensor_total_gain = 1.0;
+	set_bayer_pattern(MEDIA_BUS_FMT_SGRBG10_1X10);
+	uint16_t *frame = malloc((size_t)w * h * sizeof(*frame));
+	static unsigned char out[OUT_FRAME_BYTES];
+	if (!frame)
+		return 6;
+	for (unsigned int y = 0; y < h; y++)
+		for (unsigned int x = 0; x < w; x++)
+			frame[(size_t)y * w + x] = (uint16_t)(BLACK_LEVEL + 600.0 /
+				synthetic_shading((x + 0.5) / w, (y + 0.5) / h, 4.0) + 0.5);
+	tnr_reset();
+	int saved_r = chroma_radius;
+	chroma_radius = 0;
+	if (convert_bayer_yuyv(frame, w, h, w * 2, out, sizeof(out), NULL)) {
+		free(frame);
+		return 7;
+	}
+	chroma_radius = saved_r;
+	free(frame);
+	int lo = 255, hi = 0;
+	for (unsigned int y = 8; y < OUT_HEIGHT - 8; y += 4)
+		for (unsigned int x = 8; x < OUT_WIDTH - 8; x += 4) {
+			int v = out[(y * OUT_WIDTH + x) * 2];
+			if (v < lo) lo = v;
+			if (v > hi) hi = v;
+		}
+	lsc_count = 0; lsc_active = 0;		/* later tests run without shading */
+	return hi - lo <= 6 ? 0 : 8;
+}
+
 int main(void)
 {
 	(void)capture_to_loopback;
@@ -363,6 +452,8 @@ int main(void)
 		return 90 + test_temporal_filter();
 	if (test_ccm_table())
 		return 100 + test_ccm_table();
+	if (test_lens_shading())
+		return 110 + test_lens_shading();
 	for (unsigned int y = 0; y < 8; y++)
 		for (unsigned int x = 0; x < 8; x++)
 			raw[y * 8 + x] = (uint16_t)(x + y * 8);

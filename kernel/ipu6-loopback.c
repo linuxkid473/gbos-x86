@@ -6,6 +6,7 @@
 #include <signal.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #define OUT_WIDTH 640
@@ -191,6 +192,123 @@ static void select_ccm(double rg, double bg)
 	ccm_active = 1;
 }
 
+/*
+ * Lens-shading gain grids, one per illuminant (tools/extract_aiqb_ccm.py --lsc; stick only,
+ * like the matrices). Each grid spans the full sensor and is normalised to 1.0 at the centre.
+ * The Latitude's OV5678 needs about 3.5-4.3x at the corners. A full correction would also
+ * amplify the corners' noise that much, so as camera ISPs do, the strength eases off at high
+ * sensor gain: full up to 8x total gain, falling to 60% at 64x.
+ */
+#define LSC_MAX_ILL 8
+#define LSC_MAX_GRID (128 * 128)
+struct lsc_entry {
+	int id, gw, gh;
+	double rg, bg;
+	float g[3][LSC_MAX_GRID];
+};
+static struct lsc_entry lsc_table[LSC_MAX_ILL];
+static int lsc_count, lsc_active, lsc_pick[2] = { -1, -1 };
+static double lsc_weight, lsc_strength = 1.0, sensor_total_gain = 1.0;
+static uint16_t lsc_map[3][OUT_HEIGHT][OUT_WIDTH];
+static struct { int pick[2]; double weight, strength; unsigned int w, h; } lsc_built = { { -2, -2 }, 0, 0, 0, 0 };
+
+static int load_lsc_table(const char *path)
+{
+	FILE *f = fopen(path, "r");
+	char word[16];
+
+	lsc_count = 0;
+	if (!f)
+		return 0;
+	while (lsc_count < LSC_MAX_ILL && fscanf(f, "%15s", word) == 1) {
+		if (word[0] == '#') {
+			int c;
+			while ((c = fgetc(f)) != EOF && c != '\n')
+				;
+			continue;
+		}
+		struct lsc_entry *e = &lsc_table[lsc_count];
+		if (strcmp(word, "lsc") || fscanf(f, "%d %lf %lf %d %d", &e->id, &e->rg, &e->bg, &e->gw, &e->gh) != 5 ||
+		    e->gw < 2 || e->gh < 2 || e->gw * e->gh > LSC_MAX_GRID || e->rg <= 0 || e->bg <= 0)
+			break;
+		int ok = 1;
+		for (int c = 0; c < 3 && ok; c++)
+			for (int k = 0; k < e->gw * e->gh; k++)
+				if (fscanf(f, "%f", &e->g[c][k]) != 1 || !(e->g[c][k] >= 0.25f && e->g[c][k] <= 16.0f)) {
+					ok = 0;
+					break;
+				}
+		if (!ok)
+			break;
+		lsc_count++;
+	}
+	fclose(f);
+	return lsc_count;
+}
+
+static double lsc_strength_for_gain(double total_gain)
+{
+	if (total_gain <= 8.0)
+		return 1.0;
+	double s = 1.0 - 0.4 * log2(total_gain / 8.0) / 3.0;
+	return s < 0.6 ? 0.6 : s;
+}
+
+static double lsc_grid_at(const struct lsc_entry *e, int c, double gx, double gy)
+{
+	int x0 = (int)gx, y0 = (int)gy;
+	if (x0 > e->gw - 2) x0 = e->gw - 2;
+	if (y0 > e->gh - 2) y0 = e->gh - 2;
+	double fx = gx - x0, fy = gy - y0;
+	const float *g = e->g[c];
+	double top = g[y0 * e->gw + x0] * (1 - fx) + g[y0 * e->gw + x0 + 1] * fx;
+	double bot = g[(y0 + 1) * e->gw + x0] * (1 - fx) + g[(y0 + 1) * e->gw + x0 + 1] * fx;
+	return top * (1 - fy) + bot * fy;
+}
+
+/* Pick the grids for the measured white point (as for the matrices); rebuild the map on change. */
+static void update_lsc(double rg, double bg, unsigned int width, unsigned int height)
+{
+	int a = -1, b = -1;
+	double da = 1e9, db = 1e9;
+
+	lsc_active = 0;
+	if (lsc_count == 0 || rg <= 0 || bg <= 0)
+		return;
+	for (int i = 0; i < lsc_count; i++) {
+		double d = hypot(lsc_table[i].rg - rg, lsc_table[i].bg - bg);
+		if (d < da) { b = a; db = da; a = i; da = d; }
+		else if (d < db) { b = i; db = d; }
+	}
+	if (b < 0 || lsc_table[b].gw != lsc_table[a].gw || lsc_table[b].gh != lsc_table[a].gh)
+		b = a;
+	double wa = (b == a || da < 1e-9) ? 1.0 : db / (da + db);
+	lsc_pick[0] = lsc_table[a].id; lsc_pick[1] = lsc_table[b].id;
+	lsc_weight = wa;
+	lsc_strength = lsc_strength_for_gain(sensor_total_gain);
+	lsc_active = 1;
+	if (lsc_built.pick[0] == a && lsc_built.pick[1] == b && fabs(lsc_built.weight - wa) < 0.05 &&
+	    fabs(lsc_built.strength - lsc_strength) < 0.05 && lsc_built.w == width && lsc_built.h == height)
+		return;
+	const struct lsc_entry *ea = &lsc_table[a], *eb = &lsc_table[b];
+	for (int oy = 0; oy < OUT_HEIGHT; oy++) {
+		double sy = ((oy * (double)height) / OUT_HEIGHT + 1.0) / height;	/* window centre, 0..1 */
+		double gy = sy * (ea->gh - 1);
+		for (int ox = 0; ox < OUT_WIDTH; ox++) {
+			double sx = ((ox * (double)width) / OUT_WIDTH + 1.0) / width;
+			double gx = sx * (ea->gw - 1);
+			for (int c = 0; c < 3; c++) {
+				double g = wa * lsc_grid_at(ea, c, gx, gy) + (1 - wa) * lsc_grid_at(eb, c, gx, gy);
+				g = pow(g, lsc_strength) * 4096.0 + 0.5;
+				lsc_map[c][oy][ox] = (uint16_t)(g > 65535 ? 65535 : g);
+			}
+		}
+	}
+	lsc_built.pick[0] = a; lsc_built.pick[1] = b;
+	lsc_built.weight = wa; lsc_built.strength = lsc_strength;
+	lsc_built.w = width; lsc_built.h = height;
+}
+
 static void calculate_white_balance(const uint16_t *raw, unsigned int width,
 				    unsigned int height, unsigned int stride,
 				    unsigned int gain_q12[3], double *mean_green)
@@ -289,6 +407,11 @@ static void log_cfa_phases(const uint16_t *raw, unsigned int width,
 		       wb_last_mean[1] > 0 ? wb_last_mean[2] / wb_last_mean[1] : 0.0);
 	else
 		printf("ccm: no calibration table; generic saturation %.2f\n", saturation_q12 / 4096.0);
+	if (lsc_active)
+		printf("lsc: illuminant %d (%.0f%%) + %d, strength %.2f at sensor gain %.1fx\n", lsc_pick[0],
+		       lsc_weight * 100.0, lsc_pick[1], lsc_strength, sensor_total_gain);
+	else
+		printf("lsc: no lens-shading table\n");
 }
 
 static unsigned char clamp8(int value)
@@ -348,7 +471,7 @@ static void smooth_chroma(int r)
 
 static void rgb_at(const uint16_t *raw, unsigned int width, unsigned int height,
 		   unsigned int stride, const unsigned int gain_q12[3],
-		   unsigned int x, unsigned int y,
+		   unsigned int x, unsigned int y, const unsigned int *shading_q12,
 		   int rgb[3])
 {
 	/*
@@ -368,11 +491,24 @@ static void rgb_at(const uint16_t *raw, unsigned int width, unsigned int height,
 			sum[channel] += raw_at(raw, width, height, stride, (int)sx, (int)sy);
 			n[channel]++;
 		}
-	/* Remove the infrared that leaks into the colour sites (zero for plain Bayer). */
-	int ir = n[CFA_IR] ? (int)(sum[CFA_IR] / n[CFA_IR]) : 0;
+	/*
+	 * Lens shading (shading_q12: R, G, B gains for this position; NULL = none). The IR
+	 * sites see the same optics, so they take the green gain. Then remove the infrared
+	 * that leaks into the colour sites (zero for plain Bayer).
+	 */
+	unsigned int shade[4] = { 4096, 4096, 4096, 4096 };
+	if (shading_q12) {
+		shade[0] = shading_q12[0]; shade[1] = shading_q12[1];
+		shade[2] = shading_q12[2]; shade[CFA_IR] = shading_q12[1];
+	}
+	int mean[4];
+	for (int channel = 0; channel < 4; channel++)
+		mean[channel] = n[channel] ?
+			(int)(((uint64_t)sum[channel] * shade[channel] / n[channel] + 2048) / 4096) : 0;
+	int ir = mean[CFA_IR];
 	int lin[3];
 	for (int channel = 0; channel < 3; channel++) {
-		lin[channel] = n[channel] ? (int)(sum[channel] / n[channel]) - ir : 0;
+		lin[channel] = n[channel] ? mean[channel] - ir : 0;
 		if (lin[channel] < 0)
 			lin[channel] = 0;
 	}
@@ -420,6 +556,8 @@ static int convert_bayer_yuyv(const uint16_t *raw, unsigned int width,
 	unsigned int gain_q12[3];
 	init_gamma();
 	calculate_white_balance(raw, width, height, stride, gain_q12, mean_green);
+	if (wb_last_mean[1] > 0)
+		update_lsc(wb_last_mean[0] / wb_last_mean[1], wb_last_mean[2] / wb_last_mean[1], width, height);
 
 	/* 1. Demosaic every output pixel to full-range BT.601 Y/U/V. */
 	for (unsigned int oy = 0; oy < OUT_HEIGHT; oy++) {
@@ -427,7 +565,13 @@ static int convert_bayer_yuyv(const uint16_t *raw, unsigned int width,
 		for (unsigned int ox = 0; ox < OUT_WIDTH; ox++) {
 			unsigned int sx = (unsigned int)(((uint64_t)ox * width) / OUT_WIDTH);
 			int c[3];
-			rgb_at(raw, width, height, stride, gain_q12, sx, sy, c);
+			unsigned int shading[3];
+			if (lsc_active) {
+				shading[0] = lsc_map[0][oy][ox];
+				shading[1] = lsc_map[1][oy][ox];
+				shading[2] = lsc_map[2][oy][ox];
+			}
+			rgb_at(raw, width, height, stride, gain_q12, sx, sy, lsc_active ? shading : NULL, c);
 			plane_y[oy][ox] = (int16_t)((77 * c[0] + 150 * c[1] + 29 * c[2] + 128) >> 8);
 			plane_u[oy][ox] = (int16_t)((-43 * c[0] - 85 * c[1] + 128 * c[2]) >> 8);
 			plane_v[oy][ox] = (int16_t)((128 * c[0] - 107 * c[1] - 21 * c[2]) >> 8);
@@ -575,6 +719,9 @@ static void ae_frame(struct ae_state *ae, double mean_green)
 	if (!ae->enabled)
 		return;
 	ae->frames++;
+	sensor_total_gain = ae_total(ae) / ae->exposure.max;	/* gain multiple at full exposure */
+	if (sensor_total_gain < 1.0)
+		sensor_total_gain = 1.0;
 	if (ae->frames % 150 == 0)
 		printf("ae: mean=%.0f target=%.0f exposure=%d again=%d dgain=%d\n", mean_green,
 		       AE_TARGET, ae->exposure.value, ae->again.value, ae->dgain.value);
@@ -873,20 +1020,42 @@ done:
 }
 
 #ifndef CAMERA_BRIDGE_TEST
+/*
+ * Optional calibration: a directory holding ov5678_ccm.txt and ov5678_lsc.txt (the stick's
+ * gbos/camera/), or, as before, a single colour-matrix file.
+ */
+static void load_calibration(const char *arg)
+{
+	struct stat st;
+	char path[512];
+	const char *ccm = arg;
+
+	if (stat(arg, &st) == 0 && S_ISDIR(st.st_mode)) {
+		snprintf(path, sizeof(path), "%s/ov5678_lsc.txt", arg);
+		if (load_lsc_table(path) > 0)
+			printf("lsc: loaded %d illuminants (%dx%d grids) from %s\n", lsc_count,
+			       lsc_table[0].gw, lsc_table[0].gh, path);
+		else
+			printf("lsc: no usable table at %s; no lens-shading correction\n", path);
+		snprintf(path, sizeof(path), "%s/ov5678_ccm.txt", arg);
+		ccm = path;
+	}
+	if (load_ccm_table(ccm) > 0)
+		printf("ccm: loaded %d calibrated illuminants from %s\n", ccm_count, ccm);
+	else
+		printf("ccm: no usable table at %s; generic saturation\n", ccm);
+}
+
 int main(int argc, char **argv)
 {
 	(void)probe;
 	if (argc != 3 && argc != 4) {
-		fprintf(stderr, "usage: %s /dev/mediaN /dev/videoN [colour-matrix table]\n", argv[0]);
+		fprintf(stderr, "usage: %s /dev/mediaN /dev/videoN [calibration dir or colour-matrix table]\n", argv[0]);
 		return 2;
 	}
 	setvbuf(stdout, NULL, _IOLBF, 0);
-	if (argc == 4) {
-		if (load_ccm_table(argv[3]) > 0)
-			printf("ccm: loaded %d calibrated illuminants from %s\n", ccm_count, argv[3]);
-		else
-			printf("ccm: no usable table at %s; generic saturation\n", argv[3]);
-	}
+	if (argc == 4)
+		load_calibration(argv[3]);
 	return capture_to_loopback(argv[1], argv[2]);
 }
 #endif
