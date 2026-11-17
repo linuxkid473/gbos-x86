@@ -78,6 +78,9 @@ static int test_bayer_patterns(void)
  * missed the sparse R/B sites of the RGB-IR mosaic in drifting patches (the
  * cyan/yellow grid); reading the IR sites as red gave a cyan cast.
  */
+/* Raw R, G, B levels of the uniform test frame. */
+static uint16_t uniform_levels[3] = { 600, 400, 200 };
+
 static int uniform_frame_worst_chroma(int rgbir, unsigned int ir, int *luma)
 {
 	const unsigned int width = 2592, height = 1944;
@@ -94,7 +97,7 @@ static int uniform_frame_worst_chroma(int rgbir, unsigned int ir, int *luma)
 	for (unsigned int y = 0; y < height; y++)
 		for (unsigned int x = 0; x < width; x++)
 			frame[(size_t)y * width + x] =
-				(uint16_t[]){ 600, 400, 200, (uint16_t)ir }[channel_at(x, y)];
+				(uint16_t[]){ uniform_levels[0], uniform_levels[1], uniform_levels[2], (uint16_t)ir }[channel_at(x, y)];
 	if (convert_bayer_yuyv(frame, width, height, width * 2, out, sizeof(out), NULL)) {
 		free(frame);
 		return 999;
@@ -326,9 +329,16 @@ static int test_ccm_table(void)
 	for (int r = 0; r < 3; r++)
 		if (abs(ccm_q12[r * 3] + ccm_q12[r * 3 + 1] + ccm_q12[r * 3 + 2] - 4096) > 3)
 			return 5;
-	/* With a table loaded, a uniform frame still converts to neutral grey. */
+	/*
+	 * With a table loaded, a grey lit by a calibrated illuminant still converts to
+	 * neutral grey: raw levels whose IR-free white point is illuminant 3 (R/G 0.70,
+	 * B/G 0.50): net R 280, G 400, B 200, IR 56, plus the black level 64.
+	 */
 	int luma;
-	if (uniform_frame_worst_chroma(1, 120, &luma) > 2 || luma < 0)
+	uniform_levels[0] = 400; uniform_levels[1] = 520; uniform_levels[2] = 320;
+	int worst = uniform_frame_worst_chroma(1, 120, &luma);
+	uniform_levels[0] = 600; uniform_levels[1] = 400; uniform_levels[2] = 200;
+	if (worst > 2 || luma < 0)
 		return 6;
 	ccm_count = 0; ccm_active = 0;		/* back to generic saturation for later tests */
 	return load_ccm_table("/nonexistent/ccm.txt") == 0 ? 0 : 7;
@@ -458,6 +468,52 @@ static int test_highlights(void)
 	return 0;
 }
 
+
+/* White balance stays near the calibrated illuminant locus (synthetic three-point locus). */
+static int test_wb_locus(void)
+{
+	char path[] = "/tmp/locus.XXXXXX";
+	int fd = mkstemp(path);
+	FILE *f;
+	double rg, bg;
+
+	if (fd < 0 || !(f = fdopen(fd, "w")))
+		return 1;
+	fputs("1 0.90 0.45 0.44 0.41 1 0 0 0 1 0 0 0 1\n"
+	      "2 0.70 0.50 0.40 0.40 1 0 0 0 1 0 0 0 1\n"
+	      "3 0.50 0.65 0.31 0.33 1 0 0 0 1 0 0 0 1\n", f);
+	fclose(f);
+	if (load_ccm_table(path) != 3) {
+		unlink(path);
+		return 2;
+	}
+	unlink(path);
+	rg = 0.80; bg = 0.475;			/* on the locus, between 1 and 2 */
+	constrain_white_point(&rg, &bg);
+	if (fabs(rg - 0.80) > 1e-6 || fabs(bg - 0.475) > 1e-6)
+		return 3;
+	rg = 0.60; bg = 0.40;			/* pulled off by a coloured scene: 0.12 away */
+	constrain_white_point(&rg, &bg);
+	if (wb_locus_distance < 0.1 || fabs(hypot(rg - 0.60, bg - 0.40)) < 0.05)
+		return 4;
+	double d_after = 1e9;			/* now within the band of the locus */
+	for (double t = 0; t <= 1.0; t += 0.001) {
+		double px = 0.70 - 0.20 * t, py = 0.50 + 0.15 * t;
+		double d = hypot(rg - px, bg - py);
+		if (d < d_after) d_after = d;
+	}
+	if (d_after > WB_LOCUS_BAND + 1e-3)
+		return 5;
+	rg = 1.30; bg = 0.30;			/* beyond the warmest calibration */
+	constrain_white_point(&rg, &bg);
+	if (hypot(rg - 0.90, bg - 0.45) > WB_LOCUS_BAND + 1e-6)
+		return 6;
+	ccm_count = 0; ccm_active = 0;
+	rg = 0.60; bg = 0.40;			/* no table: grey-world unchanged */
+	constrain_white_point(&rg, &bg);
+	return rg == 0.60 && bg == 0.40 ? 0 : 7;
+}
+
 int main(void)
 {
 	(void)capture_to_loopback;
@@ -491,6 +547,8 @@ int main(void)
 		return 110 + test_lens_shading();
 	if (test_highlights())
 		return 120 + test_highlights();
+	if (test_wb_locus())
+		return 130 + test_wb_locus();
 	for (unsigned int y = 0; y < 8; y++)
 		for (unsigned int x = 0; x < 8; x++)
 			raw[y * 8 + x] = (uint16_t)(x + y * 8);

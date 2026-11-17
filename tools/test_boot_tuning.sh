@@ -225,4 +225,20 @@ cp_case "0" 1 0          # nothing to load (the hook's second run): no sleep at 
 cp_case "1 1 1 1 1" 4 4  # still loading: capped at 4 passes, each followed by the settle
 unset -f sleep gbos_coldplug_pass mdev
 
+# Thermal report: zone types, temperatures and trip points from sysfs.
+sed -n '/^gbos_report_thermal() {/,/^}/p' "$ROOT/usb/hwdetect.sh" > "$TMP/thermal.sh"
+. "$TMP/thermal.sh"
+T="$TMP/thermsys/class/thermal"
+command mkdir -p "$T/thermal_zone0" "$T/thermal_zone1" "$T/cooling_device0"
+echo TSKN > "$T/thermal_zone0/type"; echo 41000 > "$T/thermal_zone0/temp"; echo step_wise > "$T/thermal_zone0/policy"
+echo passive > "$T/thermal_zone0/trip_point_0_type"; echo 50000 > "$T/thermal_zone0/trip_point_0_temp"
+echo TCPU > "$T/thermal_zone1/type"; echo 55000 > "$T/thermal_zone1/temp"
+echo Processor > "$T/cooling_device0/type"; echo 0 > "$T/cooling_device0/cur_state"; echo 3 > "$T/cooling_device0/max_state"
+GBOS_SYSFS_ROOT="$TMP/thermsys" gbos_report_thermal > "$TMP/thermal.out"
+grep -qx 'thermal_zone0 TSKN 41000 step_wise' "$TMP/thermal.out"
+grep -qx '  trip_point_0: passive 50000' "$TMP/thermal.out"
+grep -q '^thermal_zone1 TCPU 55000' "$TMP/thermal.out"
+grep -qx 'cooling_device0 Processor 0/3' "$TMP/thermal.out"
+grep -q '^    gbos_report_thermal$' "$ROOT/usb/hwdetect.sh"
+
 echo "BOOT_TUNING_TEST_PASS"

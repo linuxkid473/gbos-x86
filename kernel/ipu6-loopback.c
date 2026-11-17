@@ -193,6 +193,48 @@ static void select_ccm(double rg, double bg)
 }
 
 /*
+ * White-balance locus: the calibrated illuminants' white points, ordered warm to cool,
+ * form a polyline in (R/G, B/G). A measured grey-world point is projected onto it and
+ * may stray at most WB_LOCUS_BAND from it (real lights sit near the locus; a scene
+ * dominated by one colour pulls grey-world far off it). Without a table: unchanged.
+ */
+#define WB_LOCUS_BAND 0.03
+static double wb_white_rg = 1.0, wb_white_bg = 1.0;
+static double wb_locus_distance;
+
+static void constrain_white_point(double *rg, double *bg)
+{
+	int order[CCM_MAX];
+	double best_d = 1e9, best_x = *rg, best_y = *bg;
+
+	wb_locus_distance = 0;
+	if (ccm_count < 2)
+		return;
+	for (int i = 0; i < ccm_count; i++)
+		order[i] = i;
+	for (int i = 1; i < ccm_count; i++)	/* insertion sort by R/G, warm (high) first */
+		for (int k = i; k > 0 && ccm_table[order[k]].rg > ccm_table[order[k - 1]].rg; k--) {
+			int t = order[k]; order[k] = order[k - 1]; order[k - 1] = t;
+		}
+	for (int i = 0; i + 1 < ccm_count; i++) {
+		double ax = ccm_table[order[i]].rg, ay = ccm_table[order[i]].bg;
+		double bx = ccm_table[order[i + 1]].rg, by = ccm_table[order[i + 1]].bg;
+		double dx = bx - ax, dy = by - ay, len2 = dx * dx + dy * dy;
+		double t = len2 > 0 ? ((*rg - ax) * dx + (*bg - ay) * dy) / len2 : 0;
+		if (t < 0) t = 0;
+		if (t > 1) t = 1;
+		double px = ax + t * dx, py = ay + t * dy, d = hypot(*rg - px, *bg - py);
+		if (d < best_d) { best_d = d; best_x = px; best_y = py; }
+	}
+	wb_locus_distance = best_d;
+	if (best_d > WB_LOCUS_BAND) {
+		double k = WB_LOCUS_BAND / best_d;
+		*rg = best_x + (*rg - best_x) * k;
+		*bg = best_y + (*bg - best_y) * k;
+	}
+}
+
+/*
  * Lens-shading gain grids, one per illuminant (tools/extract_aiqb_ccm.py --lsc; stick only,
  * like the matrices). Each grid spans the full sensor and is normalised to 1.0 at the centre.
  * The Latitude's OV5678 needs about 3.5-4.3x at the corners. A full correction would also
@@ -343,22 +385,28 @@ static void calculate_white_balance(const uint16_t *raw, unsigned int width,
 			mean[channel] = 0;
 	}
 	gain_q12[0] = gain_q12[2] = 4096;
-	if (mean[0] > 0 && mean[1] > 0) {
-		double gain = mean[1] / mean[0];
+	memcpy(wb_last_mean, mean, sizeof(wb_last_mean));
+	if (mean[0] > 0 && mean[1] > 0 && mean[2] > 0) {
+		/*
+		 * Grey-world white point (IR-free raw R/G, B/G, the units of the calibrated
+		 * white points), constrained to the module's illuminant locus when the
+		 * calibration table is loaded: a yellow wall or green room no longer
+		 * becomes a colour cast.
+		 */
+		double rg = mean[0] / mean[1], bg = mean[2] / mean[1];
+		constrain_white_point(&rg, &bg);
+		wb_white_rg = rg;
+		wb_white_bg = bg;
+		double gain = 1.0 / rg;
 		if (gain < 0.25) gain = 0.25;
 		if (gain > 4.0) gain = 4.0;
 		gain_q12[0] = (unsigned int)(gain * 4096.0 + 0.5);
-	}
-	if (mean[2] > 0 && mean[1] > 0) {
-		double gain = mean[1] / mean[2];
+		gain = 1.0 / bg;
 		if (gain < 0.25) gain = 0.25;
 		if (gain > 4.0) gain = 4.0;
 		gain_q12[2] = (unsigned int)(gain * 4096.0 + 0.5);
+		select_ccm(rg, bg);
 	}
-	memcpy(wb_last_mean, mean, sizeof(wb_last_mean));
-	/* The calibrated white points are IR-free raw ratios, the same as mean[] here. */
-	if (mean[1] > 0)
-		select_ccm(mean[0] / mean[1], mean[2] / mean[1]);
 	memcpy(wb_last_gain_q12, gain_q12, sizeof(wb_last_gain_q12));
 }
 
@@ -401,10 +449,11 @@ static void log_cfa_phases(const uint16_t *raw, unsigned int width,
 	       wb_last_gain_q12[0] >= 16384 || wb_last_gain_q12[2] >= 16384 ||
 	       wb_last_gain_q12[0] <= 1024 || wb_last_gain_q12[2] <= 1024 ? " (clamped)" : "");
 	if (ccm_active)
-		printf("ccm: illuminant %d (%.0f%%) + %d, white R/G=%.3f B/G=%.3f\n", ccm_pick[0],
-		       ccm_weight * 100.0, ccm_pick[1],
+		printf("ccm: illuminant %d (%.0f%%) + %d, grey-world R/G=%.3f B/G=%.3f, used %.3f/%.3f (locus distance %.3f)\n",
+		       ccm_pick[0], ccm_weight * 100.0, ccm_pick[1],
 		       wb_last_mean[1] > 0 ? wb_last_mean[0] / wb_last_mean[1] : 0.0,
-		       wb_last_mean[1] > 0 ? wb_last_mean[2] / wb_last_mean[1] : 0.0);
+		       wb_last_mean[1] > 0 ? wb_last_mean[2] / wb_last_mean[1] : 0.0,
+		       wb_white_rg, wb_white_bg, wb_locus_distance);
 	else
 		printf("ccm: no calibration table; generic saturation %.2f\n", saturation_q12 / 4096.0);
 	if (lsc_active)
@@ -578,7 +627,7 @@ static int convert_bayer_yuyv(const uint16_t *raw, unsigned int width,
 	init_gamma();
 	calculate_white_balance(raw, width, height, stride, gain_q12, mean_green);
 	if (wb_last_mean[1] > 0)
-		update_lsc(wb_last_mean[0] / wb_last_mean[1], wb_last_mean[2] / wb_last_mean[1], width, height);
+		update_lsc(wb_white_rg, wb_white_bg, width, height);
 
 	/* 1. Demosaic every output pixel to full-range BT.601 Y/U/V. */
 	for (unsigned int oy = 0; oy < OUT_HEIGHT; oy++) {

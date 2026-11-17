@@ -155,3 +155,12 @@ Not implemented:
 Every suite in `tools/` passes except three, none caused by these changes:
 - `test_camera_fw_trace_kernel.sh` and `test_sensor_overlay_mount.sh` need a privileged container.
 - `test_ui_defaults.sh` fails identically on a clean checkout of `5380e2b`.
+
+## Windows-assisted follow-up (same laptop)
+
+| Area | Windows data | Status |
+|---|---|---|
+| Camera white balance | Calibrated illuminant white points (OV5678 tuning file) | Grey-world constrained to the locus (done) |
+| Thermal HAL | DTT participants `TCPU TSKN TMEM CHRG AMBF NGFF` vs Lapis config `TSR0-4`, `TCPU` | Zone report added to `hwdetect.txt`; config after one boot |
+| Light sensor, gyroscope | Six HID sensor collections; Linux has `als`, `gyro_3d` and more | Needs a sensor sub-HAL rebuild |
+| Rear camera colour | `OV8856_0BA801T3_TGL.aiqb` colour matrices extract | For when the rear camera is exposed to Android |

@@ -172,6 +172,28 @@ gbos_wait_devices() {
   log "hwdetect: devices after ${i}s: wifi=$(ls /sys/class/net 2>/dev/null | grep '^wl' | tr '\n' ' ') bt=$(ls /sys/class/bluetooth 2>/dev/null | tr '\n' ' ') sound=$(cat /proc/asound/cards 2>/dev/null | grep '\[' | tr -s ' ' | tr '\n' ';') backlight=$(ls /sys/class/backlight 2>/dev/null | tr '\n' ' ')"
 }
 
+# Thermal zones and cooling devices, so a device thermal config can be written from real data.
+# Android's Pixel thermal HAL looks sensors up by zone type; Google's Lapis profile expects TSR0-TSR4,
+# while e.g. the Latitude 7320's ACPI participants are TCPU, TSKN, TMEM, CHRG, AMBF, NGFF (Windows DTT).
+gbos_report_thermal() {
+  sys=${GBOS_SYSFS_ROOT:-/sys}
+  echo "== thermal zones (zone type temp_mC policy; trips: type temp_mC)"
+  for z in "$sys"/class/thermal/thermal_zone*; do
+    [ -d "$z" ] || continue
+    echo "${z##*/} $(cat "$z/type" 2>/dev/null) $(cat "$z/temp" 2>/dev/null || echo ?) $(cat "$z/policy" 2>/dev/null)"
+    for t in "$z"/trip_point_*_type; do
+      [ -f "$t" ] || continue
+      n=${t%_type}
+      echo "  ${n##*/}: $(cat "$t" 2>/dev/null) $(cat "${n}_temp" 2>/dev/null)"
+    done
+  done
+  echo "== cooling devices (device type cur/max)"
+  for c in "$sys"/class/thermal/cooling_device*; do
+    [ -d "$c" ] || continue
+    echo "${c##*/} $(cat "$c/type" 2>/dev/null) $(cat "$c/cur_state" 2>/dev/null)/$(cat "$c/max_state" 2>/dev/null)"
+  done
+}
+
 gbos_report_camera_bus_devices() {
   sys=${GBOS_SYSFS_ROOT:-/sys}
   echo "== camera platform devices"
@@ -388,6 +410,7 @@ gbos_hw_report() {
     echo "== net";   ls /sys/class/net
     echo "== bluetooth"; ls /sys/class/bluetooth 2>&1
     echo "== backlight"; for b in /sys/class/backlight/*; do [ -e $b ] && echo "$b max=$(cat $b/max_brightness) cur=$(cat $b/brightness)"; done
+    gbos_report_thermal
     # DRM cards and the driver bound to each, then the driver's own dmesg (amdgpu: ip blocks, firmware, ring tests, "[drm] Display Core").
     echo "== gpu (drm card: driver)"; for c in /sys/class/drm/card[0-9]*; do case ${c##*/} in card*-*) continue;; esac; [ -e $c ] && echo "${c##*/}: $(readlink $c/device/driver 2>/dev/null | sed 's#.*/##') $(cat $c/device/vendor $c/device/device 2>/dev/null | tr '\n' ' ')"; done
     echo "== gpu dmesg"; dmesg | grep -iE 'amdgpu|\[drm|drm:|i915|simpledrm|xe 0000|\*ERROR\*' | head -n 100
