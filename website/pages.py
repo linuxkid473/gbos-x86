@@ -103,7 +103,7 @@ WELCOME_POST = '''Welcome to the gbOS86 community.
 
 gbOS86 runs Google's Googlebook OS on ordinary Intel laptops. It boots from a USB stick (live), installs to the internal SSD, or updates an existing install without touching your data.
 
-**What works today:** Intel 6th gen and newer, Intel graphics, boot-time hardware detection for Wi-Fi, Bluetooth, sound, touchpad, brightness and display. Twenty-one machines have been tried so far (Dell Latitude 5300, Acer Aspire Lite AL15-52, HP Envy 13, ThinkPad T470 and Intel NUC8BEH work; others partly or not yet): https://gbos86.com/hardware. Your reports matter.
+**What works today:** Intel 6th gen and newer, Intel graphics, boot-time hardware detection for Wi-Fi, Bluetooth, sound, touchpad, brightness and display. Thirty-six machines have been tried so far (Dell Latitude 5300, Acer Aspire Lite AL15-52, HP Envy 13, ThinkPad T470, Intel NUC8BEH, MSI Sword 16 HX and Dell Inspiron 14 Plus 7440 work; others partly or not yet): https://gbos86.com/hardware. Your reports matter.
 
 **How to help**
 - Read the install guide: https://gbos86.com/docs/install
@@ -145,7 +145,7 @@ def home(req, cats, latest, news, st):
 
 <section class="card"><h2>Forums</h2><ul class="catlist">%s</ul></section>
 
-<section class="notice"><strong>Tried so far:</strong> Dell Latitude 5300, Acer Aspire Lite AL15-52, Lenovo ThinkPad T470 and Intel NUC8BEH work; HP OmniBook 7 and Dell XPS 16 partly; Framework 13 Pro has a fix pending; HP 14-ne0013dx does not. See the <a href="/hardware#tested">full list</a>. Post your laptop in
+<section class="notice"><strong>Tried so far:</strong> Thirty-six machines. Dell Latitude 5300, Acer Aspire Lite AL15-52, Lenovo ThinkPad T470, Intel NUC8BEH, MSI Sword 16 HX, Dell Inspiron 14 5440 and Dell Inspiron 14 Plus 7440 work; HP OmniBook 7 and Dell XPS 16 partly; Framework 13 Pro and the Pixelbook Go have a fix pending; HP 14-ne0013dx does not. See the <a href="/hardware#tested">full list</a>. Post your laptop in
 <a href="/forum/c/hardware">Hardware Compatibility</a> and attach <code>hwdetect.txt</code>.</section>''' % (lat, nw, st['members'], st['threads'], st['posts'], cat_rows)
 
 
@@ -323,16 +323,16 @@ def hardware(req):
 <h2>What the drivers cover</h2>
 <table class="spec"><thead><tr><th>Area</th><th>Supported</th></tr></thead><tbody>
 <tr><td>CPU</td><td>Intel Core, 6th gen and newer, with AVX (check <code>grep avx /proc/cpuinfo</code> on any Linux; many Celeron/Pentium/Atom chips lack it and boot stops with a message). Missing instructions (SHA-NI, AVX-VNNI, GFNI, VAES, VPCLMULQDQ, AVX-IFMA) are emulated in the kernel; the hottest code is pre-patched. Faster on newer CPUs that have them natively.</td></tr>
-<tr><td>Graphics, display</td><td>Intel i915 from Skylake to Raptor Lake, eDP panels, HDMI/DP. Newer chips use xe, which needs its own firmware (a Framework 13 Pro stayed black without it); see the list above. Colour fixes apply to i915 only. AMD Radeon: experimental, drawn by the CPU (software rendering), slow, untested on hardware.</td></tr>
+<tr><td>Graphics, display</td><td>Intel i915 from Skylake to Raptor Lake, eDP panels, HDMI/DP. Newer chips use xe, which needs its own firmware (a Framework 13 Pro stayed black without it); see the list above. Colour fixes apply to i915 only. AMD Radeon: experimental. The desktop is drawn by the CPU (software rendering, slow) or, on some Ryzen laptops, by the GPU through a project-built RADV Vulkan driver; three Ryzen laptops have been reported working (see the list above).</td></tr>
 <tr><td>Brightness</td><td>Backlight class and ACPI video, plus laptop hotkey drivers (Dell, HP, ThinkPad, IdeaPad, Asus, Acer, Samsung, MSI, Sony, Fujitsu, LG, Intel HID).</td></tr>
 <tr><td>Wi-Fi</td><td>Intel 7260/7265, 8265, 9000-series, AX200/201/210/211, BE200 (iwldvm and iwlmvm). Realtek rtw88 and rtw89. MediaTek mt7921/22/25. Qualcomm ath10k and ath11k. Broadcom brcmfmac.</td></tr>
 <tr><td>Bluetooth</td><td>USB Bluetooth from Intel, Realtek, MediaTek, Qualcomm and Broadcom, plus Intel PCIe Bluetooth.</td></tr>
 <tr><td>Sound</td><td>Legacy HDA with the common codecs (Realtek, Conexant, Cirrus, IDT/SigmaTel, VIA), or SOF for newer machines with digital mics or SoundWire. The kernel picks per machine. SOF is best effort.</td></tr>
 <tr><td>Touchpad, keyboard</td><td>Intel LPSS I2C-HID touchpads (most modern laptops), Intel sensor hub, PS/2 (Synaptics, ALPS, Elan), Synaptics RMI4.</td></tr>
-<tr><td>Storage</td><td><strong>Installing needs an internal NVMe SSD</strong> (the installer only targets NVMe). SATA-only laptops can still run live from USB. SD card readers (Realtek, SDHCI) are supported.</td></tr>
+<tr><td>Storage</td><td><strong>Installing works to an internal NVMe, eMMC or SATA disk</strong> (M.2 SATA or 2.5"; a SATA disk is the target when the laptop has no NVMe or eMMC). The BIOS must show the disk in AHCI mode, not RAID or Intel RST. A USB stick and card readers are never a target. SD card readers (Realtek, SDHCI) are supported.</td></tr>
 <tr><td>Other</td><td>USB webcams (UVC), Ethernet (r8169, e1000e, igc, common USB adapters).</td></tr></tbody></table>
 <h2>Not supported</h2>
-<p>Suspend and resume, fingerprint readers, IPU6 MIPI cameras, NVIDIA and AMD discrete GPUs, AMD CPUs, ARM (AMD integrated graphics is experimental, see above). Some security-chip features (Google GSC, Trusty) do not exist on other laptops, so they are replaced in software.</p>
+<p>Suspend and resume, fingerprint readers, IPU6 MIPI cameras, NVIDIA and AMD discrete GPUs and ARM. AMD CPUs (Ryzen) and AMD integrated graphics are experimental, see above. Some security-chip features (Google GSC, Trusty) do not exist on other laptops, so they are replaced in software.</p>
 <h2>The ideal laptop</h2>
 <p>A 2018 to 2022 business laptop: <strong>Intel 8th to 11th gen, Intel UHD or Iris Xe graphics, 8 GB or more of RAM, NVMe SSD, 1080p panel, Intel Wi-Fi and Bluetooth, Intel HDA audio</strong>. Dell Latitude, Lenovo ThinkPad and HP EliteBook of that period are the most predictable.</p>
 <h2>Reporting your laptop</h2>
@@ -362,8 +362,8 @@ def faq(req):
           ('Does Wi-Fi / Bluetooth / sound work?', 'On the Dell Latitude 5300 and the Acer Aspire Lite AL15-52, yes (the Acer needed firmware fixes that are now in the build). On Core Ultra machines Wi-Fi is the open problem. See the <a href="/hardware#tested">tested list</a> and send us your <code>hwdetect.txt</code>.'),
           ('Does suspend work?', 'Not yet.'),
           ('Why can I not download the image?', 'It contains Google\'s OS and patched Google libraries. See <a href="/download">Get gbOS86</a>.'),
-          ('Does it work on AMD or ARM?', 'Not supported. Intel x86 only. AMD Radeon graphics has an experimental software-rendering mode (slow, untested on hardware); AMD CPUs and ARM are not supported.'),
-          ('How do I update?', 'Boot a newer stick, choose 2 (install or update), then Update. Your data is kept.'), ('Can I install on a SATA SSD?', 'Not yet. The installer only targets an internal NVMe drive. You can still run live from the USB stick.')]
+          ('Does it work on AMD or ARM?', 'AMD is experimental. gbOS86 is built for Intel x86, but Ryzen laptops have booted: an MSI Modern 15 B7M, an HP OmniBook 5 and an Acer Aspire A515-46 are reported working, with AMD graphics drawn by the CPU or by a project-built RADV driver, and some gaps (see the Hardware list). ARM is not supported.'),
+          ('How do I update?', 'Boot a newer stick, choose 2 (install or update), then Update. Your data is kept.'), ('Can I install on a SATA SSD?', 'Yes. A SATA disk (M.2 SATA or 2.5 inch) is the install target when the laptop has no NVMe or eMMC drive; an Intel NUC8BEH has been installed this way. Set the BIOS to AHCI mode, not RAID or Intel RST, or the disk is not visible.')]
     return '<div class="doc"><h1>FAQ</h1>' + ''.join('<details class="card"><summary>%s</summary><p>%s</p></details>' % (q, a) for q, a in qa) + '''
 <h2 id="rules">Forum rules</h2><ol><li>Be respectful. No harassment or abuse.</li><li>Attach logs and details when asking for help.</li><li>No spam, ads or off-topic promotion.</li><li>Staff may edit or remove posts and ban accounts that break these rules.</li></ol></div>'''
 
