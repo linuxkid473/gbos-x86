@@ -18,9 +18,12 @@
  *    out (HMAC with soft_gk's key, PASSWORD type, timestamp within 10 minutes); clearing a lockout needs a
  *    fresh valid one. Only system_server (uid 1000) may call in, whatever SELinux mode the system runs in.
  *  - Lockout: 30 s after every 5 consecutive rejects, permanent (password needed) after 20, persisted.
- *  - Templates are named "GBOS-<install>-u<user>-<id>". Goodix identifies from its full device
- *    database, so this HAL accepts only a returned name belonging to the current Android user and
- *    removes only exact names it created.
+ *  - Templates are named "GBOS-<install>-u<user>-<id>" ("GBOS-L-..." when /data is tmpfs). Goodix
+ *    identifies from its full device database, so this HAL accepts only a returned name belonging to the
+ *    current Android user. When a session opens it deletes the sensor templates no Android can reach
+ *    any more (gbos_fp_policy.h): the sensor's check-duplicate otherwise rejects that finger forever.
+ *    It never touches templates of other OSes, other users, or of a gbOS86 install that may still use
+ *    them.
  *
  * Built like soft_gk: no NDK, the bionic / libbinder_ndk / BoringSSL / liblog symbols it uses are declared
  * below and it links against the image's own libraries (build.sh). Wire format: AOSP's frozen
@@ -51,6 +54,10 @@ int open(const char *, int, ...); int close(int);
 long read(int, void *, size_t); long write(int, const void *, size_t);
 int ioctl(int, int, ...); int fsync(int); int rename(const char *, const char *);
 int mkdir(const char *, unsigned int); int usleep(unsigned int);
+struct statfs_buf { uint64_t f_type, rest[31]; };	/* bionic LP64 struct statfs starts with f_type; 120 bytes */
+int statfs(const char *, struct statfs_buf *);
+#define TMPFS_MAGIC 0x01021994
+#define RAMFS_MAGIC 0x858458f6
 struct pollfd { int fd; short events, revents; };
 int poll(struct pollfd *, unsigned int, int);
 #define POLLOUT 4
@@ -63,6 +70,7 @@ int *__errno(void);
 #define O_TRUNC 01000
 #define O_NOFOLLOW 0400000
 #define O_CLOEXEC 02000000
+#define ENOENT 2
 #define EINTR 4
 #define EAGAIN 11
 #define EINVAL 22
@@ -144,6 +152,9 @@ AStatus *AStatus_newOk(void); void AStatus_delete(AStatus *);
 #define GOODIX_LOGW LOGW
 #define GOODIX_LOGE LOGE
 #include "goodix.h"
+#define FP_LOGI LOGI
+#define FP_LOGW LOGW
+#include "gbos_fp_policy.h"
 
 /* ---- AIDL ---- */
 #define FP_DESCRIPTOR "android.hardware.biometrics.fingerprint.IFingerprint"
@@ -196,6 +207,7 @@ struct user_state {	/* DATA_DIR/u<user> */
 	int n;
 	int32_t failed;
 	bool permanent;
+	bool trusted;	/* the file was read, or does not exist: `ids` is the whole truth */
 };
 
 struct session {
@@ -204,11 +216,12 @@ struct session {
 	int32_t user;
 	bool closed;
 	bool clear_pending;	/* a timed lockout is running: send onLockoutCleared when it ends */
+	bool reconciled;	/* worker only: the sensor's stale templates were cleaned up for this session */
 	struct user_state st;	/* only the worker touches it after createSession */
 };
 
 enum { OP_CHALLENGE, OP_REVOKE, OP_ENROLL, OP_AUTH, OP_DETECT, OP_ENUM, OP_REMOVE, OP_AUTHID,
-       OP_INVALIDATE, OP_RESET_LOCKOUT, OP_CLOSE };
+       OP_INVALIDATE, OP_RESET_LOCKOUT, OP_CLOSE, OP_RECONCILE };
 
 struct op {
 	struct op *next;
@@ -228,6 +241,8 @@ static int64_t next_op_id = 1;
 static struct session *active;
 static struct goodix dev;		/* the worker's; other threads only call goodix_request_cancel */
 static char instance[9];
+static bool data_live;			/* DATA_DIR is on tmpfs: forgotten at reboot */
+static bool no_install;			/* --no-gbos-install: hook.sh found no LABEL=GBOSSYS */
 static struct { int32_t user; int64_t value, expires; } challenges[16];	/* under mu */
 static struct { int32_t user; int64_t until; } timed[8];		/* under mu, monotonic ms */
 static AIBinder_Class *fp_cls, *session_cls, *cb_cls, *cancel_cls;
@@ -329,13 +344,23 @@ static void st_load(struct user_state *st, int32_t user)
 	char path[64], buf[1024];
 	const char *p;
 	int64_t v;
+	int n;
 
 	memset(st, 0, sizeof(*st));
 	st->user = user;
 	snprintf(path, sizeof(path), DATA_DIR "/u%d", user);
-	if (read_file(path, buf, sizeof(buf)) <= 0)
+	n = read_file(path, buf, sizeof(buf));
+	if (n <= 0) {
+		/* no file: this user never enrolled here. A read error or an empty file (st_save never
+		 * writes one): unknown, so nothing is deleted on its strength. */
+		st->trusted = n < 0 && errno == ENOENT;
+		if (!st->trusted)
+			LOGE("user %d: state %s unreadable (%d, errno %d)", user, path, n, errno);
 		return;
+	}
 	for (p = buf; *p; ) {
+		if (starts(p, "end\n"))
+			st->trusted = true;	/* st_save's last line: the file is complete */
 		if (starts(p, "enrollment ")) {
 			p += 11;
 			if (parse_int(&p, &v) && v > 0 && v <= INT32_MAX && st->n < MAX_ENROLL)
@@ -365,12 +390,60 @@ static bool st_save(const struct user_state *st)
 	len = snprintf(buf, sizeof(buf), "failed %d\npermanent %d\n", st->failed, st->permanent);
 	for (int i = 0; i < st->n; i++)
 		len += snprintf(buf + len, sizeof(buf) - (size_t)len, "enrollment %d\n", st->ids[i]);
+	len += snprintf(buf + len, sizeof(buf) - (size_t)len, "end\n");	/* files before 2026-11-18 lack it */
 	return write_file(path, buf, len);
 }
 
-static void template_name(char out[48], int32_t user, int32_t id)
+static bool template_name(char out[FP_NAME_MAX + 1], int32_t user, int32_t id)
 {
-	snprintf(out, 48, "GBOS-%s-u%d-%08x", instance, user, (uint32_t)id);
+	return fp_name_format(out, data_live, instance, user, (uint32_t)id) > 0;
+}
+
+static struct fp_policy session_policy(const struct session *ss)
+{
+	struct fp_policy p = {
+		.instance = instance, .live = data_live, .no_install = no_install, .user = ss->user,
+		.ids = ss->st.ids, .n = ss->st.n, .ids_trusted = ss->st.trusted,
+	};
+
+	return p;
+}
+
+/* The sensor is open. Delete its templates that no Android can reach any more (gbos_fp_policy.h). */
+static void reconcile(struct session *ss)
+{
+	struct fp_policy p = session_policy(ss);
+	int r, deleted, failed, fail = 0;
+
+	r = fp_reconcile(&dev, &p, &deleted, &failed, &fail);
+	if (r != GOODIX_OK) {
+		LOGW("user %d: sensor template cleanup failed: %d (sensor code %d); retried at the next enroll",
+		     ss->user, r, fail);
+		return;
+	}
+	ss->reconciled = failed == 0;
+}
+
+static void op_reconcile(struct session *ss)
+{
+	int r;
+
+	if ((r = goodix_open(&dev)) < 0) {
+		LOGW("user %d: sensor unavailable for template cleanup: %d; retried at the next enroll",
+		     ss->user, r);
+		return;
+	}
+	reconcile(ss);
+	goodix_close(&dev);
+}
+
+/* After a cancelled operation, before the sensor is closed: leave it idle for the next one. */
+static void settle_after_cancel(void)
+{
+	int r = goodix_settle(&dev);
+
+	if (r < 0)
+		LOGW("sensor did not confirm idle after the cancel: %d (the next open reads past stale packets)", r);
 }
 
 /* ---- HardwareAuthToken ---- */
@@ -763,7 +836,7 @@ static void op_authenticate(struct session *ss)
 	struct user_state *st = &ss->st;
 	struct op_ctx ctx = { ss, 0 };
 	struct goodix_ev ev = { on_sensor_event, &ctx };
-	char names[MAX_ENROLL][48], matched[GOODIX_MAX_UID + 1];
+	char names[MAX_ENROLL][FP_NAME_MAX + 1], matched[GOODIX_MAX_UID + 1];
 	const char *list[MAX_ENROLL];
 	int64_t left;
 	int r, fail = 0, i;
@@ -784,7 +857,10 @@ static void op_authenticate(struct session *ss)
 		return;
 	}
 	for (i = 0; i < st->n; i++) {
-		template_name(names[i], ss->user, st->ids[i]);
+		if (!template_name(names[i], ss->user, st->ids[i])) {
+			cb_error(ss, ERR_UNABLE_TO_PROCESS, 0);
+			return;
+		}
 		list[i] = names[i];
 	}
 	LOGI("user %d: authenticate starting (%d enrollments)", ss->user, st->n);
@@ -830,6 +906,7 @@ static void op_authenticate(struct session *ss)
 			continue;
 		if (r == -ECANCELED) {
 			cb_error(ss, ERR_CANCELED, 0);
+			settle_after_cancel();
 		} else if (r == GOODIX_NORECORD) {
 			LOGE("user %d: none of the %d templates is on the sensor any more (deleted outside "
 			     "Android?): remove and enroll the fingerprints again", ss->user, st->n);

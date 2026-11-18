@@ -35,6 +35,7 @@ enum {
 	GOODIX_RETRY,
 	GOODIX_NORECORD,
 	GOODIX_FAILED,
+	GOODIX_DUPLICATE,	/* enroll: the finger matches a stored template (check-duplicate) */
 };
 
 enum {
@@ -207,15 +208,25 @@ static inline int goodix_receive(struct goodix *s, struct goodix_packet *packet,
 	}
 }
 
-static inline int goodix_command(struct goodix *s, uint8_t cmd0, uint8_t cmd1,
-				 const uint8_t *payload, size_t payload_len,
-				 bool cancellable, struct goodix_response *response)
+/*
+ * Packets for another command: what the sensor still sends for a command that was abandoned when an
+ * operation was cancelled. libfprint never sees them because it resets the USB device on every open; this
+ * backend does not reset (it disrupts this sensor), so it reads past a few. 2026-11-18: after a cancel
+ * during the b0:02 acknowledgement wait, the next VERSION read b0's late acknowledgement, failed with
+ * -EPROTO and the framework got HW_UNAVAILABLE ("Fingerprint sensor hardware unavailable").
+ */
+#define GOODIX_MAX_STALE 4
+
+static inline int goodix_command_timeout(struct goodix *s, uint8_t cmd0, uint8_t cmd1,
+					 const uint8_t *payload, size_t payload_len, bool cancellable,
+					 unsigned int ack_ms, unsigned int response_ms,
+					 struct goodix_response *response)
 {
 	uint8_t tx[GOODIX_HEADER_SIZE + GOODIX_MAX_PAYLOAD + GOODIX_CRC_SIZE];
 	uint8_t rx[GOODIX_HEADER_SIZE + GOODIX_MAX_PAYLOAD + GOODIX_CRC_SIZE];
 	struct goodix_packet packet;
 	size_t tx_len;
-	int n, r;
+	int n, r, stale;
 
 	if (goodix_cancel_requested(s))
 		return -ECANCELED;
@@ -234,40 +245,81 @@ static inline int goodix_command(struct goodix *s, uint8_t cmd0, uint8_t cmd1,
 			    cmd0, cmd1, n, (unsigned int)tx_len);
 		return -EIO;
 	}
-	r = goodix_receive(s, &packet, rx, sizeof(rx), cancellable, 2000);
-	if (r < 0) {
-		if (r == -ECANCELED)
+	for (stale = 0;; stale++) {
+		r = goodix_receive(s, &packet, rx, sizeof(rx), cancellable, ack_ms);
+		if (r < 0) {
+			if (r == -ECANCELED) {	/* an expected end, not a sensor fault */
+				s->need_reset = true;
+				GOODIX_LOGW("command %02x:%02x cancelled while awaiting acknowledgement",
+					    cmd0, cmd1);
+			} else {
+				GOODIX_LOGE("command %02x:%02x acknowledgement receive failed: %d",
+					    cmd0, cmd1, r);
+			}
+			return r;
+		}
+		if (packet.cmd0 == GOODIX_CMD_RESPONSE && packet.payload_len >= 2 &&
+		    packet.payload[1] == cmd0)
+			break;
+		if (stale == GOODIX_MAX_STALE) {
 			s->need_reset = true;
-		GOODIX_LOGE("command %02x:%02x acknowledgement receive failed: %d",
-			    cmd0, cmd1, r);
-		return r;
+			GOODIX_LOGE("command %02x:%02x: no acknowledgement among %d packets",
+				    cmd0, cmd1, stale + 1);
+			return -EPROTO;
+		}
+		GOODIX_LOGW("command %02x:%02x: discarding stale packet %02x:%02x (%s %02x)",
+			    cmd0, cmd1, packet.cmd0, packet.cmd1,
+			    packet.cmd0 == GOODIX_CMD_RESPONSE ? "acknowledgement of" : "response",
+			    packet.cmd0 == GOODIX_CMD_RESPONSE && packet.payload_len >= 2 ?
+			    packet.payload[1] : packet.cmd0);
 	}
-	if (packet.cmd0 != GOODIX_CMD_RESPONSE || packet.payload_len < 2 ||
-	    packet.payload[0] != GOODIX_SUCCESS || packet.payload[1] != cmd0) {
+	if (packet.payload[0] != GOODIX_SUCCESS) {
 		s->need_reset = true;
+		GOODIX_LOGE("command %02x:%02x refused: acknowledgement status 0x%02x",
+			    cmd0, cmd1, packet.payload[0]);
 		return -EPROTO;
 	}
 	if (goodix_cancel_requested(s)) {
 		s->need_reset = true;
 		return -ECANCELED;
 	}
-	r = goodix_receive(s, &packet, rx, sizeof(rx), cancellable, 5000);
-	if (r < 0) {
-		if (r == -ECANCELED)
+	for (stale = 0;; stale++) {
+		r = goodix_receive(s, &packet, rx, sizeof(rx), cancellable, response_ms);
+		if (r < 0) {
+			if (r == -ECANCELED) {
+				s->need_reset = true;
+				GOODIX_LOGW("command %02x:%02x cancelled while awaiting its response",
+					    cmd0, cmd1);
+			} else {
+				GOODIX_LOGE("command %02x:%02x response receive failed: %d",
+					    cmd0, cmd1, r);
+			}
+			return r;
+		}
+		if (packet.cmd0 == cmd0 && packet.payload_len >= 1)
+			break;
+		if (stale == GOODIX_MAX_STALE) {
 			s->need_reset = true;
-		GOODIX_LOGE("command %02x:%02x response receive failed: %d",
-			    cmd0, cmd1, r);
-		return r;
-	}
-	if (packet.cmd0 != cmd0 || packet.payload_len < 1) {
-		s->need_reset = true;
-		return -EPROTO;
+			GOODIX_LOGE("command %02x:%02x: no response among %d packets",
+				    cmd0, cmd1, stale + 1);
+			return -EPROTO;
+		}
+		GOODIX_LOGW("command %02x:%02x: discarding stale packet %02x:%02x while awaiting its response",
+			    cmd0, cmd1, packet.cmd0, packet.cmd1);
 	}
 	response->result = packet.payload[0];
 	response->len = packet.payload_len - 1;
 	if (response->len)
 		memcpy(response->data, packet.payload + 1, response->len);
 	return 0;
+}
+
+static inline int goodix_command(struct goodix *s, uint8_t cmd0, uint8_t cmd1,
+				 const uint8_t *payload, size_t payload_len,
+				 bool cancellable, struct goodix_response *response)
+{
+	return goodix_command_timeout(s, cmd0, cmd1, payload, payload_len, cancellable,
+				      2000, 5000, response);
 }
 
 static inline void goodix_make_config(struct goodix *s, uint8_t out[GOODIX_CFG_SIZE])
@@ -382,6 +434,28 @@ static inline int goodix_power_shield(struct goodix *s, uint8_t enabled)
 	return response.result == GOODIX_SUCCESS ? 0 : -EIO;
 }
 
+/*
+ * After a cancelled operation: drop the cancel request, read past what the sensor still sends for the
+ * abandoned command, and switch the power-button shield off again (libfprint ends every enroll and
+ * identify with that), so the next operation starts from an idle sensor. Short timeouts: the framework
+ * usually starts the next operation at once.
+ */
+static inline int goodix_settle(struct goodix *s)
+{
+	struct goodix_response response;
+	int r;
+
+	if (s->fd < 0)
+		return -ENODEV;
+	goodix_clear_cancel(s);
+	r = goodix_command_timeout(s, GOODIX_CMD_POWER_BUTTON_SHIELD, GOODIX_CMD_SHIELD_OFF,
+				   NULL, 0, false, 500, 1000, &response);
+	if (r < 0)
+		return r;
+	s->need_reset = false;
+	return response.result == GOODIX_SUCCESS ? 0 : -EIO;
+}
+
 static inline int goodix_list_templates(struct goodix *s, struct goodix_template *templates,
 					size_t *count, int *fail)
 {
@@ -471,8 +545,32 @@ static inline int goodix_capture(struct goodix *s, const struct goodix_ev *ev,
 	return GOODIX_OK;
 }
 
+/*
+ * libfprint gx_proto_parse_body(MOC_CMD0_CHECK4DUPLICATE): any nonzero status means "duplicate", and the
+ * body after the status is a little-endian record length and the matching template's finger id record.
+ * Returns false when that record is missing or unreadable (*t then has an empty uid).
+ */
+static inline bool goodix_parse_duplicate(const struct goodix_response *response,
+					  struct goodix_template *t)
+{
+	size_t record_len;
+
+	memset(t, 0, sizeof(*t));
+	if (response->len < 2)
+		return false;
+	record_len = (size_t)response->data[0] | (size_t)response->data[1] << 8;
+	if (record_len > response->len - 2)
+		return false;
+	return goodix_parse_finger_id(response->data + 2, record_len, t) >= 0 && t->uid_len;
+}
+
+/*
+ * Returns GOODIX_OK, GOODIX_DUPLICATE (*duplicate names the stored template the finger matched, or has an
+ * empty uid), GOODIX_FAILED (*fail is the sensor status), GOODIX_RETRY or a negative errno.
+ */
 static inline int goodix_enroll(struct goodix *s, const char *uid,
-				const struct goodix_ev *ev, int *fail)
+				const struct goodix_ev *ev, int *fail,
+				struct goodix_template *duplicate)
 {
 	uint8_t zero = 0, parameters[3], tid[GOODIX_TEMPLATE_ID_SIZE], fid[GOODIX_MAX_UID + 72];
 	struct goodix_response response;
@@ -497,6 +595,8 @@ static inline int goodix_enroll(struct goodix *s, const char *uid,
 		goto done;
 	if (response.result != GOODIX_SUCCESS || response.len < sizeof(tid)) {
 		*fail = response.result ? response.result : GOODIX_FAILED;
+		GOODIX_LOGW("enroll init: status 0x%02x, %u bytes", response.result,
+			    (unsigned int)response.len);
 		goto done;
 	}
 	memcpy(tid, response.data, sizeof(tid));
@@ -516,6 +616,8 @@ static inline int goodix_enroll(struct goodix *s, const char *uid,
 			goto done;
 		if (response.len < 2) {
 			*fail = response.result ? response.result : GOODIX_FAILED;
+			GOODIX_LOGW("enroll stage %d: status 0x%02x, %u bytes", stage + 1,
+				    response.result, (unsigned int)response.len);
 			goto done;
 		}
 		if (response.data[1] > s->config[3] || response.result >= GOODIX_ERROR_THRESHOLD) {
@@ -535,7 +637,18 @@ static inline int goodix_enroll(struct goodix *s, const char *uid,
 				sizeof(parameters), false, &response)) < 0)
 		goto done;
 	if (response.result != GOODIX_SUCCESS) {
+		struct goodix_template found;
+
 		*fail = response.result;
+		if (goodix_parse_duplicate(&response, &found))
+			GOODIX_LOGW("check-duplicate: status 0x%02x, finger matches stored template %s",
+				    response.result, found.uid);
+		else
+			GOODIX_LOGW("check-duplicate: status 0x%02x, no readable template record (%u bytes)",
+				    response.result, (unsigned int)response.len);
+		if (duplicate)
+			*duplicate = found;
+		result = GOODIX_DUPLICATE;
 		goto done;
 	}
 	if (goodix_encode_finger_id(fid, sizeof(fid), &fid_len, tid, uid) < 0) {
@@ -547,6 +660,7 @@ static inline int goodix_enroll(struct goodix *s, const char *uid,
 		goto done;
 	if (response.result != GOODIX_SUCCESS) {
 		*fail = response.result;
+		GOODIX_LOGW("commit: status 0x%02x", response.result);
 		goto done;
 	}
 	result = GOODIX_OK;
@@ -627,12 +741,30 @@ done:
 	return result;
 }
 
-static inline int goodix_delete(struct goodix *s, const char *uid, int *fail)
+/* Delete one listed template (libfprint fp_template_delete: a7:04 with the encoded finger id). */
+static inline int goodix_delete_template(struct goodix *s, const struct goodix_template *t, int *fail)
 {
 	uint8_t fid[GOODIX_MAX_UID + 72];
-	struct goodix_template templates[GOODIX_MAX_TEMPLATES];
 	struct goodix_response response;
-	size_t count = 0, fid_len;
+	size_t fid_len;
+	int r;
+
+	if (!t->uid_len ||
+	    goodix_encode_finger_id(fid, sizeof(fid), &fid_len, t->tid, t->uid) < 0)
+		return -EINVAL;
+	if ((r = goodix_command(s, GOODIX_CMD_DELETE, GOODIX_CMD_DELETE_ONE,
+				fid, fid_len, false, &response)) < 0)
+		return r;
+	if (response.result == GOODIX_SUCCESS || response.result == GOODIX_NO_RECORD)
+		return GOODIX_OK;
+	*fail = response.result;
+	return GOODIX_FAILED;
+}
+
+static inline int goodix_delete(struct goodix *s, const char *uid, int *fail)
+{
+	struct goodix_template templates[GOODIX_MAX_TEMPLATES];
+	size_t count = 0;
 	int r;
 
 	if ((r = goodix_list_templates(s, templates, &count, fail)) != GOODIX_OK)
@@ -641,16 +773,7 @@ static inline int goodix_delete(struct goodix *s, const char *uid, int *fail)
 		if (templates[i].uid_len != strlen(uid) ||
 		    memcmp(uid, templates[i].uid, templates[i].uid_len) != 0)
 			continue;
-		if (goodix_encode_finger_id(fid, sizeof(fid), &fid_len,
-					    templates[i].tid, uid) < 0)
-			return -EINVAL;
-		if ((r = goodix_command(s, GOODIX_CMD_DELETE, GOODIX_CMD_DELETE_ONE,
-					fid, fid_len, false, &response)) < 0)
-			return r;
-		if (response.result == GOODIX_SUCCESS || response.result == GOODIX_NO_RECORD)
-			return GOODIX_OK;
-		*fail = response.result;
-		return GOODIX_FAILED;
+		return goodix_delete_template(s, &templates[i], fail);
 	}
 	return GOODIX_NORECORD;
 }
