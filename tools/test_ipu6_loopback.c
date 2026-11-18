@@ -14,46 +14,133 @@ static int test_gamma(void)
 	return grey >= 114 && grey <= 122 ? 0 : 3;
 }
 
-/* OV5675 at 2592x1944@30: exposure 4..2012 lines, analogue 128..2047, digital 1024..4095. */
-static void ov5675_ae(struct ae_state *ae)
+/*
+ * OV5675 driver at 2592x1944@30: exposure 4..2016 lines (frame 1944 + vblank 76, margin 4),
+ * analogue 128..2047, digital 1024..4095, VBLANK 76..30823.
+ */
+static void ov5675_ae(struct ae_state *ae, int with_vblank)
 {
 	memset(ae, 0, sizeof(*ae));
 	ae->fd = -1;
 	ae->enabled = 1;
-	ae->exposure = (struct ae_control){ V4L2_CID_EXPOSURE, 4, 2012, 2012, 2012, 1 };
-	ae->again = (struct ae_control){ V4L2_CID_ANALOGUE_GAIN, 128, 2047, 128, 128, 1 };
-	ae->dgain = (struct ae_control){ V4L2_CID_DIGITAL_GAIN, 1024, 4095, 1024, 1024, 1 };
+	ae->exposure = (struct ae_control){ V4L2_CID_EXPOSURE, 4, 2016, 2016, 2016, 1, 2016 };
+	ae->again = (struct ae_control){ V4L2_CID_ANALOGUE_GAIN, 128, 2047, 128, 128, 1, 128 };
+	ae->dgain = (struct ae_control){ V4L2_CID_DIGITAL_GAIN, 1024, 4095, 1024, 1024, 1, 1024 };
+	if (with_vblank)
+		ae->vblank = (struct ae_control){ V4L2_CID_VBLANK, 76, 30823, 76, 76, 1, 76 };
+	ae_frame_limits(ae, 1944);
 }
 
 static int test_auto_exposure(void)
 {
 	struct ae_state ae;
 
-	ov5675_ae(&ae);
-	/* Dark scene at driver defaults (max exposure, 1x gain): raise analogue gain, bounded step. */
-	if (!ae_update(&ae, AE_TARGET / 4) || ae.exposure.value != 2012 ||
-	    ae.again.value != 205 || ae.dgain.value != 1024)
+	ov5675_ae(&ae, 1);
+	/* 2 x (1944 + 76) - 4: 15 fps at most. */
+	if (ae.margin != 4 || ae.base_max != 2016 || ae.long_max != 4036)
 		return 1;
+	/* Dark scene at driver defaults (max exposure, 1x gain): raise analogue gain, bounded step. */
+	if (!ae_update(&ae, AE_TARGET / 4) || ae.exposure.value != 2016 ||
+	    ae.again.value != 205 || ae.dgain.value != 1024 || ae.vblank.value != 76)
+		return 2;
 	/* Within the deadband nothing changes. */
 	if (ae_update(&ae, AE_TARGET * 1.05))
-		return 2;
+		return 3;
 	/* Bright scene: gain comes down to 1x before exposure time is shortened. */
 	for (int i = 0; i < 10; i++)
 		ae_update(&ae, AE_TARGET * 4);
-	if (ae.again.value != 128 || ae.dgain.value != 1024 || ae.exposure.value >= 2012)
-		return 3;
-	/* Very dark scene saturates at maximum exposure, analogue and then digital gain. */
+	if (ae.again.value != 128 || ae.dgain.value != 1024 || ae.exposure.value >= 2016 ||
+	    ae.vblank.value != 76)
+		return 4;
+	/* Very dark scene: 15 fps frame, analogue gain capped at 15.5x, then digital gain. */
 	for (int i = 0; i < 40; i++)
 		ae_update(&ae, 0);
-	if (ae.exposure.value != 2012 || ae.again.value != 2047 || ae.dgain.value != 4095 ||
-	    ae_update(&ae, 0))
-		return 4;
-	/* Missing digital gain control: analogue gain still clamps at its maximum. */
-	ov5675_ae(&ae);
+	if (ae.exposure.value != 4036 || ae.vblank.value != 4036 + 4 - 1944 ||
+	    ae.again.value != 1984 || ae.dgain.value != 4095 || ae_update(&ae, 0))
+		return 5;
+	if (fabs(ae_frame_ms(&ae) - 2000.0 / 30) > 0.1)
+		return 6;
+	/* And back in bright light the frame returns to 30 fps. */
+	for (int i = 0; i < 40; i++)
+		ae_update(&ae, AE_TARGET * 4);
+	if (ae.vblank.value != 76 || ae.exposure.value >= 2016 || ae.again.value != 128)
+		return 7;
+	/* Missing digital gain control: analogue gain still clamps at its cap. */
+	ov5675_ae(&ae, 1);
 	ae.dgain.present = 0;
 	for (int i = 0; i < 40; i++)
 		ae_update(&ae, 0);
-	return ae.again.value == 2047 && ae.exposure.value == 2012 ? 0 : 5;
+	if (ae.again.value != 1984 || ae.exposure.value != 4036)
+		return 8;
+	/* No VBLANK control: the frame stays at 30 fps (the previous behaviour, with the cap). */
+	ov5675_ae(&ae, 0);
+	for (int i = 0; i < 40; i++)
+		ae_update(&ae, 0);
+	if (ae.vblank.present || ae.exposure.value != 2016 || ae.again.value != 1984 ||
+	    ae.dgain.value != 4095)
+		return 9;
+	return 0;
+}
+
+/* The order of the exposure program: frame time, analogue gain to 4x, longer frame, gain. */
+static int test_exposure_program(void)
+{
+	struct ae_state ae;
+
+	ov5675_ae(&ae, 1);
+	ae_plan(&ae, 2016 * 3.0);	/* 3x: gain at 30 fps */
+	if (ae.exposure.value != 2016 || ae.again.value != 384 || ae.vblank.value != 76)
+		return 1;
+	ae_plan(&ae, 2016 * 6.0);	/* 6x: 4x gain, 1.5x frame */
+	if (ae.exposure.value != 3024 || ae.again.value != 512 ||
+	    ae.vblank.value != 3024 + 4 - 1944)
+		return 2;
+	ae_plan(&ae, 4036 * 10.0);	/* past the knee at 15 fps: analogue gain again */
+	if (ae.exposure.value != 4036 || ae.again.value != 1280 || ae.dgain.value != 1024)
+		return 3;
+	ae_plan(&ae, 4036 * 15.5 * 2.0);	/* past the analogue cap: digital gain */
+	if (ae.again.value != 1984 || ae.dgain.value != 2048)
+		return 4;
+	/* The default frame keeps the default VBLANK. */
+	if (ae_vblank_for(&ae, 2016) != 76 || ae_vblank_for(&ae, 100) != 76)
+		return 5;
+	/* A sensor whose analogue gain tops out below the knee stretches the frame at its max. */
+	ov5675_ae(&ae, 1);
+	ae.again.max = 384;	/* 3x */
+	ae_plan(&ae, 2016 * 4.5);
+	if (ae.again.value != 384 || ae.exposure.value != 3024)
+		return 6;
+	/* A VBLANK limit shortens the longest exposure. */
+	ov5675_ae(&ae, 1);
+	ae.vblank.max = 576;
+	ae_frame_limits(&ae, 1944);
+	if (ae.long_max != 1944 + 576 - 4)
+		return 7;
+	/* Inconsistent ranges disable the frame stretch rather than guessing. */
+	ov5675_ae(&ae, 1);
+	ae.exposure.max = 3000;	/* more than the current frame allows */
+	ae_frame_limits(&ae, 1944);
+	if (ae.vblank.present || ae.long_max != 3000)
+		return 8;
+	return 0;
+}
+
+/* Settings go to the driver in an order its exposure bound accepts. */
+static int test_apply_order(void)
+{
+	struct ae_state ae;
+
+	ov5675_ae(&ae, 1);
+	ae_set_log_reset();
+	if (ae_apply(&ae, 4036, 2096, 1984, 1024, 76) || strcmp(ae_set_log, "VEAD") != 0)
+		return 1;
+	ae_set_log_reset();
+	if (ae_apply(&ae, 2016, 76, 128, 1024, 2096) || strcmp(ae_set_log, "EVAD") != 0)
+		return 2;
+	ae_set_log_reset();
+	if (ae_apply(&ae, 1000, 76, 128, 1024, 76) || strcmp(ae_set_log, "EAD") != 0)
+		return 3;
+	return 0;
 }
 
 static int test_bayer_patterns(void)
@@ -550,6 +637,10 @@ int main(void)
 		return 10 + test_gamma();
 	if (test_auto_exposure())
 		return 20 + test_auto_exposure();
+	if (test_exposure_program())
+		return 150 + test_exposure_program();
+	if (test_apply_order())
+		return 160 + test_apply_order();
 	if (test_no_cfa_grid())
 		return 40 + test_no_cfa_grid();
 	if (test_cfa_phase_means())

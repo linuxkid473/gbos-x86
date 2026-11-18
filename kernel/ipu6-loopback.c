@@ -24,6 +24,16 @@
 #define AE_DEADBAND 0.15
 #define AE_MAX_STEP 1.6
 #define AE_INTERVAL 3	/* frames between updates; sensor settings lag about two frames */
+/*
+ * Exposure program limits from the module's Windows tuning (OV5678_0BF501T3_TGL.aiqb, AE
+ * exposure-program record 261): analogue gain at most 15.5x (also the top of its black-level
+ * calibration; the driver allows 2047/128 = 16x), and in automatic mode exposure up to
+ * 66.7 ms, i.e. the frame is stretched from 30 to 15 fps in low light. The 4x analogue gain
+ * reached before stretching the frame is our choice (keeps 30 fps in ordinary indoor light).
+ */
+#define AE_AGAIN_MAX_X 15.5
+#define AE_LONG_FRAME_X 2.0
+#define AE_LONG_KNEE_X 4.0
 
 static volatile sig_atomic_t running = 1;
 
@@ -697,14 +707,45 @@ static int convert_bayer_yuyv(const uint16_t *raw, unsigned int width,
 
 struct ae_control {
 	__u32 id;
-	int min, max, saved, value, present;
+	int min, max, saved, value, present, def;
 };
 
 struct ae_state {
 	int fd, enabled;
 	unsigned int frames;
-	struct ae_control exposure, again, dgain;
+	struct ae_control exposure, again, dgain, vblank;
+	/*
+	 * Exposure lines possible at the default frame length (base_max) and with the frame
+	 * stretched by VBLANK (long_max; equal to base_max without a VBLANK control), and the
+	 * lines the driver keeps between exposure and frame length (frame = height + vblank).
+	 */
+	int height, base_max, long_max, margin;
 };
+
+static int ae_again_max(const struct ae_state *ae)
+{
+	double cap = AE_AGAIN_MAX_X * ae->again.min;
+
+	return ae->again.max < cap ? ae->again.max : (int)(cap + 0.5);
+}
+
+/* VBLANK for an exposure: the default unless the exposure needs a longer frame. */
+static int ae_vblank_for(const struct ae_state *ae, int exposure)
+{
+	int vblank = exposure + ae->margin - ae->height;
+
+	if (exposure <= ae->base_max || vblank < ae->vblank.def)
+		return ae->vblank.def;
+	return vblank > ae->vblank.max ? ae->vblank.max : vblank;
+}
+
+/* Frame time in ms, assuming the default frame is 1/30 s (what the driver's mode sets). */
+static double ae_frame_ms(const struct ae_state *ae)
+{
+	if (!ae->vblank.present)
+		return 1000.0 / 30;
+	return 1000.0 / 30 * (ae->height + ae->vblank.value) / (ae->height + ae->vblank.def);
+}
 
 /* Brightness relative to minimum exposure and gains: lines x analogue x digital multiplier. */
 static double ae_total(const struct ae_state *ae)
@@ -724,17 +765,32 @@ static int ae_clamp(double value, int min, int max)
 	return (int)(value + 0.5);
 }
 
-/* Split a total into exposure time first (no added noise), then analogue, then digital gain. */
+/*
+ * Split a total into exposure time first (no added noise) up to the default frame, then
+ * analogue gain up to AE_LONG_KNEE_X, then a longer frame (VBLANK) up to long_max, then
+ * analogue gain up to its cap, then digital gain.
+ */
 static void ae_plan(struct ae_state *ae, double total)
 {
-	double rest;
+	int again_max = ae_again_max(ae);
+	double knee = AE_LONG_KNEE_X, exposure, rest;
 
-	ae->exposure.value = ae_clamp(total, ae->exposure.min, ae->exposure.max);
+	if (knee > (double)again_max / ae->again.min)
+		knee = (double)again_max / ae->again.min;
+	if (total <= ae->base_max)
+		exposure = total;
+	else if (total <= ae->base_max * knee)
+		exposure = ae->base_max;
+	else
+		exposure = total / knee;
+	ae->exposure.value = ae_clamp(exposure, ae->exposure.min, ae->long_max);
 	rest = total / ae->exposure.value;
-	ae->again.value = ae_clamp(rest * ae->again.min, ae->again.min, ae->again.max);
+	ae->again.value = ae_clamp(rest * ae->again.min, ae->again.min, again_max);
 	rest = rest * ae->again.min / ae->again.value;
 	if (ae->dgain.present)
 		ae->dgain.value = ae_clamp(rest * ae->dgain.min, ae->dgain.min, ae->dgain.max);
+	if (ae->vblank.present)
+		ae->vblank.value = ae_vblank_for(ae, ae->exposure.value);
 }
 
 /* Returns 1 when the plan changed, 0 when the scene is within the deadband or at a limit. */
@@ -742,6 +798,7 @@ static int ae_update(struct ae_state *ae, double mean_green)
 {
 	double ratio, before = ae_total(ae);
 	int exposure = ae->exposure.value, again = ae->again.value, dgain = ae->dgain.value;
+	int vblank = ae->vblank.value;
 
 	ratio = mean_green > 1.0 ? AE_TARGET / mean_green : AE_MAX_STEP;
 	if (ratio > 1.0 - AE_DEADBAND && ratio < 1.0 + AE_DEADBAND)
@@ -750,10 +807,10 @@ static int ae_update(struct ae_state *ae, double mean_green)
 	if (ratio < 1.0 / AE_MAX_STEP) ratio = 1.0 / AE_MAX_STEP;
 	ae_plan(ae, before * ratio);
 	return exposure != ae->exposure.value || again != ae->again.value ||
-	       dgain != ae->dgain.value;
+	       dgain != ae->dgain.value || vblank != ae->vblank.value;
 }
 
-static int ae_query(int fd, struct ae_control *c, __u32 id)
+static int ae_query_floor(int fd, struct ae_control *c, __u32 id, int floor)
 {
 	struct v4l2_queryctrl q = { .id = id };
 	struct v4l2_control v = { .id = id };
@@ -761,23 +818,79 @@ static int ae_query(int fd, struct ae_control *c, __u32 id)
 	c->id = id;
 	if (ioctl(fd, VIDIOC_QUERYCTRL, &q) || (q.flags & (V4L2_CTRL_FLAG_DISABLED |
 						   V4L2_CTRL_FLAG_READ_ONLY)) ||
-	    q.minimum <= 0 || q.maximum < q.minimum || ioctl(fd, VIDIOC_G_CTRL, &v))
+	    q.minimum < floor || q.maximum < q.minimum || ioctl(fd, VIDIOC_G_CTRL, &v))
 		return -1;
 	c->min = q.minimum;
 	c->max = q.maximum;
+	c->def = q.default_value;
 	c->saved = c->value = v.value;
 	c->present = 1;
 	return 0;
 }
 
+static int ae_query(int fd, struct ae_control *c, __u32 id)
+{
+	return ae_query_floor(fd, c, id, 1);
+}
+
+#ifdef CAMERA_BRIDGE_TEST
+/* Host tests (fd -1) record the order of control writes: E V A D. */
+static char ae_set_log[16];
+static void ae_set_log_reset(void) { ae_set_log[0] = 0; }
+#endif
+
 static int ae_set(int fd, const struct ae_control *c, int value)
 {
 	struct v4l2_control v = { .id = c->id, .value = value };
 
-	return c->present ? ioctl(fd, VIDIOC_S_CTRL, &v) : 0;
+	if (!c->present)
+		return 0;
+#ifdef CAMERA_BRIDGE_TEST
+	if (fd < 0) {
+		size_t n = strlen(ae_set_log);
+		if (n + 1 < sizeof(ae_set_log)) {
+			ae_set_log[n] = c->id == V4L2_CID_EXPOSURE ? 'E' : c->id == V4L2_CID_VBLANK ? 'V' :
+					c->id == V4L2_CID_ANALOGUE_GAIN ? 'A' : 'D';
+			ae_set_log[n + 1] = 0;
+		}
+		return 0;
+	}
+#endif
+	return ioctl(fd, VIDIOC_S_CTRL, &v);
 }
 
-static void ae_init(struct ae_state *ae, int fd)
+/*
+ * Exposure limits for the default and the stretched frame. The driver bounds exposure by
+ * the current frame (height + vblank - margin), so the margin is measured from the
+ * current VBLANK and exposure maximum. Without a usable VBLANK the frame stays fixed.
+ */
+static void ae_frame_limits(struct ae_state *ae, int height)
+{
+	ae->height = height;
+	ae->base_max = ae->long_max = ae->exposure.max;
+	ae->margin = 0;
+	if (!ae->vblank.present || height <= 0)
+		goto fixed;
+	if (ae->vblank.def < ae->vblank.min || ae->vblank.def > ae->vblank.max)
+		goto fixed;
+	ae->margin = height + ae->vblank.value - ae->exposure.max;
+	ae->base_max = height + ae->vblank.def - ae->margin;
+	if (ae->margin < 0 || ae->base_max < ae->exposure.min)
+		goto fixed;
+	double frame = AE_LONG_FRAME_X * (height + ae->vblank.def);
+	ae->long_max = (int)frame - ae->margin;
+	if (ae->long_max > height + ae->vblank.max - ae->margin)
+		ae->long_max = height + ae->vblank.max - ae->margin;
+	if (ae->long_max < ae->base_max)
+		ae->long_max = ae->base_max;
+	return;
+fixed:
+	ae->vblank.present = 0;
+	ae->margin = 0;
+	ae->base_max = ae->long_max = ae->exposure.max;
+}
+
+static void ae_init(struct ae_state *ae, int fd, int height)
 {
 	memset(ae, 0, sizeof(*ae));
 	ae->fd = fd;
@@ -787,11 +900,51 @@ static void ae_init(struct ae_state *ae, int fd)
 		return;
 	}
 	(void)ae_query(fd, &ae->dgain, V4L2_CID_DIGITAL_GAIN);
+	(void)ae_query_floor(fd, &ae->vblank, V4L2_CID_VBLANK, 0);
+	ae_frame_limits(ae, height);
 	ae->enabled = 1;
-	printf("ae: exposure %d..%d (now %d) again %d..%d (now %d) dgain %s %d..%d (now %d)\n",
+	printf("ae: exposure %d..%d (now %d) again %d..%d (now %d, cap %d) dgain %s %d..%d (now %d)\n",
 	       ae->exposure.min, ae->exposure.max, ae->exposure.value,
-	       ae->again.min, ae->again.max, ae->again.value,
+	       ae->again.min, ae->again.max, ae->again.value, ae_again_max(ae),
 	       ae->dgain.present ? "on" : "absent", ae->dgain.min, ae->dgain.max, ae->dgain.value);
+	if (ae->vblank.present)
+		printf("ae: vblank %d..%d (default %d, now %d): exposure up to %d lines at 30 fps, "
+		       "%d lines at %.1f fps above %.1fx analogue gain\n",
+		       ae->vblank.min, ae->vblank.max, ae->vblank.def, ae->vblank.value,
+		       ae->base_max, ae->long_max, 30.0 / AE_LONG_FRAME_X, AE_LONG_KNEE_X);
+	else
+		printf("ae: no usable VBLANK control; frame length fixed\n");
+}
+
+/*
+ * Apply settings in an order the driver accepts: it bounds exposure by the current frame,
+ * so a longer frame goes in before a longer exposure and a shorter one after.
+ */
+static int ae_apply(const struct ae_state *ae, int exposure, int vblank, int again, int dgain,
+		    int current_vblank)
+{
+	int stretch = ae->vblank.present && vblank > current_vblank;
+
+	if (stretch && ae_set(ae->fd, &ae->vblank, vblank))
+		return -1;
+	if (ae_set(ae->fd, &ae->exposure, exposure))
+		return -1;
+	if (!stretch && ae->vblank.present && vblank != current_vblank &&
+	    ae_set(ae->fd, &ae->vblank, vblank))
+		return -1;
+	if (ae_set(ae->fd, &ae->again, again) || ae_set(ae->fd, &ae->dgain, dgain))
+		return -1;
+	return 0;
+}
+
+/* Gain multiple applied on the sensor (analogue x digital); drives lens-shading strength. */
+static double ae_sensor_gain(const struct ae_state *ae)
+{
+	double gain = (double)ae->again.value / ae->again.min;
+
+	if (ae->dgain.present)
+		gain *= (double)ae->dgain.value / ae->dgain.min;
+	return gain < 1.0 ? 1.0 : gain;
 }
 
 static void ae_frame(struct ae_state *ae, double mean_green)
@@ -799,17 +952,17 @@ static void ae_frame(struct ae_state *ae, double mean_green)
 	if (!ae->enabled)
 		return;
 	ae->frames++;
-	sensor_total_gain = ae_total(ae) / ae->exposure.max;	/* gain multiple at full exposure */
-	if (sensor_total_gain < 1.0)
-		sensor_total_gain = 1.0;
+	sensor_total_gain = ae_sensor_gain(ae);
 	if (ae->frames % 150 == 0)
-		printf("ae: mean=%.0f target=%.0f exposure=%d again=%d dgain=%d\n", mean_green,
-		       AE_TARGET, ae->exposure.value, ae->again.value, ae->dgain.value);
+		printf("ae: mean=%.0f target=%.0f exposure=%d again=%d dgain=%d vblank=%d "
+		       "(%.1f ms frame, %.1fx gain)\n", mean_green, AE_TARGET, ae->exposure.value,
+		       ae->again.value, ae->dgain.value, ae->vblank.value, ae_frame_ms(ae),
+		       sensor_total_gain);
+	int current_vblank = ae->vblank.value;
 	if (ae->frames % AE_INTERVAL || !ae_update(ae, mean_green))
 		return;
-	if (ae_set(ae->fd, &ae->exposure, ae->exposure.value) ||
-	    ae_set(ae->fd, &ae->again, ae->again.value) ||
-	    ae_set(ae->fd, &ae->dgain, ae->dgain.value)) {
+	if (ae_apply(ae, ae->exposure.value, ae->vblank.value, ae->again.value, ae->dgain.value,
+		     current_vblank)) {
 		perror("ae: set sensor control; auto-exposure off");
 		ae->enabled = 0;
 	}
@@ -819,9 +972,8 @@ static void ae_restore(struct ae_state *ae)
 {
 	if (!ae->exposure.present || !ae->again.present)
 		return;
-	if (ae_set(ae->fd, &ae->exposure, ae->exposure.saved) ||
-	    ae_set(ae->fd, &ae->again, ae->again.saved) ||
-	    ae_set(ae->fd, &ae->dgain, ae->dgain.saved))
+	if (ae_apply(ae, ae->exposure.saved, ae->vblank.saved, ae->again.saved, ae->dgain.saved,
+		     ae->vblank.value))
 		perror("ae: restore sensor controls");
 }
 
@@ -1000,7 +1152,7 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev)
 		perror("prime V4L2 loopback");
 		goto done;
 	}
-	ae_init(&ae, sfd);
+	ae_init(&ae, sfd, (int)sensor.format.height);
 	signal(SIGINT, stop_bridge);
 	signal(SIGTERM, stop_bridge);
 	printf("bridge active: %ux%u Bayer to %ux%u YUYV; sensor remains streaming until stop\n",
