@@ -26,6 +26,17 @@ if [ -f "$G/gbos.cfg" ] && grep -q '^MODE=live' "$G/gbos.cfg" 2>/dev/null; then
   sync 2>/dev/null || true
 fi
 
+# The gbos FAT volume (the stick, or the NVMe install's GBOSSYS): report the previous shutdown and run a read-only fsck.fat when it was not
+# clean (fat-check.txt), and start the watcher that remounts it read-only at init's last shutdown step, so the next boot finds it clean.
+# usb/stick_fat.sh; gbos.cfg FAT_FSCK=auto|1|0, FAT_CLEAR_DIRTY=1|0, FAT_SHUTDOWN_RO=1|0, FAT_SHUTDOWN_SYSRQ=1|0. Reports: fat-check.txt,
+# fat-shutdown.txt (armed now; failures appended at shutdown).
+if [ -f $G/stick_fat.sh ] && . $G/stick_fat.sh; then
+  gbos_fat_boot_check "$DEV" /gbos "$L"
+  gbos_fat_start_shutdown_watch "$DEV" /gbos "$L"
+else
+  log "hook: fat: gbos/stick_fat.sh missing: no FAT check, no read-only remount at shutdown"
+fi
+
 # Library patches. patched/MANIFEST (written by tools/port_build.py) has one line per patch: kind, the path in the Android root
 # (/new/...), the sha256 of the exact original the patch was made from, and the patched file (relative to gbos/). A patch is
 # bound only over a file with that hash, so a new Google build never gets a stale patch: the line says "NOT patched" and shows
@@ -527,9 +538,14 @@ else
   log "hook: verbose diagnostics disabled (DEBUG_LOGS=0)"
 fi
 
-# Fake ChromeOS boot disk for the boot HAL: misc + vbmeta_a/vbmeta_b with cgpt slot attributes.
+# Fake ChromeOS boot disk for the boot HAL: misc + vbmeta_a/vbmeta_b with cgpt slot attributes. It runs on a RAM copy (8 MB): a read-write
+# loop on the file itself kept it open for writing all boot, so the read-only remount at shutdown (stick_fat.sh) always failed with EBUSY
+# and the volume stayed dirty (HANDOFF.md 2026-11-18). The boot HAL's writes are not kept, as on a freshly written stick.
+# BOOTDISK_RAM=0 loops the file on the volume (the shutdown watcher then detaches it before the remount).
 if [ -f $G/bootdisk.img ]; then
-  losetup -P /dev/loop6 $G/bootdisk.img; sleep 1; mdev -s
+  _bdi=$G/bootdisk.img
+  [ "${BOOTDISK_RAM:-1}" != 0 ] && mkdir -p /tmp && cp $G/bootdisk.img /tmp/bootdisk.img 2>/dev/null && _bdi=/tmp/bootdisk.img
+  losetup -P /dev/loop6 $_bdi; sleep 1; mdev -s
   mknod -m 600 /dev/block/loop6 b 7 6 2>/dev/null
   i=1
   for n in misc vbmeta_a vbmeta_b; do
@@ -540,7 +556,7 @@ if [ -f $G/bootdisk.img ]; then
   for b in boot_a boot_b vendor_boot_a vendor_boot_b init_boot_a init_boot_b; do
     ln -sf /dev/block/loop6p1 /dev/block/by-name/$b
   done
-  log "hook: bootdisk on loop6: $(ls /sys/class/block | grep loop6p | tr '\n' ' ')"
+  log "hook: bootdisk on loop6 ($_bdi): $(ls /sys/class/block | grep loop6p | tr '\n' ' ')"
 fi
 
 # Mask SetupWizard APK directories so Android skips initial setup and launches Desktop directly

@@ -11,6 +11,12 @@
 
 I=$G/installer
 tool() { $I/lib/ld-musl-x86_64.so.1 --library-path $I/lib $I/bin/"$@"; }
+# fat_off poweroff|reboot: leave the stick's FAT clean first (usb/stick_fat.sh: stop stage0's kmsg copier, sync, remount /gbos read-only;
+# without it every power-off from here left the volume dirty). Nothing reaches the stick's logs after this.
+fat_off() { [ -f $G/stick_fat.sh ] && . $G/stick_fat.sh && gbos_fat_release "$DEV" /gbos "$L"; "$1" -f; }
+# The same read-only FAT check as a normal boot (hook.sh does not run in install mode): logs/boot-N/fat-check.txt, and a stick that is
+# dirty only because of an earlier power-off gets its flag cleared, otherwise fat_off's read-only remount cannot make it clean.
+[ -f $G/stick_fat.sh ] && . $G/stick_fat.sh && gbos_fat_boot_check "$DEV" /gbos "$L"
 TTY=/dev/tty1
 SPEECH=0; [ -f /a11y/active ] && SPEECH=1   # stage0's screen reader (usb/a11y/) is running: keep the text short and speakable
 say() {
@@ -24,7 +30,7 @@ halt_here() {
   say "$1"
   ask "Press Enter to reboot (or turn off power now): "
   sync
-  reboot -f
+  fat_off reboot
 }
 # save_logs MOUNTED_GBOS_DIR [BOOTS]: copy the installed system's last BOOTS (default 3) boot-N log dirs to
 # this boot's log dir on the stick (gbos/logs/boot-N/nvme-logs). A file FAT can't read in full (cluster chain
@@ -88,7 +94,7 @@ done
 # Cache the kernel in RAM and unmount the EFI partition so it does not keep the target disk busy
 mkdir -p /tmp && cp "$KERNEL" /tmp/BOOTX64.EFI && KERNEL=/tmp/BOOTX64.EFI
 umount /mnt/stickefi 2>/dev/null || true
-FILES="super.img super.layout hook.sh aidiag.sh native_zygote.sh early_patch.sh sensor_vendor_overlay.sh sensor_trial_diag.sh sensor_rotation_policy.sh hwdetect.sh sensordiag.sh mask_vendor_modules.sh apex_patch.sh crossystem bootdisk.img libkm_compat.so system_ext_manifest.xml soft_gk"
+FILES="super.img super.layout hook.sh stick_fat.sh aidiag.sh native_zygote.sh early_patch.sh sensor_vendor_overlay.sh sensor_trial_diag.sh sensor_rotation_policy.sh hwdetect.sh sensordiag.sh mask_vendor_modules.sh apex_patch.sh crossystem bootdisk.img libkm_compat.so system_ext_manifest.xml soft_gk"
 [ -f "$G/gbos_fp" ] && FILES="$FILES gbos_fp"
 DIRS="firmware patched audio installer kmod modules surface ksu"
 [ ! -d "$G/sensors" ] || DIRS="$DIRS sensors"
@@ -139,7 +145,7 @@ if [ "$ACTION" = logs ]; then
   say "Logs saved. Remove the USB stick and turn the laptop back on."
   log "install: logs saved"; sync
   ask "Press Enter to power off. "
-  poweroff -f
+  fat_off poweroff
 fi
 if [ "${ACTION:-install}" = update ]; then
   NSYS=$(findfs LABEL=GBOSSYS 2>/dev/null)
@@ -182,7 +188,7 @@ if [ "${ACTION:-install}" = update ]; then
   say "Update done. Remove the USB stick and turn the laptop back on."
   log "install: update complete"; sync
   ask "Press Enter to power off. "
-  poweroff -f
+  fat_off poweroff
 fi
 
 # Target: an internal disk, never the stick: an NVMe namespace, eMMC or a SATA disk. eMMC needs its host controller driver (sdhci-pci). The
@@ -368,7 +374,7 @@ if [ -n "$CURRENT_PARTS" ]; then
       sync
       say "Rebooting into gbOS86 Live Desktop..."
       sleep 2
-      reboot -f
+      fat_off reboot
       ;;
     *) halt_here "Cancelled. Nothing was written to $TD.";;
   esac
@@ -736,11 +742,11 @@ case "$REPLY" in
   2|poweroff|off)
     say "Powering off..."
     sync; sleep 1
-    poweroff -f
+    fat_off poweroff
     ;;
   *)
     say "Rebooting into gbOS86..."
     sync; sleep 2
-    reboot -f
+    fat_off reboot
     ;;
 esac

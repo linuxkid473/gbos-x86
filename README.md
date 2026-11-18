@@ -280,6 +280,7 @@ driver inside Google's userspace under QEMU.
 |---|---|
 | `usb/stage0_init.sh` | stage0: volume detection, logging, partition mounts, switch_root |
 | `usb/hook.sh` | Android workarounds, run by stage0 before switch_root; writes `gbos.rc` (init services) |
+| `usb/stick_fat.sh` | Sourced by `hook.sh`/`install.sh`: FAT health check at boot (`fat-check.txt`), read-only remount of the gbos volume at shutdown |
 | `usb/early_patch.sh` | Sourced from `gbos.cfg`; binds the patched libz/libcrypto before stage0's first `dmctl` |
 | `usb/install.sh` | NVMe/eMMC/SATA installer and updater (`MODE=install`) |
 | `usb/apex_patch.sh` | binds the patched libcrypto over the APEX copies (run from init.rc) |
@@ -385,7 +386,9 @@ During installation, live progress bars indicate system image and driver/firmwar
 ### Debugging workflow
 The system writes logs to its own `GBOSSYS` (or `GBOS`) partition. To read them, boot the stick, choose
 menu **2**, then **3 (Only save its logs)** (or 1 to update too), and read `gbos/logs/boot-N/nvme-logs/` on the stick from a computer. Each boot dir has
-`kmsg.log`, `stage0-dmesg.txt`, rotated `logcat.txt*`, `crash.txt`, `hw.txt`, `audio.txt`, and `pstore-prev/`.
+`kmsg.log`, `stage0-dmesg.txt`, rotated `logcat.txt*`, `crash.txt`, `hw.txt`, `audio.txt`, `fat-check.txt` (was the previous shutdown clean,
+how the previous boot's shutdown step ended, a read-only `fsck.fat -n` when it was not clean, see `usb/stick_fat.sh`), `fat-shutdown.txt`
+(the shutdown watcher: armed at boot; failures, with what was still writing, appended at shutdown), and `pstore-prev/`.
 FAT has no journal: always shut down from Android's power menu, not the physical power button.
 
 ### Display size
