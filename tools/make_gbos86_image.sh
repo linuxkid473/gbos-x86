@@ -151,7 +151,8 @@ if [ "${GBOS_IPU6_CAMERA_BRIDGE:-0}" = 1 ]; then
       "$G/installer/bin/ipu6-loopback" \
       "$G/kmod/v4l2loopback.ko" \
       "$G/surface/fake_uvc_desc.bin" \
-      "$G/surface/latitude_fake_uvc_desc.bin"; do
+      "$G/surface/latitude_fake_uvc_desc.bin" \
+      "$G/surface/latitude_rear_fake_uvc_desc.bin"; do
     [ -s "$payload" ] || { echo "missing IPU6 bridge test payload: $payload" >&2; exit 1; }
   done
   for setting in CAMERA_BRIDGE FINGERPRINT; do

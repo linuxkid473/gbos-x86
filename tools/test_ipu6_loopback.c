@@ -1,5 +1,6 @@
 #define CAMERA_BRIDGE_TEST
 #include "../kernel/ipu6-loopback.c"
+#include <stdarg.h>
 
 static int test_gamma(void)
 {
@@ -538,6 +539,213 @@ static int test_wb_dark_frame(void)
 	return gains_dark[0] == gains_lit[0] && gains_dark[2] == gains_lit[2] ? 0 : 3;
 }
 
+/* Front and rear profiles: entity names, CFA kind and calibration file prefixes. */
+static int test_sensor_profiles(void)
+{
+	const struct sensor_profile *front = find_sensor_profile("ov5675");
+	const struct sensor_profile *rear = find_sensor_profile("ov8856");
+
+	if (!front || !front->rgbir || strcmp(front->cal_prefix, "ov5678"))
+		return 1;
+	if (!rear || rear->rgbir || strcmp(rear->cal_prefix, "ov8856"))
+		return 2;
+	if (find_sensor_profile("ov13b10") || find_sensor_profile("ov56") || find_sensor_profile(""))
+		return 3;
+	/* Without --sensor the bridge must still be the front camera. */
+	return &sensor_profiles[0] == front ? 0 : 4;
+}
+
+static int cfa_has_ir(void)
+{
+	for (unsigned int y = 0; y < 4; y++)
+		for (unsigned int x = 0; x < 4; x++)
+			if (channel_at(x, y) == CFA_IR)
+				return 1;
+	return 0;
+}
+
+static int test_select_cfa(void)
+{
+	const struct sensor_profile *front = find_sensor_profile("ov5675");
+	const struct sensor_profile *rear = find_sensor_profile("ov8856");
+
+	/* Front: the measured RGB-IR map, only for the GRBG10 code it was measured with. */
+	if (select_cfa(front, MEDIA_BUS_FMT_SGRBG10_1X10) || channel_at(1, 0) != CFA_IR ||
+	    channel_at(0, 1) != 0 || channel_at(2, 1) != 2)
+		return 1;
+	if (select_cfa(front, MEDIA_BUS_FMT_SRGGB10_1X10) == 0)
+		return 2;
+	/* Rear: GRBG Bayer (Gr R / B Gb) and never an IR site. */
+	if (select_cfa(rear, MEDIA_BUS_FMT_SGRBG10_1X10) || cfa_has_ir() ||
+	    channel_at(0, 0) != 1 || channel_at(1, 0) != 0 || channel_at(0, 1) != 2 ||
+	    channel_at(1, 1) != 1 || channel_at(3, 2) != 0)
+		return 3;
+	/* A flipped OV8856 reports BGGR; the Bayer order follows the code. */
+	if (select_cfa(rear, MEDIA_BUS_FMT_SBGGR10_1X10) || cfa_has_ir() || channel_at(0, 0) != 2)
+		return 4;
+	if (select_cfa(rear, 0x3011) == 0)	/* not a 10-bit Bayer code */
+		return 5;
+	return 0;
+}
+
+static int parse(struct bridge_options *o, int argc, ...)
+{
+	char *argv[12] = { "ipu6-loopback" };
+	va_list ap;
+
+	va_start(ap, argc);
+	for (int i = 1; i < argc && i < 12; i++)
+		argv[i] = va_arg(ap, char *);
+	va_end(ap);
+	return parse_bridge_args(argc, argv, o);
+}
+
+static int test_parse_args(void)
+{
+	struct bridge_options o;
+
+	/* The front launcher's existing command lines keep their meaning. */
+	if (parse(&o, 3, "/dev/media0", "/dev/video64") || strcmp(o.profile->entity, "ov5675") ||
+	    o.rotate180 || o.calibration || strcmp(o.output, "/dev/video64"))
+		return 1;
+	if (parse(&o, 4, "/dev/media0", "/dev/video64", "/cal") || strcmp(o.calibration, "/cal") ||
+	    strcmp(o.profile->entity, "ov5675"))
+		return 2;
+	if (parse(&o, 8, "--sensor", "ov8856", "--rotate", "180", "/dev/media0", "/dev/video65", "/cal") ||
+	    strcmp(o.profile->entity, "ov8856") || !o.rotate180 || strcmp(o.media, "/dev/media0") ||
+	    strcmp(o.output, "/dev/video65") || strcmp(o.calibration, "/cal"))
+		return 3;
+	if (parse(&o, 5, "--rotate", "0", "/dev/media0", "/dev/video65") || o.rotate180)
+		return 4;
+	if (!parse(&o, 5, "--sensor", "imx258", "/dev/media0", "/dev/video65") ||
+	    !parse(&o, 5, "--rotate", "90", "/dev/media0", "/dev/video65") ||
+	    !parse(&o, 5, "--mirror", "1", "/dev/media0", "/dev/video65") ||
+	    !parse(&o, 4, "--sensor", "ov8856", "/dev/media0") ||
+	    !parse(&o, 2, "/dev/media0") ||
+	    !parse(&o, 6, "/dev/media0", "/dev/video65", "/cal", "extra", "more"))
+		return 5;
+	return 0;
+}
+
+/* OV8856 at 3280x2464@30 (ov8856.c): exposure 6..2482, analogue 128..2047, digital 0..4095 (1024 = 1x). */
+static int test_ov8856_ae(void)
+{
+	struct ae_state ae;
+	struct v4l2_queryctrl q;
+
+	memset(&ae, 0, sizeof(ae));
+	ae.fd = -1;
+	ae.enabled = 1;
+	q = (struct v4l2_queryctrl){ .id = V4L2_CID_EXPOSURE, .minimum = 6, .maximum = 2482, .default_value = 2482 };
+	if (ae_control_from_query(&ae.exposure, &q, 2482))
+		return 1;
+	q = (struct v4l2_queryctrl){ .id = V4L2_CID_ANALOGUE_GAIN, .minimum = 128, .maximum = 2047, .default_value = 128 };
+	if (ae_control_from_query(&ae.again, &q, 128))
+		return 2;
+	q = (struct v4l2_queryctrl){ .id = V4L2_CID_DIGITAL_GAIN, .minimum = 0, .maximum = 4095, .default_value = 1024 };
+	if (ae_control_from_query(&ae.dgain, &q, 1024) || ae.dgain.min != 1024 || ae.dgain.saved != 1024)
+		return 3;
+	/* Only a digital gain may borrow its default as unity: a zero exposure minimum is refused. */
+	struct ae_control c;
+	q = (struct v4l2_queryctrl){ .id = V4L2_CID_EXPOSURE, .minimum = 0, .maximum = 2482, .default_value = 100 };
+	if (ae_control_from_query(&c, &q, 100) == 0)
+		return 4;
+	q = (struct v4l2_queryctrl){ .id = V4L2_CID_DIGITAL_GAIN, .minimum = 0, .maximum = 4095, .default_value = 0 };
+	if (ae_control_from_query(&c, &q, 0) == 0)
+		return 5;
+	q = (struct v4l2_queryctrl){ .id = V4L2_CID_ANALOGUE_GAIN, .minimum = 128, .maximum = 2047,
+				     .flags = V4L2_CTRL_FLAG_READ_ONLY };
+	if (ae_control_from_query(&c, &q, 128) == 0)
+		return 6;
+	/* The front's ranges (digital 1024..4095) are taken as they are. */
+	q = (struct v4l2_queryctrl){ .id = V4L2_CID_DIGITAL_GAIN, .minimum = 1024, .maximum = 4095, .default_value = 1024 };
+	if (ae_control_from_query(&c, &q, 1024) || c.min != 1024)
+		return 7;
+	/* Dark: exposure, then analogue gain, then digital gain up to its maximum; never below 1x. */
+	for (int i = 0; i < 40; i++)
+		ae_update(&ae, 0);
+	if (ae.exposure.value != 2482 || ae.again.value != 2047 || ae.dgain.value != 4095)
+		return 8;
+	/* Bright: digital and analogue gain back to 1x before exposure time shortens. */
+	for (int i = 0; i < 40; i++)
+		ae_update(&ae, AE_TARGET * 4);
+	if (ae.dgain.value != 1024 || ae.again.value != 128 || ae.exposure.value >= 2482 ||
+	    ae.exposure.value < 6)
+		return 9;
+	return 0;
+}
+
+/* --rotate 180 turns the output: a bright top-left corner ends up bottom-right. */
+static void bright_top_left(unsigned int x, unsigned int y, unsigned int rgb[3])
+{
+	rgb[0] = rgb[1] = rgb[2] = x < 32 && y < 32 ? 700 : 60;
+}
+
+static int test_rotation(void)
+{
+	static uint16_t frame[64 * 64];
+	static unsigned char out[OUT_FRAME_BYTES];
+	int saved_r = chroma_radius, tl[2], br[2];
+
+	set_bayer_pattern(MEDIA_BUS_FMT_SGRBG10_1X10);
+	fill_bayer(frame, 64, 64, bright_top_left);
+	chroma_radius = 0;
+	for (int i = 0; i < 2; i++) {
+		output_rotate180 = i;
+		tnr_reset();
+		if (convert_bayer_yuyv(frame, 64, 64, 128, out, sizeof(out), NULL))
+			return 1;
+		tl[i] = out[(40 * OUT_WIDTH + 40) * 2];
+		br[i] = out[((OUT_HEIGHT - 40) * OUT_WIDTH + OUT_WIDTH - 40) * 2];
+	}
+	output_rotate180 = 0;
+	chroma_radius = saved_r;
+	if (tl[0] < br[0] + 60)
+		return 2;
+	/* Rotated: the same two levels, swapped. */
+	return abs(tl[1] - br[0]) <= 2 && abs(br[1] - tl[0]) <= 2 ? 0 : 3;
+}
+
+/* Each bridge loads its own sensor's calibration files from the shared directory. */
+static int test_calibration_prefix(void)
+{
+	char dir[] = "/tmp/cal.XXXXXX", path[256];
+	FILE *f;
+
+	if (!mkdtemp(dir))
+		return 1;
+	snprintf(path, sizeof(path), "%s/ov5678_ccm.txt", dir);
+	if (!(f = fopen(path, "w")))
+		return 2;
+	fputs("1 0.90 0.45 0.44 0.41 1.8 -0.4 -0.4 -0.3 2.0 -0.7 -0.5 -0.8 2.3\n"
+	      "2 0.50 0.65 0.31 0.33 1.5 -0.5 0.0 -0.1 1.4 -0.3 0.0 -0.6 1.6\n"
+	      "3 0.70 0.50 0.40 0.40 2.0 -1.0 0.0 -0.2 1.5 -0.3 -0.2 -1.0 2.2\n", f);
+	fclose(f);
+	snprintf(path, sizeof(path), "%s/ov8856_ccm.txt", dir);
+	if (!(f = fopen(path, "w")))
+		return 3;
+	fputs("19 0.55 0.70 0.31 0.33 1.6 -0.5 -0.1 -0.2 1.5 -0.3 0.0 -0.5 1.5\n"
+	      "0 1.10 0.35 0.46 0.41 1.7 -0.5 -0.2 -0.3 1.8 -0.5 -0.1 -0.9 2.0\n", f);
+	fclose(f);
+	snprintf(path, sizeof(path), "%s/ov8856_lsc.txt", dir);
+	if (write_lsc_table(path, 6.0))
+		return 4;
+
+	int result = 0;
+	load_calibration(dir, "ov8856");
+	if (ccm_count != 2 || ccm_table[0].id != 19 || ccm_table[1].id != 0 || lsc_count != 2)
+		result = 5;
+	load_calibration(dir, "ov5678");	/* front: its matrices, and no shading file here */
+	if (!result && (ccm_count != 3 || lsc_count != 0))
+		result = 6;
+	snprintf(path, sizeof(path), "%s/ov5678_ccm.txt", dir); unlink(path);
+	snprintf(path, sizeof(path), "%s/ov8856_ccm.txt", dir); unlink(path);
+	snprintf(path, sizeof(path), "%s/ov8856_lsc.txt", dir); unlink(path);
+	rmdir(dir);
+	ccm_count = 0; ccm_active = 0; lsc_count = 0; lsc_active = 0;
+	return result;
+}
+
 int main(void)
 {
 	(void)capture_to_loopback;
@@ -575,6 +783,18 @@ int main(void)
 		return 130 + test_wb_locus();
 	if (test_wb_dark_frame())
 		return 140 + test_wb_dark_frame();
+	if (test_sensor_profiles())
+		return 150 + test_sensor_profiles();
+	if (test_select_cfa())
+		return 160 + test_select_cfa();
+	if (test_parse_args())
+		return 170 + test_parse_args();
+	if (test_ov8856_ae())
+		return 180 + test_ov8856_ae();
+	if (test_rotation())
+		return 190 + test_rotation();
+	if (test_calibration_prefix())
+		return 200 + test_calibration_prefix();
 	for (unsigned int y = 0; y < 8; y++)
 		for (unsigned int x = 0; x < 8; x++)
 			raw[y * 8 + x] = (uint16_t)(x + y * 8);
