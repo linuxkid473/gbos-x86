@@ -386,8 +386,9 @@ During installation, live progress bars indicate system image and driver/firmwar
 ### Debugging workflow
 The system writes logs to its own `GBOSSYS` (or `GBOS`) partition. To read them, boot the stick, choose
 menu **2**, then **3 (Only save its logs)** (or 1 to update too), and read `gbos/logs/boot-N/nvme-logs/` on the stick from a computer. Each boot dir has
-`kmsg.log`, `stage0-dmesg.txt`, rotated `logcat.txt*`, `crash.txt`, `hw.txt`, `audio.txt`, `fat-check.txt` (was the previous shutdown clean;
-a read-only `fsck.fat -n` when it was not, see `usb/stick_fat.sh`), and `pstore-prev/`.
+`kmsg.log`, `stage0-dmesg.txt`, rotated `logcat.txt*`, `crash.txt`, `hw.txt`, `audio.txt`, `fat-check.txt` (was the previous shutdown clean,
+how the previous boot's shutdown step ended, a read-only `fsck.fat -n` when it was not clean, see `usb/stick_fat.sh`), `fat-shutdown.txt`
+(the shutdown watcher: armed at boot; failures, with what was still writing, appended at shutdown), and `pstore-prev/`.
 FAT has no journal: always shut down from Android's power menu, not the physical power button.
 
 ### Display size

@@ -13,7 +13,7 @@ I=$G/installer
 tool() { $I/lib/ld-musl-x86_64.so.1 --library-path $I/lib $I/bin/"$@"; }
 # fat_off poweroff|reboot: leave the stick's FAT clean first (usb/stick_fat.sh: stop stage0's kmsg copier, sync, remount /gbos read-only;
 # without it every power-off from here left the volume dirty). Nothing reaches the stick's logs after this.
-fat_off() { [ -f $G/stick_fat.sh ] && . $G/stick_fat.sh && gbos_fat_release "$DEV" /gbos "$L/install.log"; "$1" -f; }
+fat_off() { [ -f $G/stick_fat.sh ] && . $G/stick_fat.sh && gbos_fat_release "$DEV" /gbos "$L"; "$1" -f; }
 # The same read-only FAT check as a normal boot (hook.sh does not run in install mode): logs/boot-N/fat-check.txt, and a stick that is
 # dirty only because of an earlier power-off gets its flag cleared, otherwise fat_off's read-only remount cannot make it clean.
 [ -f $G/stick_fat.sh ] && . $G/stick_fat.sh && gbos_fat_boot_check "$DEV" /gbos "$L"
