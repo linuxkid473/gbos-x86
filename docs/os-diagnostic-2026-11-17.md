@@ -146,9 +146,10 @@ i915 (AGENTS.md).
 | P3 | `gbos_coldplug` sleeps 1 s only after a pass that loaded new modules (saves ~1.1 s in the hook's second coldplug). The 4-pass cap and the settle after productive passes are unchanged. | `test_boot_tuning.sh` (settling, empty, capped) |
 
 Not implemented:
-- **S1** (clean stick unmount): Android init has no late-shutdown hook for a filesystem it did not mount, and a
-  read-only `fsck.fat` report needs dosfstools on the stick, which means a download (needs approval). The stick
-  is already mounted with `flush` and synced every 5 s.
+- **S1** (clean stick unmount): implemented 2026-11-18 in `usb/stick_fat.sh` (not with an `on shutdown` action, which
+  runs before init stops the log writers: a watcher started by `hook.sh` remounts the volume read-only at init's
+  `sync() before umount` step, and `hook.sh` logs a `FAT-CHECK` line plus `fat-check.txt` with a read-only
+  `fsck.fat -n`). See HANDOFF.md 2026-11-18.
 - **P4** (quiet kernel console): needs a kernel rebuild, because the command line is embedded.
 - **S2, S3, S6, P6**: investigations, not quick changes.
 
