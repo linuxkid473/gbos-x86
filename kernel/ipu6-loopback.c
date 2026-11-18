@@ -90,6 +90,58 @@ static int set_bayer_pattern(__u32 code)
 	return -1;
 }
 
+/*
+ * The Latitude 7320's two IPU6 sensors. Each runs its own bridge process (front on
+ * /dev/video64, rear on /dev/video65). entity is the media-graph name prefix the kernel
+ * driver registers; cal_prefix names the stick's calibration files (<prefix>_ccm.txt,
+ * <prefix>_lsc.txt), extracted from that module's Windows tuning file.
+ */
+struct sensor_profile {
+	const char *entity, *label, *cal_prefix;
+	int rgbir;	/* 1: the measured RGB-IR 4x4 map; 0: plain Bayer from the bus code */
+};
+
+static const struct sensor_profile sensor_profiles[] = {
+	/* Front: an RGB-IR OV5678 (module 0BF501T3) bound by the ov5675 driver. */
+	{ "ov5675", "front OV5678 (ov5675 driver)", "ov5678", 1 },
+	/* Rear: OV8856 (module 0BA801T3), GRBG10 Bayer at 3280x2464 (HANDOFF 2026-11-17). */
+	{ "ov8856", "rear OV8856", "ov8856", 0 },
+};
+
+static const struct sensor_profile *find_sensor_profile(const char *entity)
+{
+	for (size_t i = 0; i < sizeof(sensor_profiles) / sizeof(sensor_profiles[0]); i++)
+		if (!strcmp(sensor_profiles[i].entity, entity))
+			return &sensor_profiles[i];
+	return NULL;
+}
+
+/*
+ * Pick the colour-filter layout for this sensor and its reported bus code. The RGB-IR
+ * layout was measured relative to the orientation the driver reports as GRBG10; a flip
+ * would move the sites, so any other code is refused there. Bayer sensors take the 2x2
+ * order from the bus code (it follows the sensor's flip settings).
+ */
+static int select_cfa(const struct sensor_profile *p, __u32 code)
+{
+	if (p->rgbir) {
+		if (code != MEDIA_BUS_FMT_SGRBG10_1X10) {
+			fprintf(stderr, "unexpected %s bus code 0x%x (RGB-IR layout measured for GRBG10)\n",
+				p->label, code);
+			return -1;
+		}
+		set_rgbir_pattern();
+		printf("cfa: %s RGB-IR 4x4 (bus code 0x%x): %s\n", p->label, code, "GIGI/RGBG/GIGI/BGRG");
+		return 0;
+	}
+	if (set_bayer_pattern(code)) {
+		fprintf(stderr, "unsupported %s bus code 0x%x (10-bit Bayer expected)\n", p->label, code);
+		return -1;
+	}
+	printf("cfa: %s Bayer 2x2 from bus code 0x%x\n", p->label, code);
+	return 0;
+}
+
 static int channel_at(unsigned int x, unsigned int y)
 {
 	return cfa[y & 3][x & 3];
@@ -495,6 +547,12 @@ static int chroma_radius = 2;		/* 5x5 U/V box filter */
 #define TNR_THRESHOLD 14		/* luma steps (0..255) still treated as noise */
 #define HIGHLIGHT_START (LINEAR_MAX * 85 / 100)	/* raw level where clipping handling starts */
 
+/*
+ * Turn the output by 180 degrees (--rotate 180). The ov8856 driver exposes no mounting
+ * rotation control, so this is a launcher setting (CAMERA_REAR_ROTATION in gbos.cfg).
+ */
+static int output_rotate180;
+
 static int16_t plane_y[OUT_HEIGHT][OUT_WIDTH], plane_u[OUT_HEIGHT][OUT_WIDTH],
 	plane_v[OUT_HEIGHT][OUT_WIDTH], plane_tmp[OUT_HEIGHT][OUT_WIDTH];
 static unsigned char tnr_previous[OUT_HEIGHT][OUT_WIDTH];
@@ -662,9 +720,12 @@ static int convert_bayer_yuyv(const uint16_t *raw, unsigned int width,
 				shading[2] = lsc_map[2][oy][ox];
 			}
 			rgb_at(raw, width, height, stride, gain_q12, sx, sy, lsc_active ? shading : NULL, c);
-			plane_y[oy][ox] = (int16_t)((77 * c[0] + 150 * c[1] + 29 * c[2] + 128) >> 8);
-			plane_u[oy][ox] = (int16_t)((-43 * c[0] - 85 * c[1] + 128 * c[2]) >> 8);
-			plane_v[oy][ox] = (int16_t)((128 * c[0] - 107 * c[1] - 21 * c[2]) >> 8);
+			/* Lens shading stays indexed by sensor position; only the output is turned. */
+			unsigned int ty = output_rotate180 ? OUT_HEIGHT - 1 - oy : oy;
+			unsigned int tx = output_rotate180 ? OUT_WIDTH - 1 - ox : ox;
+			plane_y[ty][tx] = (int16_t)((77 * c[0] + 150 * c[1] + 29 * c[2] + 128) >> 8);
+			plane_u[ty][tx] = (int16_t)((-43 * c[0] - 85 * c[1] + 128 * c[2]) >> 8);
+			plane_v[ty][tx] = (int16_t)((128 * c[0] - 107 * c[1] - 21 * c[2]) >> 8);
 		}
 	}
 	/*
@@ -810,27 +871,40 @@ static int ae_update(struct ae_state *ae, double mean_green)
 	       dgain != ae->dgain.value || vblank != ae->vblank.value;
 }
 
-static int ae_query_floor(int fd, struct ae_control *c, __u32 id, int floor)
+/*
+ * A control's AE range. The minimum is the unity step (ae_total divides by it), so it must
+ * be positive. Exception: a digital gain whose range starts at 0 (OV8856: 0..4095, default
+ * 1024 = 1x) uses its default as unity, so AE only raises it, never darkens with it.
+ */
+static int ae_control_from_query(struct ae_control *c, const struct v4l2_queryctrl *q, int value)
 {
-	struct v4l2_queryctrl q = { .id = id };
-	struct v4l2_control v = { .id = id };
+	int min = q->minimum;
 
-	c->id = id;
-	if (ioctl(fd, VIDIOC_QUERYCTRL, &q) || (q.flags & (V4L2_CTRL_FLAG_DISABLED |
-						   V4L2_CTRL_FLAG_READ_ONLY)) ||
-	    q.minimum < floor || q.maximum < q.minimum || ioctl(fd, VIDIOC_G_CTRL, &v))
+	c->id = q->id;
+	if (q->flags & (V4L2_CTRL_FLAG_DISABLED | V4L2_CTRL_FLAG_READ_ONLY))
 		return -1;
-	c->min = q.minimum;
-	c->max = q.maximum;
-	c->def = q.default_value;
-	c->saved = c->value = v.value;
+	if (min <= 0 && q->id == V4L2_CID_DIGITAL_GAIN && q->default_value > 0)
+		min = q->default_value;
+	if (min <= 0 || q->maximum < min)
+		return -1;
+	c->min = min;
+	c->max = q->maximum;
+	c->def = q->default_value;
+	c->saved = value;
+	c->value = value < min ? min : value > c->max ? c->max : value;
 	c->present = 1;
 	return 0;
 }
 
 static int ae_query(int fd, struct ae_control *c, __u32 id)
 {
-	return ae_query_floor(fd, c, id, 1);
+	struct v4l2_queryctrl q = { .id = id };
+	struct v4l2_control v = { .id = id };
+
+	c->id = id;
+	if (ioctl(fd, VIDIOC_QUERYCTRL, &q) || ioctl(fd, VIDIOC_G_CTRL, &v))
+		return -1;
+	return ae_control_from_query(c, &q, v.value);
 }
 
 #ifdef CAMERA_BRIDGE_TEST
@@ -900,7 +974,7 @@ static void ae_init(struct ae_state *ae, int fd, int height)
 		return;
 	}
 	(void)ae_query(fd, &ae->dgain, V4L2_CID_DIGITAL_GAIN);
-	(void)ae_query_floor(fd, &ae->vblank, V4L2_CID_VBLANK, 0);
+	(void)ae_query(fd, &ae->vblank, V4L2_CID_VBLANK);
 	ae_frame_limits(ae, height);
 	ae->enabled = 1;
 	printf("ae: exposure %d..%d (now %d) again %d..%d (now %d, cap %d) dgain %s %d..%d (now %d)\n",
@@ -1001,7 +1075,8 @@ static int bridge_should_convert(int readers)
 	return readers != 0;
 }
 
-static int capture_to_loopback(const char *media_dev, const char *out_dev)
+static int capture_to_loopback(const char *media_dev, const char *out_dev,
+			       const struct sensor_profile *profile)
 {
 	struct ae_state ae = { .fd = -1 };
 	struct graph graph = { 0 };
@@ -1028,14 +1103,14 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev)
 	if (mfd < 0 || ioctl(mfd, MEDIA_IOC_DEVICE_INFO, &info) ||
 	    strncmp(info.driver, "intel-ipu6", sizeof(info.driver)) ||
 	    read_graph(mfd, &graph, &topology) ||
-	    find_path(&graph, &topology, "ov5675", &path) ||
+	    find_path(&graph, &topology, profile->entity, &path) ||
 	    device_path(&graph, &topology, path.sensor->id, sensor_path, sizeof(sensor_path)) ||
 	    device_path(&graph, &topology, path.csi->id, csi_path, sizeof(csi_path)) ||
 	    device_path(&graph, &topology, path.video->id, capture_path, sizeof(capture_path))) {
-		fprintf(stderr, "cannot discover a unique OV5675 IPU6 capture path\n");
+		fprintf(stderr, "cannot discover a unique %s IPU6 capture path\n", profile->label);
 		goto done;
 	}
-	printf("IPU6 path: %s -> %s -> %s; output=%s\n",
+	printf("IPU6 path (%s): %s -> %s -> %s; output=%s\n", profile->label,
 	       sensor_path, csi_path, capture_path, out_dev);
 	sfd = open(sensor_path, O_RDWR | O_CLOEXEC);
 	cfd = open(csi_path, O_RDWR | O_CLOEXEC);
@@ -1052,18 +1127,8 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev)
 		goto done;
 	}
 	__u32 fourcc = pixel_format(sensor.format.code);
-	/*
-	 * The measured RGB-IR layout is relative to the orientation the driver reports
-	 * as GRBG; a flip would move the sites, so refuse any other code.
-	 */
-	if (sensor.format.code != MEDIA_BUS_FMT_SGRBG10_1X10) {
-		fprintf(stderr, "unexpected OV5675 bus code 0x%x (RGB-IR layout measured for GRBG10)\n",
-			sensor.format.code);
+	if (select_cfa(profile, sensor.format.code))
 		goto done;
-	}
-	set_rgbir_pattern();
-	printf("cfa: OV5675 RGB-IR 4x4 (bus code 0x%x): %s\n", sensor.format.code,
-	       "GIGI/RGBG/GIGI/BGRG");
 	if (!fourcc || setup_link(mfd, &path, path.output->flags | MEDIA_LNK_FL_ENABLED))
 		goto done;
 	linked = 1;
@@ -1155,8 +1220,9 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev)
 	ae_init(&ae, sfd, (int)sensor.format.height);
 	signal(SIGINT, stop_bridge);
 	signal(SIGTERM, stop_bridge);
-	printf("bridge active: %ux%u Bayer to %ux%u YUYV; sensor remains streaming until stop\n",
-	       video.fmt.pix.width, video.fmt.pix.height, OUT_WIDTH, OUT_HEIGHT);
+	printf("bridge active: %ux%u %s to %ux%u YUYV%s; sensor remains streaming until stop\n",
+	       video.fmt.pix.width, video.fmt.pix.height, profile->rgbir ? "RGB-IR" : "Bayer",
+	       OUT_WIDTH, OUT_HEIGHT, output_rotate180 ? ", rotated 180" : "");
 	result = 0;
 	while (running) {
 		struct pollfd pfd = { .fd = vfd, .events = POLLIN | POLLPRI };
@@ -1251,25 +1317,25 @@ done:
 	return result;
 }
 
-#ifndef CAMERA_BRIDGE_TEST
 /*
- * Optional calibration: a directory holding ov5678_ccm.txt and ov5678_lsc.txt (the stick's
- * gbos/camera/), or, as before, a single colour-matrix file.
+ * Optional calibration: a directory holding <prefix>_ccm.txt and <prefix>_lsc.txt (the
+ * stick's gbos/camera/; prefix from the sensor profile), or, as before, a single
+ * colour-matrix file.
  */
-static void load_calibration(const char *arg)
+static void load_calibration(const char *arg, const char *prefix)
 {
 	struct stat st;
 	char path[512];
 	const char *ccm = arg;
 
 	if (stat(arg, &st) == 0 && S_ISDIR(st.st_mode)) {
-		snprintf(path, sizeof(path), "%s/ov5678_lsc.txt", arg);
+		snprintf(path, sizeof(path), "%s/%s_lsc.txt", arg, prefix);
 		if (load_lsc_table(path) > 0)
 			printf("lsc: loaded %d illuminants (%dx%d grids) from %s\n", lsc_count,
 			       lsc_table[0].gw, lsc_table[0].gh, path);
 		else
 			printf("lsc: no usable table at %s; no lens-shading correction\n", path);
-		snprintf(path, sizeof(path), "%s/ov5678_ccm.txt", arg);
+		snprintf(path, sizeof(path), "%s/%s_ccm.txt", arg, prefix);
 		ccm = path;
 	}
 	if (load_ccm_table(ccm) > 0)
@@ -1278,16 +1344,61 @@ static void load_calibration(const char *arg)
 		printf("ccm: no usable table at %s; generic saturation\n", ccm);
 }
 
+struct bridge_options {
+	const struct sensor_profile *profile;
+	int rotate180;
+	const char *media, *output, *calibration;
+};
+
+/*
+ * [--sensor ov5675|ov8856] [--rotate 0|180] /dev/mediaN /dev/videoN [calibration].
+ * Without options: the front sensor, unrotated, as before the rear camera existed.
+ */
+static int parse_bridge_args(int argc, char **argv, struct bridge_options *o)
+{
+	int i = 1;
+
+	memset(o, 0, sizeof(*o));
+	o->profile = &sensor_profiles[0];
+	for (; i + 1 < argc && !strncmp(argv[i], "--", 2); i += 2) {
+		if (!strcmp(argv[i], "--sensor")) {
+			o->profile = find_sensor_profile(argv[i + 1]);
+			if (!o->profile)
+				return -1;
+		} else if (!strcmp(argv[i], "--rotate")) {
+			if (!strcmp(argv[i + 1], "180"))
+				o->rotate180 = 1;
+			else if (strcmp(argv[i + 1], "0"))
+				return -1;
+		} else {
+			return -1;
+		}
+	}
+	if (argc - i != 2 && argc - i != 3)
+		return -1;
+	o->media = argv[i];
+	o->output = argv[i + 1];
+	o->calibration = argc - i == 3 ? argv[i + 2] : NULL;
+	return 0;
+}
+
+#ifndef CAMERA_BRIDGE_TEST
 int main(int argc, char **argv)
 {
+	struct bridge_options o;
+
 	(void)probe;
-	if (argc != 3 && argc != 4) {
-		fprintf(stderr, "usage: %s /dev/mediaN /dev/videoN [calibration dir or colour-matrix table]\n", argv[0]);
+	if (parse_bridge_args(argc, argv, &o)) {
+		fprintf(stderr, "usage: %s [--sensor ov5675|ov8856] [--rotate 0|180] "
+			"/dev/mediaN /dev/videoN [calibration dir or colour-matrix table]\n", argv[0]);
 		return 2;
 	}
 	setvbuf(stdout, NULL, _IOLBF, 0);
-	if (argc == 4)
-		load_calibration(argv[3]);
-	return capture_to_loopback(argv[1], argv[2]);
+	output_rotate180 = o.rotate180;
+	printf("sensor: %s (calibration prefix %s)%s\n", o.profile->label, o.profile->cal_prefix,
+	       o.rotate180 ? "; output rotated 180" : "");
+	if (o.calibration)
+		load_calibration(o.calibration, o.profile->cal_prefix);
+	return capture_to_loopback(o.media, o.output, o.profile);
 }
 #endif

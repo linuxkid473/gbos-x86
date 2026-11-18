@@ -24,4 +24,16 @@ trap 'rm -f "$tmp_desc"' EXIT HUP INT TERM
 python3 "$ROOT/tools/make_latitude_uvc_desc.py" \
 	"$ROOT/usb/surface/fake_uvc_desc.bin" "$tmp_desc"
 cmp -s "$tmp_desc" "$ROOT/usb/surface/latitude_fake_uvc_desc.bin"
+# Rear camera: same 640x480 descriptor, its own USB id (the launcher's REAR_USB_VID/PID).
+python3 "$ROOT/tools/make_latitude_uvc_desc.py" --usb-id 1209:0001 \
+	"$ROOT/usb/surface/fake_uvc_desc.bin" "$tmp_desc"
+cmp -s "$tmp_desc" "$ROOT/usb/surface/latitude_rear_fake_uvc_desc.bin"
+grep -q 'latitude_rear_fake_uvc_desc.bin' "$ROOT/tools/make_gbos86_image.sh"
+grep -q '^REAR_USB_VID=1209$' "$ROOT/usb/installer/bin/ipu6-camera-bridge.sh"
+grep -q '^REAR_USB_PID=0001$' "$ROOT/usb/installer/bin/ipu6-camera-bridge.sh"
+if python3 "$ROOT/tools/make_latitude_uvc_desc.py" --usb-id 1209 \
+	"$ROOT/usb/surface/fake_uvc_desc.bin" "$tmp_desc" 2>/dev/null; then
+	echo "malformed --usb-id accepted" >&2
+	exit 1
+fi
 echo IPU6_LOOPBACK_INTEGRATION_TEST_PASS

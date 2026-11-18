@@ -118,12 +118,24 @@ ASan/UBSan and the docker suite pass.
 
 ## Not done / open
 
-- **`0x5000` = 0x71 and `0x3d8c/0x3d8d`**: Windows writes these for this module, but we don't know
-  what the bits do. If bits 1–2 are on-sensor defect-pixel correction, clearing them would
-  avoid Bayer-assumption correction on RGB-IR sites, which may help colour. It would also leave
-  hot pixels uncorrected, and the bridge has no defect-pixel stage of its own. This needs a
-  rebuilt `ov5675.ko` (same tree; module signing is not enforced, so only that module would
-  change), gated to `i2c-OVTI5678:00`, and an A/B check on hardware.
+- **`0x5000` = 0x71 and `0x3d8c/0x3d8d`: available as an A/B switch, off by default.** Windows
+  writes these for this module, but we don't know what the bits do. If bits 1–2 are on-sensor
+  defect-pixel correction, clearing them would avoid Bayer-assumption correction on RGB-IR sites,
+  which may help colour. It would also leave hot pixels uncorrected, and the bridge has no
+  defect-pixel stage of its own.
+  - `camera_7320.py` adds the `ov5675` module parameter `gbos_windows_isp`. It is writable at
+    runtime and read at every stream start. When set, the driver writes the three Windows values
+    after the mode table, only on DMI `Latitude 7320 Detachable` / `i2c-OVTI5678:00`.
+  - On every stream start the driver logs the values in effect:
+    `gbos: Windows ISP values on|off: 0x5000=.. 0x3d8c=.. 0x3d8d=..` (kernel log).
+  - The bridge launcher sets the parameter from `OV5678_WINDOWS_ISP=1` in `gbos.cfg`.
+  - Only `ov5675.ko` was rebuilt, from `gbos-ksrc` (the tree of the deployed kernel #61; bzImage
+    unchanged). It is stripped and signed with that tree's key, and its symbol CRCs match the
+    deployed module.
+  - Because the sensor streams until reboot, each setting needs its own boot.
+- The rear OV8856's Windows tuning (`OV8856_0BA801T3_TGL.aiqb`, record 261) has the same automatic
+  limits (analogue 1..15.5x, exposure to 66.7 ms, breakpoint 4), so the shared AE plan applies to
+  the rear bridge too.
 - AE target (18% of raw range, metered before lens shading) is unchanged. Windows' target was not
   decoded.
 - Unverified on hardware:
