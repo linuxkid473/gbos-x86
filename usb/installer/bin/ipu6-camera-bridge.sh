@@ -97,6 +97,22 @@ if ! grep -q "$VIDEO_SYS" /proc/mounts; then
         echo "WARNING: could not expose the virtual UVC sysfs interface"
 fi
 
+# OV5678_WINDOWS_ISP=1 in gbos.cfg: the front sensor gets the Windows driver's
+# 0x5000/0x3d8c/0x3d8d values when the bridge starts streaming (A/B test, see
+# docs/ov5678-windows-vs-linux.md). The rebuilt ov5675.ko provides the parameter and logs
+# the values in effect ("gbos: Windows ISP values") in the kernel log.
+WINISP=/sys/module/ov5675/parameters/gbos_windows_isp
+if grep -q '^OV5678_WINDOWS_ISP=1' /postinstall/gbos/gbos.cfg 2>/dev/null; then
+    if [ -w "$WINISP" ] && echo Y > "$WINISP"; then
+        echo "OV5678 Windows ISP values: on"
+    else
+        echo "WARNING: OV5678_WINDOWS_ISP=1 but $WINISP is not writable (old ov5675.ko?)"
+    fi
+elif [ -e "$WINISP" ]; then
+    echo N > "$WINISP" 2>/dev/null || true
+    echo "OV5678 Windows ISP values: off"
+fi
+
 BRIDGE=/postinstall/gbos/installer/bin/ipu6-loopback
 if [ ! -x "$BRIDGE" ]; then
     echo "ERROR: missing IPU6 loopback bridge binary"

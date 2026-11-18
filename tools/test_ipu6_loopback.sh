@@ -10,6 +10,8 @@ grep -q 'video_nr=64' "$ROOT/usb/installer/bin/ipu6-camera-bridge.sh"
 grep -q 'min_width=640 max_width=640 min_height=480 max_height=480' "$ROOT/usb/installer/bin/ipu6-camera-bridge.sh"
 grep -q '"$BRIDGE" /dev/media0 /dev/video64' "$ROOT/usb/installer/bin/ipu6-camera-bridge.sh"
 grep -q 'wait "$BRIDGE_PID"' "$ROOT/usb/installer/bin/ipu6-camera-bridge.sh"
+grep -q '/sys/module/ov5675/parameters/gbos_windows_isp' "$ROOT/usb/installer/bin/ipu6-camera-bridge.sh"
+grep -q '^OV5678_WINDOWS_ISP=0' "$ROOT/usb/gbos.cfg"
 grep -q 'latitude_fake_uvc_desc.bin' "$ROOT/usb/installer/bin/ipu6-camera-bridge.sh"
 if grep -q 'nohup.*ipu6-loopback' "$ROOT/usb/installer/bin/ipu6-camera-bridge.sh"; then
 	echo "IPU6 bridge must stay in the init service process group" >&2
