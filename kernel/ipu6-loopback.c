@@ -7,6 +7,7 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #define OUT_WIDTH 640
@@ -24,6 +25,31 @@
 #define AE_DEADBAND 0.15
 #define AE_MAX_STEP 1.6
 #define AE_INTERVAL 3	/* frames between updates; sensor settings lag about two frames */
+/*
+ * Exposure program limits from the module's Windows tuning (OV5678_0BF501T3_TGL.aiqb, AE
+ * exposure-program record 261): analogue gain at most 15.5x (also the top of its black-level
+ * calibration; the driver allows 2047/128 = 16x), and in automatic mode exposure up to
+ * 66.7 ms, i.e. the frame is stretched from 30 to 15 fps in low light. The 4x analogue gain
+ * reached before stretching the frame is our choice (keeps 30 fps in ordinary indoor light).
+ */
+#define AE_AGAIN_MAX_X 15.5
+#define AE_LONG_FRAME_X 2.0
+#define AE_LONG_KNEE_X 4.0
+/*
+ * While no consumer reads a bridge, its sensor keeps streaming (the IPU6 firmware cannot stop
+ * cleanly) but with a frame 8x the default (about 3.75 fps): two full-rate streams at once
+ * overflowed the ISYS transfer FIFOs on both CSI ports (2026-11-18 boot-9). AE statistics
+ * continue at the low rate; the planned frame comes back as soon as a consumer streams.
+ */
+#define AE_IDLE_FRAME_X 8.0
+
+/*
+ * Error-marked or short IPU6 frames (CSI FIFO overflow, sync errors) are requeued and skipped;
+ * the last converted picture is repeated meanwhile. The bridge gives up (for the launcher to
+ * restart it) only when no good frame arrived for BAD_FRAME_GIVE_UP_S while frames or
+ * timeouts kept coming.
+ */
+#define BAD_FRAME_GIVE_UP_S 10.0
 
 static volatile sig_atomic_t running = 1;
 
@@ -78,6 +104,58 @@ static int set_bayer_pattern(__u32 code)
 			return 0;
 		}
 	return -1;
+}
+
+/*
+ * The Latitude 7320's two IPU6 sensors. Each runs its own bridge process (front on
+ * /dev/video64, rear on /dev/video65). entity is the media-graph name prefix the kernel
+ * driver registers; cal_prefix names the stick's calibration files (<prefix>_ccm.txt,
+ * <prefix>_lsc.txt), extracted from that module's Windows tuning file.
+ */
+struct sensor_profile {
+	const char *entity, *label, *cal_prefix;
+	int rgbir;	/* 1: the measured RGB-IR 4x4 map; 0: plain Bayer from the bus code */
+};
+
+static const struct sensor_profile sensor_profiles[] = {
+	/* Front: an RGB-IR OV5678 (module 0BF501T3) bound by the ov5675 driver. */
+	{ "ov5675", "front OV5678 (ov5675 driver)", "ov5678", 1 },
+	/* Rear: OV8856 (module 0BA801T3), GRBG10 Bayer at 3280x2464 (HANDOFF 2026-11-17). */
+	{ "ov8856", "rear OV8856", "ov8856", 0 },
+};
+
+static const struct sensor_profile *find_sensor_profile(const char *entity)
+{
+	for (size_t i = 0; i < sizeof(sensor_profiles) / sizeof(sensor_profiles[0]); i++)
+		if (!strcmp(sensor_profiles[i].entity, entity))
+			return &sensor_profiles[i];
+	return NULL;
+}
+
+/*
+ * Pick the colour-filter layout for this sensor and its reported bus code. The RGB-IR
+ * layout was measured relative to the orientation the driver reports as GRBG10; a flip
+ * would move the sites, so any other code is refused there. Bayer sensors take the 2x2
+ * order from the bus code (it follows the sensor's flip settings).
+ */
+static int select_cfa(const struct sensor_profile *p, __u32 code)
+{
+	if (p->rgbir) {
+		if (code != MEDIA_BUS_FMT_SGRBG10_1X10) {
+			fprintf(stderr, "unexpected %s bus code 0x%x (RGB-IR layout measured for GRBG10)\n",
+				p->label, code);
+			return -1;
+		}
+		set_rgbir_pattern();
+		printf("cfa: %s RGB-IR 4x4 (bus code 0x%x): %s\n", p->label, code, "GIGI/RGBG/GIGI/BGRG");
+		return 0;
+	}
+	if (set_bayer_pattern(code)) {
+		fprintf(stderr, "unsupported %s bus code 0x%x (10-bit Bayer expected)\n", p->label, code);
+		return -1;
+	}
+	printf("cfa: %s Bayer 2x2 from bus code 0x%x\n", p->label, code);
+	return 0;
 }
 
 static int channel_at(unsigned int x, unsigned int y)
@@ -485,6 +563,12 @@ static int chroma_radius = 2;		/* 5x5 U/V box filter */
 #define TNR_THRESHOLD 14		/* luma steps (0..255) still treated as noise */
 #define HIGHLIGHT_START (LINEAR_MAX * 85 / 100)	/* raw level where clipping handling starts */
 
+/*
+ * Turn the output by 180 degrees (--rotate 180). The ov8856 driver exposes no mounting
+ * rotation control, so this is a launcher setting (CAMERA_REAR_ROTATION in gbos.cfg).
+ */
+static int output_rotate180;
+
 static int16_t plane_y[OUT_HEIGHT][OUT_WIDTH], plane_u[OUT_HEIGHT][OUT_WIDTH],
 	plane_v[OUT_HEIGHT][OUT_WIDTH], plane_tmp[OUT_HEIGHT][OUT_WIDTH];
 static unsigned char tnr_previous[OUT_HEIGHT][OUT_WIDTH];
@@ -652,9 +736,12 @@ static int convert_bayer_yuyv(const uint16_t *raw, unsigned int width,
 				shading[2] = lsc_map[2][oy][ox];
 			}
 			rgb_at(raw, width, height, stride, gain_q12, sx, sy, lsc_active ? shading : NULL, c);
-			plane_y[oy][ox] = (int16_t)((77 * c[0] + 150 * c[1] + 29 * c[2] + 128) >> 8);
-			plane_u[oy][ox] = (int16_t)((-43 * c[0] - 85 * c[1] + 128 * c[2]) >> 8);
-			plane_v[oy][ox] = (int16_t)((128 * c[0] - 107 * c[1] - 21 * c[2]) >> 8);
+			/* Lens shading stays indexed by sensor position; only the output is turned. */
+			unsigned int ty = output_rotate180 ? OUT_HEIGHT - 1 - oy : oy;
+			unsigned int tx = output_rotate180 ? OUT_WIDTH - 1 - ox : ox;
+			plane_y[ty][tx] = (int16_t)((77 * c[0] + 150 * c[1] + 29 * c[2] + 128) >> 8);
+			plane_u[ty][tx] = (int16_t)((-43 * c[0] - 85 * c[1] + 128 * c[2]) >> 8);
+			plane_v[ty][tx] = (int16_t)((128 * c[0] - 107 * c[1] - 21 * c[2]) >> 8);
 		}
 	}
 	/*
@@ -697,14 +784,55 @@ static int convert_bayer_yuyv(const uint16_t *raw, unsigned int width,
 
 struct ae_control {
 	__u32 id;
-	int min, max, saved, value, present;
+	int min, max, saved, value, present, def;
 };
 
 struct ae_state {
 	int fd, enabled;
 	unsigned int frames;
-	struct ae_control exposure, again, dgain;
+	struct ae_control exposure, again, dgain, vblank;
+	/*
+	 * Exposure lines possible at the default frame length (base_max) and with the frame
+	 * stretched by VBLANK (long_max; equal to base_max without a VBLANK control), and the
+	 * lines the driver keeps between exposure and frame length (frame = height + vblank).
+	 */
+	int height, base_max, long_max, margin;
+	/* Idle: frame stretched to idle_vblank; applied_vblank is what the sensor has now. */
+	int idle, idle_vblank, applied_vblank;
 };
+
+/* VBLANK the sensor should have: the plan's, or the idle frame while nobody reads. */
+static int ae_effective_vblank(const struct ae_state *ae)
+{
+	if (ae->idle && ae->idle_vblank > ae->vblank.value)
+		return ae->idle_vblank;
+	return ae->vblank.value;
+}
+
+static int ae_again_max(const struct ae_state *ae)
+{
+	double cap = AE_AGAIN_MAX_X * ae->again.min;
+
+	return ae->again.max < cap ? ae->again.max : (int)(cap + 0.5);
+}
+
+/* VBLANK for an exposure: the default unless the exposure needs a longer frame. */
+static int ae_vblank_for(const struct ae_state *ae, int exposure)
+{
+	int vblank = exposure + ae->margin - ae->height;
+
+	if (exposure <= ae->base_max || vblank < ae->vblank.def)
+		return ae->vblank.def;
+	return vblank > ae->vblank.max ? ae->vblank.max : vblank;
+}
+
+/* Frame time in ms, assuming the default frame is 1/30 s (what the driver's mode sets). */
+static double ae_frame_ms(const struct ae_state *ae)
+{
+	if (!ae->vblank.present)
+		return 1000.0 / 30;
+	return 1000.0 / 30 * (ae->height + ae_effective_vblank(ae)) / (ae->height + ae->vblank.def);
+}
 
 /* Brightness relative to minimum exposure and gains: lines x analogue x digital multiplier. */
 static double ae_total(const struct ae_state *ae)
@@ -724,17 +852,32 @@ static int ae_clamp(double value, int min, int max)
 	return (int)(value + 0.5);
 }
 
-/* Split a total into exposure time first (no added noise), then analogue, then digital gain. */
+/*
+ * Split a total into exposure time first (no added noise) up to the default frame, then
+ * analogue gain up to AE_LONG_KNEE_X, then a longer frame (VBLANK) up to long_max, then
+ * analogue gain up to its cap, then digital gain.
+ */
 static void ae_plan(struct ae_state *ae, double total)
 {
-	double rest;
+	int again_max = ae_again_max(ae);
+	double knee = AE_LONG_KNEE_X, exposure, rest;
 
-	ae->exposure.value = ae_clamp(total, ae->exposure.min, ae->exposure.max);
+	if (knee > (double)again_max / ae->again.min)
+		knee = (double)again_max / ae->again.min;
+	if (total <= ae->base_max)
+		exposure = total;
+	else if (total <= ae->base_max * knee)
+		exposure = ae->base_max;
+	else
+		exposure = total / knee;
+	ae->exposure.value = ae_clamp(exposure, ae->exposure.min, ae->long_max);
 	rest = total / ae->exposure.value;
-	ae->again.value = ae_clamp(rest * ae->again.min, ae->again.min, ae->again.max);
+	ae->again.value = ae_clamp(rest * ae->again.min, ae->again.min, again_max);
 	rest = rest * ae->again.min / ae->again.value;
 	if (ae->dgain.present)
 		ae->dgain.value = ae_clamp(rest * ae->dgain.min, ae->dgain.min, ae->dgain.max);
+	if (ae->vblank.present)
+		ae->vblank.value = ae_vblank_for(ae, ae->exposure.value);
 }
 
 /* Returns 1 when the plan changed, 0 when the scene is within the deadband or at a limit. */
@@ -742,6 +885,7 @@ static int ae_update(struct ae_state *ae, double mean_green)
 {
 	double ratio, before = ae_total(ae);
 	int exposure = ae->exposure.value, again = ae->again.value, dgain = ae->dgain.value;
+	int vblank = ae->vblank.value;
 
 	ratio = mean_green > 1.0 ? AE_TARGET / mean_green : AE_MAX_STEP;
 	if (ratio > 1.0 - AE_DEADBAND && ratio < 1.0 + AE_DEADBAND)
@@ -750,7 +894,32 @@ static int ae_update(struct ae_state *ae, double mean_green)
 	if (ratio < 1.0 / AE_MAX_STEP) ratio = 1.0 / AE_MAX_STEP;
 	ae_plan(ae, before * ratio);
 	return exposure != ae->exposure.value || again != ae->again.value ||
-	       dgain != ae->dgain.value;
+	       dgain != ae->dgain.value || vblank != ae->vblank.value;
+}
+
+/*
+ * A control's AE range. The minimum is the unity step (ae_total divides by it), so it must
+ * be positive. Exception: a digital gain whose range starts at 0 (OV8856: 0..4095, default
+ * 1024 = 1x) uses its default as unity, so AE only raises it, never darkens with it.
+ */
+static int ae_control_from_query(struct ae_control *c, const struct v4l2_queryctrl *q, int value)
+{
+	int min = q->minimum;
+
+	c->id = q->id;
+	if (q->flags & (V4L2_CTRL_FLAG_DISABLED | V4L2_CTRL_FLAG_READ_ONLY))
+		return -1;
+	if (min <= 0 && q->id == V4L2_CID_DIGITAL_GAIN && q->default_value > 0)
+		min = q->default_value;
+	if (min <= 0 || q->maximum < min)
+		return -1;
+	c->min = min;
+	c->max = q->maximum;
+	c->def = q->default_value;
+	c->saved = value;
+	c->value = value < min ? min : value > c->max ? c->max : value;
+	c->present = 1;
+	return 0;
 }
 
 static int ae_query(int fd, struct ae_control *c, __u32 id)
@@ -759,25 +928,74 @@ static int ae_query(int fd, struct ae_control *c, __u32 id)
 	struct v4l2_control v = { .id = id };
 
 	c->id = id;
-	if (ioctl(fd, VIDIOC_QUERYCTRL, &q) || (q.flags & (V4L2_CTRL_FLAG_DISABLED |
-						   V4L2_CTRL_FLAG_READ_ONLY)) ||
-	    q.minimum <= 0 || q.maximum < q.minimum || ioctl(fd, VIDIOC_G_CTRL, &v))
+	if (ioctl(fd, VIDIOC_QUERYCTRL, &q) || ioctl(fd, VIDIOC_G_CTRL, &v))
 		return -1;
-	c->min = q.minimum;
-	c->max = q.maximum;
-	c->saved = c->value = v.value;
-	c->present = 1;
-	return 0;
+	return ae_control_from_query(c, &q, v.value);
 }
+
+#ifdef CAMERA_BRIDGE_TEST
+/* Host tests (fd -1) record the order of control writes: E V A D. */
+static char ae_set_log[16];
+static void ae_set_log_reset(void) { ae_set_log[0] = 0; }
+#endif
 
 static int ae_set(int fd, const struct ae_control *c, int value)
 {
 	struct v4l2_control v = { .id = c->id, .value = value };
 
-	return c->present ? ioctl(fd, VIDIOC_S_CTRL, &v) : 0;
+	if (!c->present)
+		return 0;
+#ifdef CAMERA_BRIDGE_TEST
+	if (fd < 0) {
+		size_t n = strlen(ae_set_log);
+		if (n + 1 < sizeof(ae_set_log)) {
+			ae_set_log[n] = c->id == V4L2_CID_EXPOSURE ? 'E' : c->id == V4L2_CID_VBLANK ? 'V' :
+					c->id == V4L2_CID_ANALOGUE_GAIN ? 'A' : 'D';
+			ae_set_log[n + 1] = 0;
+		}
+		return 0;
+	}
+#endif
+	return ioctl(fd, VIDIOC_S_CTRL, &v);
 }
 
-static void ae_init(struct ae_state *ae, int fd)
+/*
+ * Exposure limits for the default and the stretched frame. The driver bounds exposure by
+ * the current frame (height + vblank - margin), so the margin is measured from the
+ * current VBLANK and exposure maximum. Without a usable VBLANK the frame stays fixed.
+ */
+static void ae_frame_limits(struct ae_state *ae, int height)
+{
+	ae->height = height;
+	ae->base_max = ae->long_max = ae->exposure.max;
+	ae->margin = 0;
+	if (!ae->vblank.present || height <= 0)
+		goto fixed;
+	if (ae->vblank.def < ae->vblank.min || ae->vblank.def > ae->vblank.max)
+		goto fixed;
+	ae->margin = height + ae->vblank.value - ae->exposure.max;
+	ae->base_max = height + ae->vblank.def - ae->margin;
+	if (ae->margin < 0 || ae->base_max < ae->exposure.min)
+		goto fixed;
+	double frame = AE_LONG_FRAME_X * (height + ae->vblank.def);
+	ae->long_max = (int)frame - ae->margin;
+	if (ae->long_max > height + ae->vblank.max - ae->margin)
+		ae->long_max = height + ae->vblank.max - ae->margin;
+	if (ae->long_max < ae->base_max)
+		ae->long_max = ae->base_max;
+	ae->idle_vblank = (int)(AE_IDLE_FRAME_X * (height + ae->vblank.def)) - height;
+	if (ae->idle_vblank > ae->vblank.max)
+		ae->idle_vblank = ae->vblank.max;
+	ae->applied_vblank = ae->vblank.value;
+	return;
+fixed:
+	ae->vblank.present = 0;
+	ae->idle_vblank = ae->applied_vblank = 0;
+	ae->margin = 0;
+	ae->base_max = ae->long_max = ae->exposure.max;
+}
+
+static void ae_init(struct ae_state *ae, int fd, int height)
 {
 	memset(ae, 0, sizeof(*ae));
 	ae->fd = fd;
@@ -787,11 +1005,51 @@ static void ae_init(struct ae_state *ae, int fd)
 		return;
 	}
 	(void)ae_query(fd, &ae->dgain, V4L2_CID_DIGITAL_GAIN);
+	(void)ae_query(fd, &ae->vblank, V4L2_CID_VBLANK);
+	ae_frame_limits(ae, height);
 	ae->enabled = 1;
-	printf("ae: exposure %d..%d (now %d) again %d..%d (now %d) dgain %s %d..%d (now %d)\n",
+	printf("ae: exposure %d..%d (now %d) again %d..%d (now %d, cap %d) dgain %s %d..%d (now %d)\n",
 	       ae->exposure.min, ae->exposure.max, ae->exposure.value,
-	       ae->again.min, ae->again.max, ae->again.value,
+	       ae->again.min, ae->again.max, ae->again.value, ae_again_max(ae),
 	       ae->dgain.present ? "on" : "absent", ae->dgain.min, ae->dgain.max, ae->dgain.value);
+	if (ae->vblank.present)
+		printf("ae: vblank %d..%d (default %d, now %d): exposure up to %d lines at 30 fps, "
+		       "%d lines at %.1f fps above %.1fx analogue gain\n",
+		       ae->vblank.min, ae->vblank.max, ae->vblank.def, ae->vblank.value,
+		       ae->base_max, ae->long_max, 30.0 / AE_LONG_FRAME_X, AE_LONG_KNEE_X);
+	else
+		printf("ae: no usable VBLANK control; frame length fixed\n");
+}
+
+/*
+ * Apply settings in an order the driver accepts: it bounds exposure by the current frame,
+ * so a longer frame goes in before a longer exposure and a shorter one after.
+ */
+static int ae_apply(const struct ae_state *ae, int exposure, int vblank, int again, int dgain,
+		    int current_vblank)
+{
+	int stretch = ae->vblank.present && vblank > current_vblank;
+
+	if (stretch && ae_set(ae->fd, &ae->vblank, vblank))
+		return -1;
+	if (ae_set(ae->fd, &ae->exposure, exposure))
+		return -1;
+	if (!stretch && ae->vblank.present && vblank != current_vblank &&
+	    ae_set(ae->fd, &ae->vblank, vblank))
+		return -1;
+	if (ae_set(ae->fd, &ae->again, again) || ae_set(ae->fd, &ae->dgain, dgain))
+		return -1;
+	return 0;
+}
+
+/* Gain multiple applied on the sensor (analogue x digital); drives lens-shading strength. */
+static double ae_sensor_gain(const struct ae_state *ae)
+{
+	double gain = (double)ae->again.value / ae->again.min;
+
+	if (ae->dgain.present)
+		gain *= (double)ae->dgain.value / ae->dgain.min;
+	return gain < 1.0 ? 1.0 : gain;
 }
 
 static void ae_frame(struct ae_state *ae, double mean_green)
@@ -799,29 +1057,50 @@ static void ae_frame(struct ae_state *ae, double mean_green)
 	if (!ae->enabled)
 		return;
 	ae->frames++;
-	sensor_total_gain = ae_total(ae) / ae->exposure.max;	/* gain multiple at full exposure */
-	if (sensor_total_gain < 1.0)
-		sensor_total_gain = 1.0;
+	sensor_total_gain = ae_sensor_gain(ae);
 	if (ae->frames % 150 == 0)
-		printf("ae: mean=%.0f target=%.0f exposure=%d again=%d dgain=%d\n", mean_green,
-		       AE_TARGET, ae->exposure.value, ae->again.value, ae->dgain.value);
+		printf("ae: mean=%.0f target=%.0f exposure=%d again=%d dgain=%d vblank=%d "
+		       "(%.1f ms frame%s, %.1fx gain)\n", mean_green, AE_TARGET, ae->exposure.value,
+		       ae->again.value, ae->dgain.value, ae_effective_vblank(ae), ae_frame_ms(ae),
+		       ae->idle ? ", idle" : "", sensor_total_gain);
 	if (ae->frames % AE_INTERVAL || !ae_update(ae, mean_green))
 		return;
-	if (ae_set(ae->fd, &ae->exposure, ae->exposure.value) ||
-	    ae_set(ae->fd, &ae->again, ae->again.value) ||
-	    ae_set(ae->fd, &ae->dgain, ae->dgain.value)) {
+	int vblank = ae_effective_vblank(ae);
+	if (ae_apply(ae, ae->exposure.value, vblank, ae->again.value, ae->dgain.value,
+		     ae->applied_vblank)) {
 		perror("ae: set sensor control; auto-exposure off");
 		ae->enabled = 0;
+		return;
 	}
+	ae->applied_vblank = vblank;
+}
+
+/* A consumer started or stopped: switch between the planned and the idle frame at once. */
+static void ae_set_idle(struct ae_state *ae, int idle)
+{
+	if (!ae->enabled || !ae->vblank.present || ae->idle == idle)
+		return;
+	ae->idle = idle;
+	int vblank = ae_effective_vblank(ae);
+	if (vblank == ae->applied_vblank)
+		return;
+	if (ae_apply(ae, ae->exposure.value, vblank, ae->again.value, ae->dgain.value,
+		     ae->applied_vblank)) {
+		perror("ae: set idle frame; auto-exposure off");
+		ae->enabled = 0;
+		return;
+	}
+	ae->applied_vblank = vblank;
+	printf("ae: %s: vblank %d (%.1f ms frame)\n", idle ? "idle frame" : "active frame",
+	       vblank, ae_frame_ms(ae));
 }
 
 static void ae_restore(struct ae_state *ae)
 {
 	if (!ae->exposure.present || !ae->again.present)
 		return;
-	if (ae_set(ae->fd, &ae->exposure, ae->exposure.saved) ||
-	    ae_set(ae->fd, &ae->again, ae->again.saved) ||
-	    ae_set(ae->fd, &ae->dgain, ae->dgain.saved))
+	if (ae_apply(ae, ae->exposure.saved, ae->vblank.saved, ae->again.saved, ae->dgain.saved,
+		     ae->vblank.present ? ae->applied_vblank : ae->vblank.saved))
 		perror("ae: restore sensor controls");
 }
 
@@ -849,7 +1128,61 @@ static int bridge_should_convert(int readers)
 	return readers != 0;
 }
 
-static int capture_to_loopback(const char *media_dev, const char *out_dev)
+/*
+ * Frame health: counts a run of bad frames (or poll timeouts) and says when to give up.
+ * Returns 1 to give up: nothing good for BAD_FRAME_GIVE_UP_S seconds.
+ */
+struct frame_health {
+	unsigned long bad_run, bad_total, recoveries;
+	double last_good;
+};
+
+static double monotonic_s(void)
+{
+	struct timespec t;
+
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	return t.tv_sec + t.tv_nsec / 1e9;
+}
+
+static void frame_health_start(struct frame_health *h, double now)
+{
+	memset(h, 0, sizeof(*h));
+	h->last_good = now;
+}
+
+static void frame_health_good(struct frame_health *h, double now)
+{
+	if (h->bad_run) {
+		h->recoveries++;
+		printf("ipu6: recovered after %lu bad frame(s) in %.1f s (%lu bad in total)\n",
+		       h->bad_run, now - h->last_good, h->bad_total);
+		fflush(stdout);
+	}
+	h->bad_run = 0;
+	h->last_good = now;
+}
+
+/* what: "error-marked", "short" or "timeout" (timeouts are not frames; they only age the run). */
+static int frame_health_bad(struct frame_health *h, double now, const char *what,
+			    unsigned int flags, unsigned int bytes)
+{
+	if (strcmp(what, "timeout")) {
+		h->bad_run++;
+		h->bad_total++;
+		if (h->bad_run <= 3 || h->bad_run % 100 == 0)
+			fprintf(stderr, "ipu6: %s frame (flags 0x%x, %u bytes), requeued; %lu in this run\n",
+				what, flags, bytes, h->bad_run);
+	}
+	if (now - h->last_good < BAD_FRAME_GIVE_UP_S)
+		return 0;
+	fprintf(stderr, "ipu6: no good frame for %.1f s (%lu bad frames in this run); giving up\n",
+		now - h->last_good, h->bad_run);
+	return 1;
+}
+
+static int capture_to_loopback(const char *media_dev, const char *out_dev,
+			       const struct sensor_profile *profile)
 {
 	struct ae_state ae = { .fd = -1 };
 	struct graph graph = { 0 };
@@ -876,14 +1209,14 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev)
 	if (mfd < 0 || ioctl(mfd, MEDIA_IOC_DEVICE_INFO, &info) ||
 	    strncmp(info.driver, "intel-ipu6", sizeof(info.driver)) ||
 	    read_graph(mfd, &graph, &topology) ||
-	    find_path(&graph, &topology, "ov5675", &path) ||
+	    find_path(&graph, &topology, profile->entity, &path) ||
 	    device_path(&graph, &topology, path.sensor->id, sensor_path, sizeof(sensor_path)) ||
 	    device_path(&graph, &topology, path.csi->id, csi_path, sizeof(csi_path)) ||
 	    device_path(&graph, &topology, path.video->id, capture_path, sizeof(capture_path))) {
-		fprintf(stderr, "cannot discover a unique OV5675 IPU6 capture path\n");
+		fprintf(stderr, "cannot discover a unique %s IPU6 capture path\n", profile->label);
 		goto done;
 	}
-	printf("IPU6 path: %s -> %s -> %s; output=%s\n",
+	printf("IPU6 path (%s): %s -> %s -> %s; output=%s\n", profile->label,
 	       sensor_path, csi_path, capture_path, out_dev);
 	sfd = open(sensor_path, O_RDWR | O_CLOEXEC);
 	cfd = open(csi_path, O_RDWR | O_CLOEXEC);
@@ -900,18 +1233,8 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev)
 		goto done;
 	}
 	__u32 fourcc = pixel_format(sensor.format.code);
-	/*
-	 * The measured RGB-IR layout is relative to the orientation the driver reports
-	 * as GRBG; a flip would move the sites, so refuse any other code.
-	 */
-	if (sensor.format.code != MEDIA_BUS_FMT_SGRBG10_1X10) {
-		fprintf(stderr, "unexpected OV5675 bus code 0x%x (RGB-IR layout measured for GRBG10)\n",
-			sensor.format.code);
+	if (select_cfa(profile, sensor.format.code))
 		goto done;
-	}
-	set_rgbir_pattern();
-	printf("cfa: OV5675 RGB-IR 4x4 (bus code 0x%x): %s\n", sensor.format.code,
-	       "GIGI/RGBG/GIGI/BGRG");
 	if (!fourcc || setup_link(mfd, &path, path.output->flags | MEDIA_LNK_FL_ENABLED))
 		goto done;
 	linked = 1;
@@ -1000,12 +1323,16 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev)
 		perror("prime V4L2 loopback");
 		goto done;
 	}
-	ae_init(&ae, sfd);
+	ae_init(&ae, sfd, (int)sensor.format.height);
 	signal(SIGINT, stop_bridge);
 	signal(SIGTERM, stop_bridge);
-	printf("bridge active: %ux%u Bayer to %ux%u YUYV; sensor remains streaming until stop\n",
-	       video.fmt.pix.width, video.fmt.pix.height, OUT_WIDTH, OUT_HEIGHT);
+	printf("bridge active: %ux%u %s to %ux%u YUYV%s; sensor remains streaming until stop\n",
+	       video.fmt.pix.width, video.fmt.pix.height, profile->rgbir ? "RGB-IR" : "Bayer",
+	       OUT_WIDTH, OUT_HEIGHT, output_rotate180 ? ", rotated 180" : "");
 	result = 0;
+	struct frame_health health;
+	int have_output = 0;
+	frame_health_start(&health, monotonic_s());
 	while (running) {
 		struct pollfd pfd = { .fd = vfd, .events = POLLIN | POLLPRI };
 		int ready = poll(&pfd, 1, 1000);
@@ -1015,8 +1342,13 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev)
 			result = 1;
 			break;
 		}
-		if (!ready)
+		if (!ready) {
+			if (frame_health_bad(&health, monotonic_s(), "timeout", 0, 0)) {
+				result = 3;
+				break;
+			}
 			continue;
+		}
 		struct v4l2_buffer b = { .type = type, .memory = V4L2_MEMORY_MMAP };
 		if (ioctl(vfd, VIDIOC_DQBUF, &b)) {
 			if (errno == EAGAIN || errno == EINTR) continue;
@@ -1024,15 +1356,11 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev)
 			result = 1;
 			break;
 		}
-		if (b.index >= buffer_count ||
-		    b.bytesused < (uint64_t)video.fmt.pix.bytesperline * video.fmt.pix.height ||
-		    b.bytesused > buffers[b.index].length ||
-		    (b.flags & V4L2_BUF_FLAG_ERROR)) {
-			fprintf(stderr, "invalid or error-marked IPU6 frame\n");
+		if (b.index >= buffer_count) {
+			fprintf(stderr, "invalid IPU6 buffer index %u\n", b.index);
 			result = 1;
 			break;
 		}
-		double mean_green = 0;
 		int readers = loopback_readers(outfd);
 		if (readers != last_readers) {
 			printf("bridge: %s\n", readers < 0 ? "readers_active unavailable; converting every frame" :
@@ -1040,7 +1368,29 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev)
 			       "no consumer; idle (sensor and auto-exposure keep running)");
 			last_readers = readers;
 			tnr_reset();	/* the scene may have changed while idle */
+			ae_set_idle(&ae, !bridge_should_convert(readers));
 		}
+		const char *bad = (b.flags & V4L2_BUF_FLAG_ERROR) ? "error-marked" :
+			b.bytesused < (uint64_t)video.fmt.pix.bytesperline * video.fmt.pix.height ||
+			b.bytesused > buffers[b.index].length ? "short" : NULL;
+		if (bad) {
+			int give_up = frame_health_bad(&health, monotonic_s(), bad, b.flags, b.bytesused);
+			/* Keep the consumer fed with the last picture rather than nothing. */
+			if (!give_up && have_output && bridge_should_convert(readers) &&
+			    write(outfd, output, OUT_FRAME_BYTES) != (ssize_t)OUT_FRAME_BYTES) {
+				fprintf(stderr, "write loopback frame failed: %s\n", strerror(errno));
+				give_up = 1;
+			}
+			if (give_up || ioctl(vfd, VIDIOC_QBUF, &b)) {
+				if (!give_up)
+					perror("requeue IPU6 frame");
+				result = give_up ? 3 : 1;
+				break;
+			}
+			continue;
+		}
+		frame_health_good(&health, monotonic_s());
+		double mean_green = 0;
 		if (!bridge_should_convert(readers)) {
 			/* Idle: only the cheap sampled statistics, so exposure is right on resume. */
 			unsigned int unused_gain[3];
@@ -1054,6 +1404,8 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev)
 			fprintf(stderr, "convert or write loopback frame failed: %s\n", strerror(errno));
 			result = 1;
 			break;
+		} else {
+			have_output = 1;
 		}
 		ae_frame(&ae, mean_green);
 		frame_count++;
@@ -1099,25 +1451,25 @@ done:
 	return result;
 }
 
-#ifndef CAMERA_BRIDGE_TEST
 /*
- * Optional calibration: a directory holding ov5678_ccm.txt and ov5678_lsc.txt (the stick's
- * gbos/camera/), or, as before, a single colour-matrix file.
+ * Optional calibration: a directory holding <prefix>_ccm.txt and <prefix>_lsc.txt (the
+ * stick's gbos/camera/; prefix from the sensor profile), or, as before, a single
+ * colour-matrix file.
  */
-static void load_calibration(const char *arg)
+static void load_calibration(const char *arg, const char *prefix)
 {
 	struct stat st;
 	char path[512];
 	const char *ccm = arg;
 
 	if (stat(arg, &st) == 0 && S_ISDIR(st.st_mode)) {
-		snprintf(path, sizeof(path), "%s/ov5678_lsc.txt", arg);
+		snprintf(path, sizeof(path), "%s/%s_lsc.txt", arg, prefix);
 		if (load_lsc_table(path) > 0)
 			printf("lsc: loaded %d illuminants (%dx%d grids) from %s\n", lsc_count,
 			       lsc_table[0].gw, lsc_table[0].gh, path);
 		else
 			printf("lsc: no usable table at %s; no lens-shading correction\n", path);
-		snprintf(path, sizeof(path), "%s/ov5678_ccm.txt", arg);
+		snprintf(path, sizeof(path), "%s/%s_ccm.txt", arg, prefix);
 		ccm = path;
 	}
 	if (load_ccm_table(ccm) > 0)
@@ -1126,16 +1478,61 @@ static void load_calibration(const char *arg)
 		printf("ccm: no usable table at %s; generic saturation\n", ccm);
 }
 
+struct bridge_options {
+	const struct sensor_profile *profile;
+	int rotate180;
+	const char *media, *output, *calibration;
+};
+
+/*
+ * [--sensor ov5675|ov8856] [--rotate 0|180] /dev/mediaN /dev/videoN [calibration].
+ * Without options: the front sensor, unrotated, as before the rear camera existed.
+ */
+static int parse_bridge_args(int argc, char **argv, struct bridge_options *o)
+{
+	int i = 1;
+
+	memset(o, 0, sizeof(*o));
+	o->profile = &sensor_profiles[0];
+	for (; i + 1 < argc && !strncmp(argv[i], "--", 2); i += 2) {
+		if (!strcmp(argv[i], "--sensor")) {
+			o->profile = find_sensor_profile(argv[i + 1]);
+			if (!o->profile)
+				return -1;
+		} else if (!strcmp(argv[i], "--rotate")) {
+			if (!strcmp(argv[i + 1], "180"))
+				o->rotate180 = 1;
+			else if (strcmp(argv[i + 1], "0"))
+				return -1;
+		} else {
+			return -1;
+		}
+	}
+	if (argc - i != 2 && argc - i != 3)
+		return -1;
+	o->media = argv[i];
+	o->output = argv[i + 1];
+	o->calibration = argc - i == 3 ? argv[i + 2] : NULL;
+	return 0;
+}
+
+#ifndef CAMERA_BRIDGE_TEST
 int main(int argc, char **argv)
 {
+	struct bridge_options o;
+
 	(void)probe;
-	if (argc != 3 && argc != 4) {
-		fprintf(stderr, "usage: %s /dev/mediaN /dev/videoN [calibration dir or colour-matrix table]\n", argv[0]);
+	if (parse_bridge_args(argc, argv, &o)) {
+		fprintf(stderr, "usage: %s [--sensor ov5675|ov8856] [--rotate 0|180] "
+			"/dev/mediaN /dev/videoN [calibration dir or colour-matrix table]\n", argv[0]);
 		return 2;
 	}
 	setvbuf(stdout, NULL, _IOLBF, 0);
-	if (argc == 4)
-		load_calibration(argv[3]);
-	return capture_to_loopback(argv[1], argv[2]);
+	output_rotate180 = o.rotate180;
+	printf("sensor: %s (calibration prefix %s)%s\n", o.profile->label, o.profile->cal_prefix,
+	       o.rotate180 ? "; output rotated 180" : "");
+	if (o.calibration)
+		load_calibration(o.calibration, o.profile->cal_prefix);
+	return capture_to_loopback(o.media, o.output, o.profile);
 }
 #endif

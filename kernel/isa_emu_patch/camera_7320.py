@@ -368,6 +368,84 @@ replace_once(
     "failed to parse CSI-2 firmware endpoint",
 )
 
+# The Windows driver for this RGB-IR module (ACPI OVTI5678, "OV5678", module 0BF501T3) uses
+# Intel's OV5675 mode table but writes 0x5000 = 0x71 (Linux 0x77) and 0x3d8c/0x3d8d =
+# 0x71/0xe7 (Linux: not written); see docs/ov5678-windows-vs-linux.md. What these bits do is
+# not established, so the Windows values are opt-in (module parameter, writable at runtime;
+# read at stream start) and limited to the Latitude 7320's front sensor. The values in effect
+# are read back and logged at every stream start.
+insert_once(
+    ov5675,
+    "static int ov5675_start_streaming(struct ov5675 *ov5675)\n",
+    """/* gbos: Windows driver values for the Latitude 7320 Detachable's RGB-IR OV5678 module */
+static bool gbos_windows_isp;
+module_param(gbos_windows_isp, bool, 0644);
+MODULE_PARM_DESC(gbos_windows_isp,
+\t\t "Latitude 7320 OVTI5678 only: write the Windows driver's 0x5000/0x3d8c/0x3d8d values at stream start");
+
+static const struct ov5675_reg gbos_ov5678_windows_regs[] = {
+\t{0x5000, 0x71},
+\t{0x3d8c, 0x71},
+\t{0x3d8d, 0xe7},
+};
+
+static bool ov5675_is_gbos_7320_front(struct device *dev)
+{
+\treturn dmi_match(DMI_SYS_VENDOR, "Dell Inc.") &&
+\t       dmi_match(DMI_PRODUCT_NAME, "Latitude 7320 Detachable") &&
+\t       !strcmp(dev_name(dev), "i2c-OVTI5678:00");
+}
+
+static int ov5675_gbos_7320_regs(struct ov5675 *ov5675)
+{
+\tconst struct ov5675_reg_list list = {
+\t\t.num_of_regs = ARRAY_SIZE(gbos_ov5678_windows_regs),
+\t\t.regs = gbos_ov5678_windows_regs,
+\t};
+\tbool windows = READ_ONCE(gbos_windows_isp);
+\tu32 isp, otp_hi, otp_lo;
+\tint ret;
+
+\tif (!ov5675_is_gbos_7320_front(ov5675->dev))
+\t\treturn 0;
+\tif (windows) {
+\t\tret = ov5675_write_reg_list(ov5675, &list);
+\t\tif (ret)
+\t\t\treturn ret;
+\t}
+\tif (!ov5675_read_reg(ov5675, 0x5000, OV5675_REG_VALUE_08BIT, &isp) &&
+\t    !ov5675_read_reg(ov5675, 0x3d8c, OV5675_REG_VALUE_08BIT, &otp_hi) &&
+\t    !ov5675_read_reg(ov5675, 0x3d8d, OV5675_REG_VALUE_08BIT, &otp_lo))
+\t\tdev_info(ov5675->dev,
+\t\t\t "gbos: Windows ISP values %s: 0x5000=0x%02x 0x3d8c=0x%02x 0x3d8d=0x%02x\\n",
+\t\t\t windows ? "on" : "off", isp, otp_hi, otp_lo);
+\treturn 0;
+}
+
+""",
+    "gbos_windows_isp",
+)
+replace_function_once(
+    ov5675,
+    "static int ov5675_start_streaming(struct ov5675 *ov5675)",
+    "static void ov5675_stop_streaming(struct ov5675 *ov5675)",
+    """\t\tdev_err(ov5675->dev, "failed to set mode");
+\t\treturn ret;
+\t}
+""",
+    """\t\tdev_err(ov5675->dev, "failed to set mode");
+\t\treturn ret;
+\t}
+
+\tret = ov5675_gbos_7320_regs(ov5675);
+\tif (ret) {
+\t\tdev_err(ov5675->dev, "gbos: failed to set Windows ISP values");
+\t\treturn ret;
+\t}
+""",
+    "gbos 7320 Windows ISP values",
+)
+
 ov8856 = ROOT / "drivers/media/i2c/ov8856.c"
 insert_once(
     ov8856,

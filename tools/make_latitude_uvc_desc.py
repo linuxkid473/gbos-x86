@@ -137,12 +137,33 @@ def generate(data: bytes) -> bytes:
     return bytes(output)
 
 
+def set_usb_id(data: bytes, usb_id: str) -> bytes:
+    """Replace idVendor/idProduct (device descriptor bytes 8-11) with VVVV:PPPP (hex).
+
+    Android's USB camera HAL looks cameras up by this id in
+    /vendor/etc/camera/internal_usb_camera_info.txtpb (lens data and facing), so the rear
+    camera needs its own id: the front keeps 0408:4052, listed there as FACING_FRONT.
+    """
+    vendor, sep, product = usb_id.partition(":")
+    if not sep or len(vendor) != 4 or len(product) != 4:
+        raise ValueError(f"USB id must be VVVV:PPPP, got {usb_id!r}")
+    if len(data) < 18 or data[0] != 18 or data[1] != 0x01:
+        raise ValueError("missing USB device descriptor")
+    output = bytearray(data)
+    struct.pack_into("<HH", output, 8, int(vendor, 16), int(product, 16))
+    return bytes(output)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("source", type=Path)
     parser.add_argument("output", type=Path)
+    parser.add_argument("--usb-id", help="VVVV:PPPP to put in the device descriptor")
     args = parser.parse_args()
-    args.output.write_bytes(generate(args.source.read_bytes()))
+    result = generate(args.source.read_bytes())
+    if args.usb_id:
+        result = set_usb_id(result, args.usb_id)
+    args.output.write_bytes(result)
 
 
 if __name__ == "__main__":
