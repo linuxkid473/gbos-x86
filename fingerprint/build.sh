@@ -25,3 +25,5 @@ $READELF -h "$OUTPUT" | grep -q 'Type:.*DYN' || { echo "HAL is not a PIE executa
 $READELF -d "$OUTPUT" | grep -E 'NEEDED|FLAGS'
 $HOSTCC -std=c11 -O2 -Wall -Wextra -Werror -o "$TMP/goodix_test" goodix_test.c
 "$TMP/goodix_test"
+$HOSTCC -std=c11 -O2 -Wall -Wextra -Werror -o "$TMP/goodix_sim_test" goodix_sim_test.c
+"$TMP/goodix_sim_test"

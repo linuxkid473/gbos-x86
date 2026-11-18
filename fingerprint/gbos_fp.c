@@ -43,7 +43,7 @@ void __libc_init(void *raw_args, void (*onexit)(void), int (*main)(int, char **,
 void *malloc(size_t); void *calloc(size_t, size_t); void free(void *);
 void *memcpy(void *, const void *, size_t); void *memset(void *, int, size_t);
 int memcmp(const void *, const void *, size_t); size_t strlen(const char *);
-int strcmp(const char *, const char *);
+int strcmp(const char *, const char *); int strncmp(const char *, const char *, size_t);
 int snprintf(char *, size_t, const char *, ...) __attribute__((format(printf, 3, 4)));
 void arc4random_buf(void *, size_t);
 struct timespec { long tv_sec, tv_nsec; };
@@ -409,8 +409,11 @@ static struct fp_policy session_policy(const struct session *ss)
 	return p;
 }
 
-/* The sensor is open. Delete its templates that no Android can reach any more (gbos_fp_policy.h). */
-static void reconcile(struct session *ss)
+/*
+ * The sensor is open. Delete its templates that no Android can reach any more (gbos_fp_policy.h). Returns
+ * fp_reconcile's result: negative means the sensor stopped answering and must be reopened.
+ */
+static int reconcile(struct session *ss)
 {
 	struct fp_policy p = session_policy(ss);
 	int r, deleted, failed, fail = 0;
@@ -419,15 +422,18 @@ static void reconcile(struct session *ss)
 	if (r != GOODIX_OK) {
 		LOGW("user %d: sensor template cleanup failed: %d (sensor code %d); retried at the next enroll",
 		     ss->user, r, fail);
-		return;
+		return r;
 	}
 	ss->reconciled = failed == 0;
+	return r;
 }
 
 static void op_reconcile(struct session *ss)
 {
 	int r;
 
+	if (ss->reconciled)
+		return;
 	if ((r = goodix_open(&dev)) < 0) {
 		LOGW("user %d: sensor unavailable for template cleanup: %d; retried at the next enroll",
 		     ss->user, r);
@@ -865,6 +871,7 @@ static void op_authenticate(struct session *ss)
 	}
 	LOGI("user %d: authenticate starting (%d enrollments)", ss->user, st->n);
 	if ((r = goodix_open(&dev)) < 0) {
+		LOGE("user %d: sensor open failed: %d", ss->user, r);
 		cb_error(ss, ERR_HW_UNAVAILABLE, 0);
 		return;
 	}
@@ -938,7 +945,8 @@ static void op_enroll(struct session *ss, const struct hat *hat)
 	struct user_state *st = &ss->st;
 	struct op_ctx ctx = { ss, 0 };
 	struct goodix_ev ev = { on_sensor_event, &ctx };
-	char name[48];
+	struct goodix_template dup;
+	char name[FP_NAME_MAX + 1];
 	int32_t id;
 	int r, fail = 0, i;
 
@@ -958,15 +966,28 @@ static void op_enroll(struct session *ss, const struct hat *hat)
 			;
 	} while (id == 0 || i < st->n);
 	ctx.enroll_id = id;
-	template_name(name, ss->user, id);
-	LOGI("user %d: enroll %d starting", ss->user, id);
+	if (!template_name(name, ss->user, id)) {
+		cb_error(ss, ERR_UNABLE_TO_PROCESS, 0);
+		return;
+	}
+	LOGI("user %d: enroll %d starting as %s", ss->user, id, name);
 	if ((r = goodix_open(&dev)) < 0) {
+		LOGE("user %d: sensor open failed: %d", ss->user, r);
 		cb_error(ss, ERR_HW_UNAVAILABLE, 0);
 		return;
 	}
-	r = goodix_enroll(&dev, name, &ev, &fail);
+	/* createSession queued a cleanup; if it could not run, do it now, before the sensor's duplicate check */
+	if (!ss->reconciled && reconcile(ss) < 0) {
+		goodix_close(&dev);
+		if ((r = goodix_open(&dev)) < 0) {
+			LOGE("user %d: sensor open failed after the template cleanup: %d", ss->user, r);
+			cb_error(ss, ERR_HW_UNAVAILABLE, 0);
+			return;
+		}
+	}
+	r = goodix_enroll(&dev, name, &ev, &fail, &dup);
 	/* Settings cancels its "find the sensor" enroll at the first touch: an I/O error on the way out is still a
-	 * cancel to the framework (and goodix_open resets the sensor next time) */
+	 * cancel to the framework */
 	if (r < 0 && r != -ECANCELED && goodix_cancel_requested(&dev)) {
 		LOGW("user %d: enroll ended with %d while being cancelled: reported as cancelled", ss->user, r);
 		r = -ECANCELED;
@@ -985,8 +1006,20 @@ static void op_enroll(struct session *ss, const struct hat *hat)
 		}
 	} else if (r == -ECANCELED) {
 		cb_error(ss, ERR_CANCELED, 0);
+		settle_after_cancel();
+	} else if (r == GOODIX_DUPLICATE) {
+		struct fp_policy p = session_policy(ss);
+
+		fp_on_duplicate(&dev, &p, &dup, fail);
+		LOGE("user %d: enroll failed: finger already stored on the sensor (sensor code %d)", ss->user, fail);
+		cb_error(ss, ERR_UNABLE_TO_PROCESS, fail);
 	} else if (r == GOODIX_FAILED) {
+		int gone = 0;
+
 		LOGE("user %d: enroll failed, sensor code %d", ss->user, fail);
+		/* a refused commit may still have stored it: don't leave a template Android cannot reach */
+		if (goodix_delete(&dev, name, &gone) == GOODIX_OK)
+			LOGW("user %d: removed the partly stored template %s", ss->user, name);
 		cb_error(ss, fail == GOODIX_NO_SPACE ? ERR_NO_SPACE : ERR_UNABLE_TO_PROCESS, fail);
 	} else {
 		LOGE("user %d: enroll failed: %d", ss->user, r);
@@ -1097,6 +1130,7 @@ static void run(struct op *op)
 	case OP_AUTHID: cb_long(ss, CB_AUTHID_RETRIEVED, 0); break;		/* WEAK: always 0 */
 	case OP_INVALIDATE: cb_long(ss, CB_AUTHID_INVALIDATED, 0); break;
 	case OP_RESET_LOCKOUT: op_reset_lockout(ss, &op->hat); break;
+	case OP_RECONCILE: op_reconcile(ss); break;	/* internal: no callback */
 	case OP_CLOSE:
 		pthread_mutex_lock(&mu);
 		ss->closed = true;
@@ -1347,7 +1381,16 @@ static binder_status_t create_session(const AParcel *in, AParcel *out)
 		session_unref_locked(old);
 	}
 	pthread_mutex_unlock(&mu);
-	LOGI("session for user %d (%d enrollments)", user, ss->st.n);
+	LOGI("session for user %d (%d enrollments%s)", user, ss->st.n,
+	     ss->st.trusted ? "" : ", state not trusted: no template cleanup for this user");
+	{	/* delete the sensor's unreachable templates before anything else runs for this session */
+		struct op *op = calloc(1, sizeof(*op));
+
+		if (op) {
+			op->kind = OP_RECONCILE;
+			enqueue(ss, op);
+		}
+	}
 
 	write_ok_header(out);
 	r = AParcel_writeStrongBinder(out, b);
@@ -1388,13 +1431,27 @@ int main(int argc, char **argv, char **envp)
 	AIBinder *binder;
 	pthread_t t;
 	int32_t ex;
+	struct statfs_buf fs;
 	int i, probe_result = 0;
 
-	(void)argc; (void)argv; (void)envp;
+	(void)envp;
+	for (i = 1; i < argc; i++) {
+		if (strcmp(argv[i], "--no-gbos-install") == 0)
+			no_install = true;
+		else
+			LOGW("ignoring unknown argument %s", argv[i]);
+	}
 	goodix_init(&dev);
 	if (mkdir(DATA_DIR, 0700) != 0 && errno != EEXIST)
 		LOGE("mkdir " DATA_DIR ": %d", errno);
+	/* A statfs failure counts as persistent: it only ever makes the cleanup keep more templates. */
+	if (statfs(DATA_DIR, &fs) == 0)
+		data_live = fs.f_type == TMPFS_MAGIC || fs.f_type == RAMFS_MAGIC;
+	else
+		LOGW("statfs " DATA_DIR ": %d; treating /data as persistent", errno);
 	load_instance();
+	LOGI("data %s, gbOS86 install on this machine: %s", data_live ? "tmpfs (live boot)" : "persistent",
+	     no_install ? "none" : "present or unknown");
 
 	/* hook.sh starts this before system_server; retries cover USB nodes still settling. */
 	for (i = 0; i < 12; i++) {

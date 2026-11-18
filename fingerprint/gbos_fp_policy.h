@@ -112,7 +112,7 @@ static inline bool fp_name_parse(const char *s, struct fp_name *out)
 	int64_t user = 0;
 	int digits = 0;
 
-	if (memcmp(s, "GBOS-", 5) != 0)
+	if (strncmp(s, "GBOS-", 5) != 0)	/* stops at a short name's end */
 		return false;
 	s += 5;
 	out->live = s[0] == 'L' && s[1] == '-';
@@ -194,6 +194,45 @@ static inline int fp_reconcile(struct goodix *s, const struct fp_policy *p, int 
 	FP_LOGI("sensor templates for user %d: %u stored, %d deleted, %d kept, %d enrollments known",
 		(int)p->user, (unsigned int)count, *deleted, kept, p->n);
 	return GOODIX_OK;
+}
+
+/*
+ * goodix_enroll returned GOODIX_DUPLICATE: the finger matches stored template *dup (empty uid when the
+ * sensor did not name it). Delete it when the policy allows, so the next attempt succeeds; otherwise log
+ * who owns it. Android's AIDL v4 Error has no "already enrolled", so the caller reports UNABLE_TO_PROCESS
+ * and this log line is the only place the reason appears. Returns true when the template was deleted.
+ */
+static inline bool fp_on_duplicate(struct goodix *s, const struct fp_policy *p,
+				   const struct goodix_template *dup, int code)
+{
+	enum fp_verdict v;
+	int r, fail = 0;
+
+	if (!dup->uid_len) {
+		FP_LOGW("user %d: this finger is already stored on the sensor (sensor code %d), which did not "
+			"say under which name: not enrolled; use another finger", (int)p->user, code);
+		return false;
+	}
+	v = fp_classify(p, dup->uid);
+	if (fp_verdict_deletes(v)) {
+		r = goodix_delete(s, dup->uid, &fail);
+		if (r == GOODIX_OK || r == GOODIX_NORECORD) {
+			FP_LOGW("user %d: this finger was already stored on the sensor as %s (%s): deleted it; "
+				"enroll the finger again", (int)p->user, dup->uid, fp_verdict_text(v));
+			return true;
+		}
+		FP_LOGW("user %d: this finger is already stored on the sensor as %s (%s); deleting it failed: "
+			"%d (sensor code %d)", (int)p->user, dup->uid, fp_verdict_text(v), r, fail);
+		return false;
+	}
+	if (v == FP_KEEP_ENROLLED)
+		FP_LOGW("user %d: this finger is already enrolled for this user (%s): not enrolled twice",
+			(int)p->user, dup->uid);
+	else
+		FP_LOGW("user %d: this finger is already enrolled on the sensor as %s (%s): kept, so not "
+			"enrolled here; remove it there or use another finger", (int)p->user, dup->uid,
+			fp_verdict_text(v));
+	return false;
 }
 
 #endif
