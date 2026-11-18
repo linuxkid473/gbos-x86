@@ -1,0 +1,68 @@
+{
+    "version": "1.7.0",
+    "comment": "gbOS86 Dell Latitude 7320 Detachable: monitoring only. Zones are the ACPI DTT participants (thermal zone types on Linux); thresholds follow Dell's ACPI trip points read on 2026-11-18 (passive -> LIGHT, just below hot -> EMERGENCY). No power-cap, fan or charge-limit control and no SHUTDOWN level: the firmware and kernel critical trips handle emergencies, Intel DTT-style power limiting stays with the firmware.",
+    "Sensors": [
+        { "Name": "TSKN", "Type": "UNKNOWN" },
+        { "Name": "TCPU", "Type": "UNKNOWN" },
+        { "Name": "TMEM", "Type": "UNKNOWN" },
+        { "Name": "CHRG", "Type": "UNKNOWN" },
+        { "Name": "AMBF", "Type": "UNKNOWN" },
+        { "Name": "NGFF", "Type": "UNKNOWN" },
+        {
+            "Name": "VIRTUAL-SKIN",
+            "Type": "SKIN",
+            "VirtualSensor": true,
+            "Formula": "MAXIMUM",
+            "Combination": ["TSKN"],
+            "Coefficient": [1],
+            "Multiplier": 0.001,
+            "HotThreshold":  ["NaN", 45, "NaN", "NaN", "NaN", 80, "NaN"],
+            "HotHysteresis": [    0,  2,     0,     0,     0,  3,     0],
+            "SendCallback": true,
+            "PollingDelay": 8000,
+            "PassiveDelay": 4000
+        },
+        {
+            "Name": "VIRTUAL-CPU",
+            "Type": "CPU",
+            "VirtualSensor": true,
+            "Formula": "MAXIMUM",
+            "Combination": ["TCPU"],
+            "Coefficient": [1],
+            "Multiplier": 0.001,
+            "HotThreshold":  ["NaN", 90, "NaN", "NaN", "NaN", 100, "NaN"],
+            "HotHysteresis": [    0,  3,     0,     0,     0,   3,     0],
+            "SendCallback": true,
+            "PollingDelay": 8000,
+            "PassiveDelay": 1000
+        },
+        {
+            "Name": "VIRTUAL-DDR",
+            "Type": "SKIN",
+            "VirtualSensor": true,
+            "Formula": "MAXIMUM",
+            "Combination": ["TMEM"],
+            "Coefficient": [1],
+            "Multiplier": 0.001,
+            "HotThreshold":  ["NaN", 70, "NaN", "NaN", "NaN", 75, "NaN"],
+            "HotHysteresis": [    0,  2,     0,     0,     0,  2,     0],
+            "SendCallback": true,
+            "PollingDelay": 8000,
+            "PassiveDelay": 4000
+        },
+        {
+            "Name": "VIRTUAL-CHARGE",
+            "Type": "SKIN",
+            "VirtualSensor": true,
+            "Formula": "MAXIMUM",
+            "Combination": ["CHRG"],
+            "Coefficient": [1],
+            "Multiplier": 0.001,
+            "HotThreshold":  ["NaN", 57, "NaN", "NaN", "NaN", 84, "NaN"],
+            "HotHysteresis": [    0,  2,     0,     0,     0,  3,     0],
+            "SendCallback": true,
+            "PollingDelay": 8000,
+            "PassiveDelay": 4000
+        }
+    ]
+}

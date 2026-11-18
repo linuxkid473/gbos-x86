@@ -514,6 +514,30 @@ static int test_wb_locus(void)
 	return rg == 0.60 && bg == 0.40 ? 0 : 7;
 }
 
+
+/* A near-black frame keeps the previous white point and gains (no snap to the locus end). */
+static int test_wb_dark_frame(void)
+{
+	static uint16_t frame[64 * 64];
+	unsigned int gains_lit[3], gains_dark[3];
+
+	set_bayer_pattern(MEDIA_BUS_FMT_SGRBG10_1X10);
+	ccm_count = 0; ccm_active = 0;
+	for (unsigned int y = 0; y < 64; y++)		/* lit: R/G 0.5, B/G 0.75 */
+		for (unsigned int x = 0; x < 64; x++)
+			frame[y * 64 + x] = (uint16_t)(BLACK_LEVEL + (unsigned int[]){ 200, 400, 300 }[channel_at(x, y)]);
+	calculate_white_balance(frame, 64, 64, 128, gains_lit, NULL);
+	double rg = wb_white_rg, bg = wb_white_bg;
+	if (fabs(rg - 0.5) > 0.01 || fabs(bg - 0.75) > 0.01)
+		return 1;
+	for (unsigned int i = 0; i < 64 * 64; i++)	/* black: green 0, a little red/blue noise */
+		frame[i] = (uint16_t)(BLACK_LEVEL + (channel_at(i % 64, i / 64) == 1 ? 0 : 3));
+	calculate_white_balance(frame, 64, 64, 128, gains_dark, NULL);
+	if (wb_white_rg != rg || wb_white_bg != bg)
+		return 2;
+	return gains_dark[0] == gains_lit[0] && gains_dark[2] == gains_lit[2] ? 0 : 3;
+}
+
 int main(void)
 {
 	(void)capture_to_loopback;
@@ -549,6 +573,8 @@ int main(void)
 		return 120 + test_highlights();
 	if (test_wb_locus())
 		return 130 + test_wb_locus();
+	if (test_wb_dark_frame())
+		return 140 + test_wb_dark_frame();
 	for (unsigned int y = 0; y < 8; y++)
 		for (unsigned int x = 0; x < 8; x++)
 			raw[y * 8 + x] = (uint16_t)(x + y * 8);

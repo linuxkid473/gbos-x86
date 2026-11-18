@@ -100,7 +100,7 @@ if [ -n "${GBOS_ROTATION_POLICY_OVERLAY:-}" ]; then
   cp "$GBOS_ROTATION_POLICY_OVERLAY" "$G/sensors/gbos-latitude7320-rotation-policy.apk"
 fi
 [ -f "$U/Add-gbOS-to-Windows-BootMenu.bat" ] && cp "$U/Add-gbOS-to-Windows-BootMenu.bat" "$STAGE/gbos/Add-gbOS-to-Windows-BootMenu.bat"
-for d in firmware patched audio installer kmod modules surface ksu; do cp -R "$U/$d" "$G/$d"; done
+for d in firmware patched audio installer kmod modules surface ksu thermal; do cp -R "$U/$d" "$G/$d"; done
 # Stage0 screen reader (Speakup + espeakup, usb/a11y/, filled by tools/fetch_a11y_tools.sh): only used when booting the stick.
 [ -d "$U/a11y/bin" ] && cp -R "$U/a11y" "$G/a11y"
 # Ensure both '+' and non-'+' versions exist on the FAT32 image filesystem

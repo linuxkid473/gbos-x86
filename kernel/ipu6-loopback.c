@@ -199,6 +199,7 @@ static void select_ccm(double rg, double bg)
  * dominated by one colour pulls grey-world far off it). Without a table: unchanged.
  */
 #define WB_LOCUS_BAND 0.03
+#define WB_MIN_SIGNAL 4.0	/* mean green (raw units above black) below which WB keeps its last state */
 static double wb_white_rg = 1.0, wb_white_bg = 1.0;
 static double wb_locus_distance;
 
@@ -386,7 +387,15 @@ static void calculate_white_balance(const uint16_t *raw, unsigned int width,
 	}
 	gain_q12[0] = gain_q12[2] = 4096;
 	memcpy(wb_last_mean, mean, sizeof(wb_last_mean));
-	if (mean[0] > 0 && mean[1] > 0 && mean[2] > 0) {
+	/*
+	 * A near-black frame (stream start, lens covered) carries no colour information:
+	 * one with green at 0 once snapped the white point to the warmest end of the locus
+	 * (distance 18 on boot-8). Keep the previous white point and gains for such frames.
+	 */
+	if (mean[1] < WB_MIN_SIGNAL || mean[0] <= 0 || mean[2] <= 0) {
+		gain_q12[0] = (unsigned int)(fmin(4.0, fmax(0.25, 1.0 / wb_white_rg)) * 4096.0 + 0.5);
+		gain_q12[2] = (unsigned int)(fmin(4.0, fmax(0.25, 1.0 / wb_white_bg)) * 4096.0 + 0.5);
+	} else {
 		/*
 		 * Grey-world white point (IR-free raw R/G, B/G, the units of the calibrated
 		 * white points), constrained to the module's illuminant locus when the
@@ -460,7 +469,8 @@ static void log_cfa_phases(const uint16_t *raw, unsigned int width,
 		printf("lsc: illuminant %d (%.0f%%) + %d, strength %.2f at sensor gain %.1fx\n", lsc_pick[0],
 		       lsc_weight * 100.0, lsc_pick[1], lsc_strength, sensor_total_gain);
 	else
-		printf("lsc: no lens-shading table\n");
+		printf("lsc: %s\n", lsc_count ? "loaded, not applied yet (no frame converted since start)"
+					      : "no lens-shading table");
 }
 
 static unsigned char clamp8(int value)

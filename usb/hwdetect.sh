@@ -187,6 +187,15 @@ gbos_report_thermal() {
       echo "  ${n##*/}: $(cat "$t" 2>/dev/null) $(cat "${n}_temp" 2>/dev/null)"
     done
   done
+  echo "== RAPL power limits before Android (zone constraint name power_uW window_us)"
+  for z in "$sys"/class/powercap/intel-rapl*; do
+    [ -d "$z" ] || continue
+    for n in "$z"/constraint_*_name; do
+      [ -f "$n" ] || continue
+      c=${n%_name}
+      echo "${z##*/} $(cat "$z/name" 2>/dev/null) ${c##*/}: $(cat "$n" 2>/dev/null) $(cat "${c}_power_limit_uw" 2>/dev/null) $(cat "${c}_time_window_us" 2>/dev/null)"
+    done
+  done
   echo "== cooling devices (device type cur/max)"
   for c in "$sys"/class/thermal/cooling_device*; do
     [ -d "$c" ] || continue

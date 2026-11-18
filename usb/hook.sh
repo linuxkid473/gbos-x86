@@ -293,6 +293,29 @@ gbos_hide_unimplemented_hals() {
   done
 }
 
+# Google's init.lapis.rc writes its own laptop's CPU power limits on every boot ("on init": PL1 25 W and
+# PL2 55 W to intel-rapl:0 and intel-rapl-mmio:0, plus a TCC offset). gbOS never runs on a Lapis: on the
+# Latitude 7320 (a 7-15 W i7-1180G7) those writes landed after the RAPL drivers loaded (boot-8), and on
+# 45 W laptops they would lower the limit. Copy the file without those writes so the firmware's own
+# limits stay in force. $1 = source rc, $2 = filtered copy.
+gbos_filter_lapis_power_limits() {
+  grep -v -E '^[[:space:]]*write[[:space:]]+/sys/(class/powercap/[^[:space:]]+/constraint_[0-9]+_(power_limit_uw|time_window_us)|devices/[^[:space:]]+/tcc_offset_degree_celsius)[[:space:]]' "$1" > "$2"
+}
+
+# Monitoring-only thermal config for the Dell Latitude 7320 Detachable (usb/thermal/): the Pixel thermal
+# HAL otherwise uses Google's Lapis profile, whose zones (TSR0-TSR4) do not exist here. $1 = new root,
+# $2 = config file, $3 = DMI product name (tests). Installs over both paths the HAL may read.
+gbos_latitude_thermal_config() {
+  _tc_root=$1; _tc_cfg=$2; _tc_product=$3
+  [ "$_tc_product" = "Latitude 7320 Detachable" ] || return 1
+  [ -s "$_tc_cfg" ] || { log "hook: Latitude thermal config missing ($_tc_cfg)"; return 1; }
+  _tc_done=0
+  for _tc_dst in "$_tc_root/vendor/etc/thermal/lapis/thermal_info_config.json" "$_tc_root/vendor/etc/thermal_info_config.json"; do
+    [ -f "$_tc_dst" ] && mount --bind "$_tc_cfg" "$_tc_dst" && _tc_done=$((_tc_done + 1))
+  done
+  [ "$_tc_done" -gt 0 ] && log "hook: Latitude 7320 thermal config installed ($_tc_done path(s))"
+}
+
 gbos_configure_kvm_trace() {
   GBOS_KVM_TRACE_SETUP=
   GBOS_KVM_TRACE_ON=
@@ -1123,6 +1146,13 @@ SK=/new/vendor/etc/vintf/manifest/android.hardware.security.secretkeeper.trusty.
 if [ "${HIDE_UNIMPLEMENTED_HALS:-1}" = 1 ]; then
   gbos_hide_unimplemented_hals /new/system/etc/vintf/manifest
 fi
+LR=/new/vendor/etc/init/init.lapis.rc
+if [ "${KEEP_LAPIS_POWER_LIMITS:-0}" != 1 ] && [ -f "$LR" ] && gbos_filter_lapis_power_limits "$LR" /tmp/init.lapis.rc &&
+   ! cmp -s "$LR" /tmp/init.lapis.rc && mount --bind /tmp/init.lapis.rc "$LR"; then
+  log "hook: Lapis CPU power-limit writes removed from init.lapis.rc (firmware limits kept)"
+fi
+gbos_latitude_thermal_config /new "$G/thermal/latitude7320_thermal_info_config.json" \
+  "$(cat /sys/class/dmi/id/product_name 2>/dev/null)" || true
 # Gatekeeper is Trusty-backed (VSOCK:200) and enroll never returns, so setting a lock-screen
 # password hangs LockSettingsService (and every Settings screen waiting on it). Keep the VINTF
 # declaration but don't start the Trusty service: gbos_soft_gk (gbos.rc above) registers

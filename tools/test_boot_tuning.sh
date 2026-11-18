@@ -241,4 +241,60 @@ grep -q '^thermal_zone1 TCPU 55000' "$TMP/thermal.out"
 grep -qx 'cooling_device0 Processor 0/3' "$TMP/thermal.out"
 grep -q '^    gbos_report_thermal$' "$ROOT/usb/hwdetect.sh"
 
+# Lapis power limits: only the powercap/TCC writes go; permissions and other commands stay.
+sed -n '/^gbos_filter_lapis_power_limits() {/,/^}/p' "$HOOK" > "$TMP/lapis.sh"
+sed -n '/^gbos_latitude_thermal_config() {/,/^}/p' "$HOOK" >> "$TMP/lapis.sh"
+. "$TMP/lapis.sh"
+cat > "$TMP/init.lapis.rc" <<'RC'
+on init
+    write /sys/class/powercap/intel-rapl:0/constraint_0_power_limit_uw 25000000
+    write /sys/class/powercap/intel-rapl-mmio:0/constraint_1_power_limit_uw 55000000
+    write /sys/class/powercap/intel-rapl:0/constraint_0_time_window_us 28000000
+    write /sys/devices/pci0000:00/0000:00:04.0/tcc_offset_degree_celsius 5
+    write /proc/acpi/wakeup "CREC"
+
+on property:vendor.thermal.link_ready=1
+    chown root system /sys/class/powercap/intel-rapl:0/constraint_0_power_limit_uw
+    chmod 0664 /sys/class/powercap/intel-rapl:0/constraint_0_power_limit_uw
+RC
+gbos_filter_lapis_power_limits "$TMP/init.lapis.rc" "$TMP/init.lapis.out"
+! grep -q 'powercap.*power_limit_uw 25000000\|55000000\|time_window_us 28000000\|tcc_offset' "$TMP/init.lapis.out"
+grep -q '^    write /proc/acpi/wakeup "CREC"$' "$TMP/init.lapis.out"
+[ "$(grep -c 'powercap' "$TMP/init.lapis.out")" = 2 ]
+grep -q '^on init$' "$TMP/init.lapis.out" && grep -q '^on property:vendor.thermal.link_ready=1$' "$TMP/init.lapis.out"
+grep -q 'KEEP_LAPIS_POWER_LIMITS:-0}" != 1' "$HOOK"
+
+# Latitude thermal config: DMI-scoped, bind-mounted over the existing HAL config paths.
+command mkdir -p "$TMP/troot/vendor/etc/thermal/lapis"
+: > "$TMP/troot/vendor/etc/thermal/lapis/thermal_info_config.json"
+: > "$TMP/troot/vendor/etc/thermal_info_config.json"
+: > "$TMP/mounts"
+mount() { echo "$*" >> "$TMP/mounts"; }
+log() { :; }
+CFGJ="$ROOT/usb/thermal/latitude7320_thermal_info_config.json"
+! gbos_latitude_thermal_config "$TMP/troot" "$CFGJ" "Latitude 5300"
+[ ! -s "$TMP/mounts" ]
+gbos_latitude_thermal_config "$TMP/troot" "$CFGJ" "Latitude 7320 Detachable"
+[ "$(wc -l < "$TMP/mounts")" = 2 ]
+! gbos_latitude_thermal_config "$TMP/troot" "$TMP/missing.json" "Latitude 7320 Detachable"
+unset -f mount
+python3 -I -c 'import json,sys
+d = json.load(open(sys.argv[1]))
+names = {s["Name"] for s in d["Sensors"]}
+assert {"TSKN","TCPU","TMEM","CHRG","AMBF","NGFF"} <= names
+for s in d["Sensors"]:
+    assert "BindedCdevInfo" not in s and "PIDInfo" not in s, s["Name"]
+    t = s.get("HotThreshold")
+    if t: assert len(t) == 7 and t[6] == "NaN", s["Name"]
+assert "CoolingDevices" not in d' "$CFGJ"
+grep -q 'for d in patched audio installer kmod ksu a11y surface thermal; do' "$ROOT/tools/deploy_stick.sh"
+grep -q 'surface ksu thermal; do' "$ROOT/tools/make_gbos86_image.sh"
+
+# RAPL report: firmware power limits recorded before Android.
+P="$TMP/thermsys/class/powercap/intel-rapl:0"
+command mkdir -p "$P"
+echo package-0 > "$P/name"; echo long_term > "$P/constraint_0_name"; echo 15000000 > "$P/constraint_0_power_limit_uw"; echo 28000000 > "$P/constraint_0_time_window_us"
+GBOS_SYSFS_ROOT="$TMP/thermsys" gbos_report_thermal > "$TMP/thermal2.out"
+grep -qx 'intel-rapl:0 package-0 constraint_0: long_term 15000000 28000000' "$TMP/thermal2.out"
+
 echo "BOOT_TUNING_TEST_PASS"
