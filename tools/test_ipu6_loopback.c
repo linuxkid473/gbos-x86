@@ -901,6 +901,153 @@ static int test_frame_health(void)
 	return 0;
 }
 
+/* RGB-IR frames for the colour-noise tests: noisy grey (mode 0) or a neutral dark/bright edge. */
+static unsigned int rgbir_noise = 7;
+static void fill_rgbir_test(uint16_t *f, unsigned int w, unsigned int h, int mode)
+{
+	static const double level[4] = { 100, 160, 85, 19 };	/* R G B IR above black, boot-11-like */
+	for (unsigned int y = 0; y < h; y++)
+		for (unsigned int x = 0; x < w; x++) {
+			int ch = channel_at(x, y);
+			double v;
+			if (mode == 0) {
+				rgbir_noise = rgbir_noise * 1103515245u + 12345u;
+				v = level[ch] + (double)((rgbir_noise >> 16) % 121) - 60;
+			} else {
+				double base = x < w / 2 ? 60 : 600;
+				v = ch == CFA_IR ? base * 0.1 : base;
+			}
+			f[(size_t)y * w + x] = (uint16_t)(BLACK_LEVEL + (v < 0 ? 0 : v));
+		}
+}
+
+/* Mean U, V over the frame (mode 0) or the largest |U|, |V| next to the edge (mode 1). */
+static void rgbir_test_chroma(int mode, int radius, double gain, double *a, double *b)
+{
+	const unsigned int w = 2592, h = 1944;
+	static unsigned char out[OUT_FRAME_BYTES];
+	uint16_t *f = malloc((size_t)w * h * sizeof(*f));
+	int saved_r = chroma_radius;
+	double saved_g = sensor_total_gain, su = 0, sv = 0, n = 0, mx = 0;
+
+	*a = *b = 1e9;
+	if (!f)
+		return;
+	set_rgbir_pattern();
+	chroma_radius = radius;
+	sensor_total_gain = gain;
+	rgbir_noise = 7;
+	fill_rgbir_test(f, w, h, mode);
+	for (int k = 0; k < 3; k++) {	/* white balance settles */
+		tnr_reset();
+		convert_bayer_yuyv(f, w, h, w * 2, out, sizeof(out), NULL);
+	}
+	for (int y = 20; y < OUT_HEIGHT - 20; y++)
+		for (int x = 20; x < OUT_WIDTH - 20; x += 2) {
+			int u = out[((size_t)y * OUT_WIDTH + x) * 2 + 1] - 128;
+			int v = out[((size_t)y * OUT_WIDTH + x) * 2 + 3] - 128;
+			if (mode == 0) {
+				su += u; sv += v; n++;
+			} else if (x >= 310 && x <= 330) {
+				if (abs(u) > mx) mx = abs(u);
+				if (abs(v) > mx) mx = abs(v);
+			}
+		}
+	*a = mode == 0 ? su / n : mx;
+	*b = mode == 0 ? sv / n : mx;
+	chroma_radius = saved_r;
+	sensor_total_gain = saved_g;
+	free(f);
+}
+
+/*
+ * Noisy greys stay grey: colour from linear-light averages. The per-pixel path (radius 0,
+ * the same gamma-domain averaging the earlier U/V box filter did) shows the green bias.
+ */
+static int test_noise_colour_bias(void)
+{
+	double u, v;
+
+	rgbir_test_chroma(0, 2, 17.5, &u, &v);
+	if (fabs(u) > 1.0 || fabs(v) > 1.0)
+		return 1;
+	rgbir_test_chroma(0, 0, 17.5, &u, &v);	/* negative control */
+	if (u > -2.0 || v > -1.0)
+		return 2;
+	return 0;
+}
+
+/* A neutral edge keeps (almost) no colour; per pixel it shows a fringe. */
+static int test_edge_colour(void)
+{
+	double hi, lo, unused;
+
+	rgbir_test_chroma(1, 2, 17.5, &lo, &unused);
+	rgbir_test_chroma(1, 0, 17.5, &hi, &unused);
+	return lo <= 2 && hi >= lo + 3 ? 0 : 1;
+}
+
+/* Gain-scaled denoise steps. */
+static int test_gain_denoise_steps(void)
+{
+	if (chroma_radius_for_gain(4) != 2 || chroma_radius_for_gain(10) != 3 ||
+	    chroma_radius_for_gain(40) != 4)
+		return 1;
+	if (tnr_threshold_for_gain(4) != TNR_THRESHOLD || tnr_threshold_for_gain(32) != 2 * TNR_THRESHOLD ||
+	    tnr_threshold_for_gain(100) != 2 * TNR_THRESHOLD)
+		return 2;
+	int saved = chroma_radius;
+	chroma_radius = 0;
+	int off = chroma_radius_for_gain(40);
+	chroma_radius = saved;
+	return off == 0 ? 0 : 3;
+}
+
+/* Synthetic lens: stripes whose contrast peaks when the lens is at `target`. */
+static void af_test_frame(uint16_t *f, unsigned int w, unsigned int h, int pos, int target)
+{
+	double d = (pos - target) / 15.0, contrast = 1.0 / (1.0 + d * d);
+	for (unsigned int y = 0; y < h; y++)
+		for (unsigned int x = 0; x < w; x++)
+			f[y * w + x] = (uint16_t)(BLACK_LEVEL + 300 + (((x / 3) & 1) ? 1 : -1) * 200 * contrast);
+}
+
+/* Contrast AF: coarse then fine scan ends at the sharpest position and holds AE meanwhile. */
+static int test_autofocus(void)
+{
+	static uint16_t f[192 * 144];
+	struct af_state af;
+	int targets[] = { 337, 252, 461 };
+
+	for (int t = 0; t < 3; t++) {
+		memset(&af, 0, sizeof(af));
+		af.fd = -1;
+		af.present = 1;
+		af.min = 0;
+		af.max = 1023;
+		af_move(&af, AF_START);
+		af_start(&af);
+		if (af.value != AF_COARSE_MIN || af.phase != 1)
+			return 1;
+		int frames = 0, busy = 1;
+		while (busy && frames < 400) {
+			af_test_frame(f, 192, 144, af.value, targets[t]);
+			busy = af_frame(&af, f, 192, 144, 192 * 2);
+			frames++;
+		}
+		if (busy || abs(af.value - targets[t]) > AF_FINE_STEP)
+			return 2 + t;
+		/* coarse 13 positions + fine 7, each settling AF_SETTLE frames then measured */
+		if (frames > 21 * (AF_SETTLE + 1))
+			return 5;
+	}
+	/* No lens (front): nothing to do, AE never held. */
+	memset(&af, 0, sizeof(af));
+	af.fd = -1;
+	af_start(&af);
+	return af_frame(&af, f, 192, 144, 192 * 2) == 0 && af.phase == 0 ? 0 : 6;
+}
+
 int main(void)
 {
 	(void)capture_to_loopback;
@@ -921,6 +1068,14 @@ int main(void)
 		return 200 + test_idle_frame();
 	if (test_frame_health())
 		return 210 + test_frame_health();
+	if (test_noise_colour_bias())
+		return 220 + test_noise_colour_bias();
+	if (test_edge_colour())
+		return 230 + test_edge_colour();
+	if (test_gain_denoise_steps())
+		return 240 + test_gain_denoise_steps();
+	if (test_autofocus())
+		return 250 + test_autofocus();
 	if (test_no_cfa_grid())
 		return 40 + test_no_cfa_grid();
 	if (test_cfa_phase_means())
