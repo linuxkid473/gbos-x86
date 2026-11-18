@@ -7,6 +7,7 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #define OUT_WIDTH 640
@@ -34,6 +35,21 @@
 #define AE_AGAIN_MAX_X 15.5
 #define AE_LONG_FRAME_X 2.0
 #define AE_LONG_KNEE_X 4.0
+/*
+ * While no consumer reads a bridge, its sensor keeps streaming (the IPU6 firmware cannot stop
+ * cleanly) but with a frame 8x the default (about 3.75 fps): two full-rate streams at once
+ * overflowed the ISYS transfer FIFOs on both CSI ports (2026-11-18 boot-9). AE statistics
+ * continue at the low rate; the planned frame comes back as soon as a consumer streams.
+ */
+#define AE_IDLE_FRAME_X 8.0
+
+/*
+ * Error-marked or short IPU6 frames (CSI FIFO overflow, sync errors) are requeued and skipped;
+ * the last converted picture is repeated meanwhile. The bridge gives up (for the launcher to
+ * restart it) only when no good frame arrived for BAD_FRAME_GIVE_UP_S while frames or
+ * timeouts kept coming.
+ */
+#define BAD_FRAME_GIVE_UP_S 10.0
 
 static volatile sig_atomic_t running = 1;
 
@@ -781,7 +797,17 @@ struct ae_state {
 	 * lines the driver keeps between exposure and frame length (frame = height + vblank).
 	 */
 	int height, base_max, long_max, margin;
+	/* Idle: frame stretched to idle_vblank; applied_vblank is what the sensor has now. */
+	int idle, idle_vblank, applied_vblank;
 };
+
+/* VBLANK the sensor should have: the plan's, or the idle frame while nobody reads. */
+static int ae_effective_vblank(const struct ae_state *ae)
+{
+	if (ae->idle && ae->idle_vblank > ae->vblank.value)
+		return ae->idle_vblank;
+	return ae->vblank.value;
+}
 
 static int ae_again_max(const struct ae_state *ae)
 {
@@ -805,7 +831,7 @@ static double ae_frame_ms(const struct ae_state *ae)
 {
 	if (!ae->vblank.present)
 		return 1000.0 / 30;
-	return 1000.0 / 30 * (ae->height + ae->vblank.value) / (ae->height + ae->vblank.def);
+	return 1000.0 / 30 * (ae->height + ae_effective_vblank(ae)) / (ae->height + ae->vblank.def);
 }
 
 /* Brightness relative to minimum exposure and gains: lines x analogue x digital multiplier. */
@@ -957,9 +983,14 @@ static void ae_frame_limits(struct ae_state *ae, int height)
 		ae->long_max = height + ae->vblank.max - ae->margin;
 	if (ae->long_max < ae->base_max)
 		ae->long_max = ae->base_max;
+	ae->idle_vblank = (int)(AE_IDLE_FRAME_X * (height + ae->vblank.def)) - height;
+	if (ae->idle_vblank > ae->vblank.max)
+		ae->idle_vblank = ae->vblank.max;
+	ae->applied_vblank = ae->vblank.value;
 	return;
 fixed:
 	ae->vblank.present = 0;
+	ae->idle_vblank = ae->applied_vblank = 0;
 	ae->margin = 0;
 	ae->base_max = ae->long_max = ae->exposure.max;
 }
@@ -1029,17 +1060,39 @@ static void ae_frame(struct ae_state *ae, double mean_green)
 	sensor_total_gain = ae_sensor_gain(ae);
 	if (ae->frames % 150 == 0)
 		printf("ae: mean=%.0f target=%.0f exposure=%d again=%d dgain=%d vblank=%d "
-		       "(%.1f ms frame, %.1fx gain)\n", mean_green, AE_TARGET, ae->exposure.value,
-		       ae->again.value, ae->dgain.value, ae->vblank.value, ae_frame_ms(ae),
-		       sensor_total_gain);
-	int current_vblank = ae->vblank.value;
+		       "(%.1f ms frame%s, %.1fx gain)\n", mean_green, AE_TARGET, ae->exposure.value,
+		       ae->again.value, ae->dgain.value, ae_effective_vblank(ae), ae_frame_ms(ae),
+		       ae->idle ? ", idle" : "", sensor_total_gain);
 	if (ae->frames % AE_INTERVAL || !ae_update(ae, mean_green))
 		return;
-	if (ae_apply(ae, ae->exposure.value, ae->vblank.value, ae->again.value, ae->dgain.value,
-		     current_vblank)) {
+	int vblank = ae_effective_vblank(ae);
+	if (ae_apply(ae, ae->exposure.value, vblank, ae->again.value, ae->dgain.value,
+		     ae->applied_vblank)) {
 		perror("ae: set sensor control; auto-exposure off");
 		ae->enabled = 0;
+		return;
 	}
+	ae->applied_vblank = vblank;
+}
+
+/* A consumer started or stopped: switch between the planned and the idle frame at once. */
+static void ae_set_idle(struct ae_state *ae, int idle)
+{
+	if (!ae->enabled || !ae->vblank.present || ae->idle == idle)
+		return;
+	ae->idle = idle;
+	int vblank = ae_effective_vblank(ae);
+	if (vblank == ae->applied_vblank)
+		return;
+	if (ae_apply(ae, ae->exposure.value, vblank, ae->again.value, ae->dgain.value,
+		     ae->applied_vblank)) {
+		perror("ae: set idle frame; auto-exposure off");
+		ae->enabled = 0;
+		return;
+	}
+	ae->applied_vblank = vblank;
+	printf("ae: %s: vblank %d (%.1f ms frame)\n", idle ? "idle frame" : "active frame",
+	       vblank, ae_frame_ms(ae));
 }
 
 static void ae_restore(struct ae_state *ae)
@@ -1047,7 +1100,7 @@ static void ae_restore(struct ae_state *ae)
 	if (!ae->exposure.present || !ae->again.present)
 		return;
 	if (ae_apply(ae, ae->exposure.saved, ae->vblank.saved, ae->again.saved, ae->dgain.saved,
-		     ae->vblank.value))
+		     ae->vblank.present ? ae->applied_vblank : ae->vblank.saved))
 		perror("ae: restore sensor controls");
 }
 
@@ -1073,6 +1126,59 @@ static int loopback_readers(int fd)
 static int bridge_should_convert(int readers)
 {
 	return readers != 0;
+}
+
+/*
+ * Frame health: counts a run of bad frames (or poll timeouts) and says when to give up.
+ * Returns 1 to give up: nothing good for BAD_FRAME_GIVE_UP_S seconds.
+ */
+struct frame_health {
+	unsigned long bad_run, bad_total, recoveries;
+	double last_good;
+};
+
+static double monotonic_s(void)
+{
+	struct timespec t;
+
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	return t.tv_sec + t.tv_nsec / 1e9;
+}
+
+static void frame_health_start(struct frame_health *h, double now)
+{
+	memset(h, 0, sizeof(*h));
+	h->last_good = now;
+}
+
+static void frame_health_good(struct frame_health *h, double now)
+{
+	if (h->bad_run) {
+		h->recoveries++;
+		printf("ipu6: recovered after %lu bad frame(s) in %.1f s (%lu bad in total)\n",
+		       h->bad_run, now - h->last_good, h->bad_total);
+		fflush(stdout);
+	}
+	h->bad_run = 0;
+	h->last_good = now;
+}
+
+/* what: "error-marked", "short" or "timeout" (timeouts are not frames; they only age the run). */
+static int frame_health_bad(struct frame_health *h, double now, const char *what,
+			    unsigned int flags, unsigned int bytes)
+{
+	if (strcmp(what, "timeout")) {
+		h->bad_run++;
+		h->bad_total++;
+		if (h->bad_run <= 3 || h->bad_run % 100 == 0)
+			fprintf(stderr, "ipu6: %s frame (flags 0x%x, %u bytes), requeued; %lu in this run\n",
+				what, flags, bytes, h->bad_run);
+	}
+	if (now - h->last_good < BAD_FRAME_GIVE_UP_S)
+		return 0;
+	fprintf(stderr, "ipu6: no good frame for %.1f s (%lu bad frames in this run); giving up\n",
+		now - h->last_good, h->bad_run);
+	return 1;
 }
 
 static int capture_to_loopback(const char *media_dev, const char *out_dev,
@@ -1224,6 +1330,9 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev,
 	       video.fmt.pix.width, video.fmt.pix.height, profile->rgbir ? "RGB-IR" : "Bayer",
 	       OUT_WIDTH, OUT_HEIGHT, output_rotate180 ? ", rotated 180" : "");
 	result = 0;
+	struct frame_health health;
+	int have_output = 0;
+	frame_health_start(&health, monotonic_s());
 	while (running) {
 		struct pollfd pfd = { .fd = vfd, .events = POLLIN | POLLPRI };
 		int ready = poll(&pfd, 1, 1000);
@@ -1233,8 +1342,13 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev,
 			result = 1;
 			break;
 		}
-		if (!ready)
+		if (!ready) {
+			if (frame_health_bad(&health, monotonic_s(), "timeout", 0, 0)) {
+				result = 3;
+				break;
+			}
 			continue;
+		}
 		struct v4l2_buffer b = { .type = type, .memory = V4L2_MEMORY_MMAP };
 		if (ioctl(vfd, VIDIOC_DQBUF, &b)) {
 			if (errno == EAGAIN || errno == EINTR) continue;
@@ -1242,15 +1356,11 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev,
 			result = 1;
 			break;
 		}
-		if (b.index >= buffer_count ||
-		    b.bytesused < (uint64_t)video.fmt.pix.bytesperline * video.fmt.pix.height ||
-		    b.bytesused > buffers[b.index].length ||
-		    (b.flags & V4L2_BUF_FLAG_ERROR)) {
-			fprintf(stderr, "invalid or error-marked IPU6 frame\n");
+		if (b.index >= buffer_count) {
+			fprintf(stderr, "invalid IPU6 buffer index %u\n", b.index);
 			result = 1;
 			break;
 		}
-		double mean_green = 0;
 		int readers = loopback_readers(outfd);
 		if (readers != last_readers) {
 			printf("bridge: %s\n", readers < 0 ? "readers_active unavailable; converting every frame" :
@@ -1258,7 +1368,29 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev,
 			       "no consumer; idle (sensor and auto-exposure keep running)");
 			last_readers = readers;
 			tnr_reset();	/* the scene may have changed while idle */
+			ae_set_idle(&ae, !bridge_should_convert(readers));
 		}
+		const char *bad = (b.flags & V4L2_BUF_FLAG_ERROR) ? "error-marked" :
+			b.bytesused < (uint64_t)video.fmt.pix.bytesperline * video.fmt.pix.height ||
+			b.bytesused > buffers[b.index].length ? "short" : NULL;
+		if (bad) {
+			int give_up = frame_health_bad(&health, monotonic_s(), bad, b.flags, b.bytesused);
+			/* Keep the consumer fed with the last picture rather than nothing. */
+			if (!give_up && have_output && bridge_should_convert(readers) &&
+			    write(outfd, output, OUT_FRAME_BYTES) != (ssize_t)OUT_FRAME_BYTES) {
+				fprintf(stderr, "write loopback frame failed: %s\n", strerror(errno));
+				give_up = 1;
+			}
+			if (give_up || ioctl(vfd, VIDIOC_QBUF, &b)) {
+				if (!give_up)
+					perror("requeue IPU6 frame");
+				result = give_up ? 3 : 1;
+				break;
+			}
+			continue;
+		}
+		frame_health_good(&health, monotonic_s());
+		double mean_green = 0;
 		if (!bridge_should_convert(readers)) {
 			/* Idle: only the cheap sampled statistics, so exposure is right on resume. */
 			unsigned int unused_gain[3];
@@ -1272,6 +1404,8 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev,
 			fprintf(stderr, "convert or write loopback frame failed: %s\n", strerror(errno));
 			result = 1;
 			break;
+		} else {
+			have_output = 1;
 		}
 		ae_frame(&ae, mean_green);
 		frame_count++;

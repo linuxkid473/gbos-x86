@@ -309,12 +309,57 @@ fi
 # Rescan the new virtual UVC device after its node and sysfs identity exist.
 killall -9 android.hardware.camera.provider-usb-service.android-desktop 2>/dev/null || true
 killall -9 cameraserver 2>/dev/null || true
-echo "Bridge ready; init service will supervise pid=$BRIDGE_PID${REAR_PID_RUN:+ and rear pid=$REAR_PID_RUN}"
-wait "$BRIDGE_PID"
-status=$?
-echo "ERROR: IPU6 loopback bridge exited with status $status"
-if [ -n "$REAR_PID_RUN" ] && ! kill -0 "$REAR_PID_RUN" 2>/dev/null; then
-    wait "$REAR_PID_RUN" 2>/dev/null
-    echo "rear bridge had exited with status $?"
-fi
+echo "Bridge ready; supervising pid=$BRIDGE_PID${REAR_PID_RUN:+ and rear pid=$REAR_PID_RUN}"
+
+# Supervise both bridges. A bridge exits when it gets no good IPU6 frame for 10 s (or on a
+# hard error); it is then restarted, at most BRIDGE_RESTARTS times per sensor, 5 s after its
+# exit, appending to its runtime log. The loopback nodes and their sysfs identities stay, and
+# one bridge dying never stops the other. The script ends (for init) only when the front
+# bridge has used up its restarts and the rear is gone too.
+BRIDGE_RESTARTS=3
+FRONT_RESTARTS=0
+REAR_RESTARTS=0
+start_front() {
+    "$BRIDGE" /dev/media0 /dev/video64 ${CAL:+"$CAL"} \
+        >> "$LOGDIR/camera-bridge-runtime.txt" 2>&1 &
+    BRIDGE_PID=$!
+}
+start_rear() {
+    "$BRIDGE" --sensor ov8856 --rotate "$REAR_ROTATION" /dev/media0 /dev/video65 ${CAL:+"$CAL"} \
+        >> "$REAR_LOG" 2>&1 &
+    REAR_PID_RUN=$!
+}
+status=0
+while [ -n "$BRIDGE_PID$REAR_PID_RUN" ]; do
+    sleep 2
+    if [ -n "$BRIDGE_PID" ] && ! kill -0 "$BRIDGE_PID" 2>/dev/null; then
+        wait "$BRIDGE_PID"
+        status=$?
+        echo "$(date +%T) front bridge pid=$BRIDGE_PID exited with status $status"
+        BRIDGE_PID=
+        if [ "$FRONT_RESTARTS" -lt "$BRIDGE_RESTARTS" ]; then
+            FRONT_RESTARTS=$((FRONT_RESTARTS + 1))
+            sleep 5
+            start_front
+            echo "$(date +%T) restarted front bridge pid=$BRIDGE_PID ($FRONT_RESTARTS of $BRIDGE_RESTARTS)"
+        else
+            echo "ERROR: front bridge out of restarts"
+        fi
+    fi
+    if [ -n "$REAR_PID_RUN" ] && ! kill -0 "$REAR_PID_RUN" 2>/dev/null; then
+        wait "$REAR_PID_RUN"
+        rear_status=$?
+        echo "$(date +%T) rear bridge pid=$REAR_PID_RUN exited with status $rear_status"
+        REAR_PID_RUN=
+        if [ "$REAR_RESTARTS" -lt "$BRIDGE_RESTARTS" ]; then
+            REAR_RESTARTS=$((REAR_RESTARTS + 1))
+            sleep 5
+            start_rear
+            echo "$(date +%T) restarted rear bridge pid=$REAR_PID_RUN ($REAR_RESTARTS of $BRIDGE_RESTARTS)"
+        else
+            echo "WARNING: rear bridge out of restarts"
+        fi
+    fi
+done
+echo "ERROR: no IPU6 loopback bridge left running (front status $status)"
 exit "$status"

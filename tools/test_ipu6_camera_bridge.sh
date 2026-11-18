@@ -34,11 +34,20 @@ grep -Fq '"$BRIDGE" /dev/media0 /dev/video64 ${CAL:+"$CAL"}' "$BRIDGE"
 grep -Fq 'REAR_LOG=$LOGDIR/camera-bridge-rear-runtime.txt' "$BRIDGE"
 # Order: the rear starts only after the front streams, and the HAL restart comes after both.
 front_ready=$(grep -n 'wait_active "$LOGDIR/camera-bridge-runtime.txt" "$BRIDGE_PID"' "$BRIDGE" | cut -d: -f1)
-rear_start=$(grep -n '"$BRIDGE" --sensor ov8856' "$BRIDGE" | cut -d: -f1)
+rear_start=$(grep -n '"$BRIDGE" --sensor ov8856' "$BRIDGE" | head -n 1 | cut -d: -f1)
 rear_ready=$(grep -n 'wait_active "$REAR_LOG" "$REAR_PID_RUN"' "$BRIDGE" | cut -d: -f1)
 hal_restart=$(grep -n 'killall -9 android.hardware.camera.provider-usb-service' "$BRIDGE" | cut -d: -f1)
 [ -n "$front_ready" ] && [ -n "$rear_start" ] && [ -n "$rear_ready" ] && [ -n "$hal_restart" ]
 [ "$front_ready" -lt "$rear_start" ] && [ "$rear_start" -lt "$rear_ready" ] && [ "$rear_ready" -lt "$hal_restart" ]
+# Supervision: a dead bridge is restarted (bounded), one bridge's exit never ends the other,
+# and the script only ends once neither runs.
+grep -Fq 'BRIDGE_RESTARTS=3' "$BRIDGE"
+grep -Fq 'while [ -n "$BRIDGE_PID$REAR_PID_RUN" ]; do' "$BRIDGE"
+[ "$(grep -c '>> "$LOGDIR/camera-bridge-runtime.txt" 2>&1 &\|>> "$REAR_LOG" 2>&1 &' "$BRIDGE")" = 2 ]
+if sed -n '/^while \[ -n "$BRIDGE_PID$REAR_PID_RUN" \]; do/,/^done/p' "$BRIDGE" | grep -Eq '(^|[^a-z])exit( |$)|killall|kill [^-]'; then
+    echo "bridge supervision must not exit or kill" >&2
+    exit 1
+fi
 # A rear failure is a warning, never an exit: the front keeps running.
 grep -Fq 'WARNING: rear bridge did not reach streaming state; front camera only' "$BRIDGE"
 if sed -n "${rear_start},${hal_restart}p" "$BRIDGE" | grep -q 'exit'; then

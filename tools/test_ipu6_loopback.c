@@ -838,6 +838,69 @@ static int test_calibration_prefix(void)
 	return result;
 }
 
+/* No consumer: the sensor runs at an 8x frame (about 3.75 fps) and comes straight back. */
+static int test_idle_frame(void)
+{
+	struct ae_state ae;
+
+	ov5675_ae(&ae, 1);
+	if (ae.idle_vblank != 8 * (1944 + 76) - 1944 || ae.applied_vblank != 76)
+		return 1;
+	ae_set_log_reset();
+	ae_set_idle(&ae, 1);	/* longer frame first, exposure unchanged */
+	if (ae.applied_vblank != ae.idle_vblank || strcmp(ae_set_log, "VEAD") != 0 ||
+	    fabs(ae_frame_ms(&ae) - 8000.0 / 30) > 0.1)
+		return 2;
+	/* AE keeps planning while idle; the planned long frame stays below the idle frame. */
+	ae_plan(&ae, 4036 * 10.0);
+	if (ae.vblank.value != 2096 || ae_effective_vblank(&ae) != ae.idle_vblank)
+		return 3;
+	ae_set_log_reset();
+	ae_set_idle(&ae, 0);	/* back to the plan: exposure is already within it */
+	if (ae.applied_vblank != 2096 || strcmp(ae_set_log, "EVAD") != 0)
+		return 4;
+	ae_set_log_reset();
+	ae_set_idle(&ae, 0);	/* no change, no writes */
+	if (ae_set_log[0])
+		return 5;
+	/* Without VBLANK nothing is written. */
+	ov5675_ae(&ae, 0);
+	ae_set_log_reset();
+	ae_set_idle(&ae, 1);
+	if (ae_set_log[0] || ae_effective_vblank(&ae) != 0)
+		return 6;
+	/* A small VBLANK range caps the idle frame. */
+	ov5675_ae(&ae, 1);
+	ae.vblank.max = 1000;
+	ae_frame_limits(&ae, 1944);
+	return ae.idle_vblank == 1000 ? 0 : 7;
+}
+
+/* Bad frames are skipped; only 10 s without a good one gives up (boot-9/10 exited on one). */
+static int test_frame_health(void)
+{
+	struct frame_health h;
+
+	frame_health_start(&h, 100.0);
+	if (frame_health_bad(&h, 101.0, "error-marked", V4L2_BUF_FLAG_ERROR, 0) ||
+	    frame_health_bad(&h, 109.9, "short", 0, 100) || h.bad_run != 2)
+		return 1;
+	frame_health_good(&h, 110.0);
+	if (h.bad_run || h.recoveries != 1 || h.bad_total != 2)
+		return 2;
+	for (double t = 110.5; t < 119.9; t += 0.5)
+		if (frame_health_bad(&h, t, "error-marked", V4L2_BUF_FLAG_ERROR, 0))
+			return 3;
+	if (!frame_health_bad(&h, 120.1, "error-marked", V4L2_BUF_FLAG_ERROR, 0))
+		return 4;
+	/* Poll timeouts age the run without counting as frames. */
+	frame_health_start(&h, 0.0);
+	if (frame_health_bad(&h, 5.0, "timeout", 0, 0) || h.bad_run ||
+	    !frame_health_bad(&h, 10.5, "timeout", 0, 0))
+		return 5;
+	return 0;
+}
+
 int main(void)
 {
 	(void)capture_to_loopback;
@@ -854,6 +917,10 @@ int main(void)
 		return 150 + test_exposure_program();
 	if (test_apply_order())
 		return 160 + test_apply_order();
+	if (test_idle_frame())
+		return 200 + test_idle_frame();
+	if (test_frame_health())
+		return 210 + test_frame_health();
 	if (test_no_cfa_grid())
 		return 40 + test_no_cfa_grid();
 	if (test_cfa_phase_means())
