@@ -741,26 +741,89 @@ done:
 	return result;
 }
 
-/* Delete one listed template (libfprint fp_template_delete: a7:04 with the encoded finger id). */
+/* 1 when a template named uid is in the sensor's list, 0 when not, or goodix_list_templates' error. */
+static inline int goodix_template_listed(struct goodix *s, const char *uid, int *fail)
+{
+	struct goodix_template templates[GOODIX_MAX_TEMPLATES];
+	size_t count = 0;
+	int r;
+
+	if ((r = goodix_list_templates(s, templates, &count, fail)) != GOODIX_OK)
+		return r < 0 ? r : -EPROTO;
+	for (size_t i = 0; i < count; i++)
+		if (templates[i].uid_len == strlen(uid) && memcmp(uid, templates[i].uid, templates[i].uid_len) == 0)
+			return 1;
+	return 0;
+}
+
+/* One a7:04 with a little-endian record length and the record. Returns the sensor's status or a negative errno. */
+static inline int goodix_delete_record(struct goodix *s, const uint8_t *record, size_t len)
+{
+	uint8_t payload[GOODIX_MAX_RECORD + 2];
+	struct goodix_response response;
+	int r;
+
+	if (len > GOODIX_MAX_RECORD)
+		return -EINVAL;
+	payload[0] = (uint8_t)len;
+	payload[1] = (uint8_t)(len >> 8);
+	memcpy(payload + 2, record, len);
+	if ((r = goodix_command(s, GOODIX_CMD_DELETE, GOODIX_CMD_DELETE_ONE, payload, len + 2, false,
+				&response)) < 0)
+		return r;
+	return response.result;
+}
+
+/*
+ * Delete one listed template and check that the sensor's list no longer has it. 2026-11-18 boot-11: a7:04 with
+ * the finger id re-encoded from tid and uid (libfprint fp_template_delete) was answered without an error, yet
+ * the template stayed and matched at every following check-duplicate. So the record is sent first exactly as
+ * the sensor listed it, then re-encoded if that differs, and only a template gone from the list counts.
+ * Returns GOODIX_OK (gone), GOODIX_FAILED (*fail: the last delete status, or GOODIX_FAILED if the sensor
+ * reported success but still lists it) or a negative errno.
+ */
 static inline int goodix_delete_template(struct goodix *s, const struct goodix_template *t, int *fail)
 {
 	uint8_t fid[GOODIX_MAX_UID + 72];
-	struct goodix_response response;
-	size_t fid_len;
-	int r;
+	const uint8_t *forms[2];
+	size_t lens[2], fid_len;
+	int nforms = 0, status = GOODIX_FAILED, r;
 
-	if (!t->uid_len ||
-	    goodix_encode_finger_id(fid, sizeof(fid), &fid_len, t->tid, t->uid) < 0)
+	if (!t->uid_len)
 		return -EINVAL;
-	if ((r = goodix_command(s, GOODIX_CMD_DELETE, GOODIX_CMD_DELETE_ONE,
-				fid, fid_len, false, &response)) < 0)
-		return r;
-	if (response.result == GOODIX_SUCCESS || response.result == GOODIX_NO_RECORD)
-		return GOODIX_OK;
-	*fail = response.result;
+	if (t->raw_len) {
+		forms[nforms] = t->raw;
+		lens[nforms++] = t->raw_len;
+	}
+	if (goodix_encode_finger_id(fid, sizeof(fid), &fid_len, t->tid, t->uid) == 0 &&
+	    !(t->raw_len == fid_len - 2 && memcmp(t->raw, fid + 2, t->raw_len) == 0)) {
+		forms[nforms] = fid + 2;
+		lens[nforms++] = fid_len - 2;
+	}
+	for (int i = 0; i < nforms; i++) {
+		r = goodix_delete_record(s, forms[i], lens[i]);
+		if (r < 0)
+			return r;
+		status = r;
+		GOODIX_LOGI("delete %s (%s record, %u bytes, type %02x, finger %02x): status 0x%02x", t->uid,
+			    forms[i] == t->raw ? "listed" : "re-encoded", (unsigned int)lens[i], forms[i][1],
+			    forms[i][2], (unsigned int)status);
+		for (int check = 0; check < 2; check++) {
+			if ((r = goodix_template_listed(s, t->uid, fail)) < 0)
+				return r;
+			if (!r)
+				return GOODIX_OK;
+			if (status != GOODIX_SUCCESS)
+				break;
+			usleep(100 * 1000);	/* acknowledged: give a flash write a moment before checking again */
+		}
+		GOODIX_LOGW("delete %s: still listed after status 0x%02x", t->uid, (unsigned int)status);
+	}
+	*fail = status == GOODIX_SUCCESS ? GOODIX_FAILED : status;
 	return GOODIX_FAILED;
 }
 
+/* GOODIX_OK (deleted, verified), GOODIX_NORECORD (not in the sensor's list), GOODIX_FAILED or a negative errno. */
 static inline int goodix_delete(struct goodix *s, const char *uid, int *fail)
 {
 	struct goodix_template templates[GOODIX_MAX_TEMPLATES];

@@ -175,17 +175,19 @@ static inline int fp_reconcile(struct goodix *s, const struct fp_policy *p, int 
 	for (size_t i = 0; i < count; i++) {
 		enum fp_verdict v = fp_classify(p, templates[i].uid);
 
+		FP_LOGI("sensor template %s: %s", templates[i].uid[0] ? templates[i].uid : "(unnamed)",
+			fp_verdict_text(v));
 		if (!fp_verdict_deletes(v)) {
 			kept++;
 			continue;
 		}
 		r = goodix_delete_template(s, &templates[i], fail);
-		if (r == GOODIX_OK || r == GOODIX_NORECORD) {
-			FP_LOGI("deleted sensor template %s: %s", templates[i].uid, fp_verdict_text(v));
+		if (r == GOODIX_OK) {
+			FP_LOGI("deleted sensor template %s (no longer listed)", templates[i].uid);
 			(*deleted)++;
 		} else {
-			FP_LOGW("deleting sensor template %s (%s) failed: %d (sensor code %d)",
-				templates[i].uid, fp_verdict_text(v), r, *fail);
+			FP_LOGW("deleting sensor template %s (%s) failed: %d (sensor code 0x%02x)",
+				templates[i].uid, fp_verdict_text(v), r, (unsigned int)*fail);
 			(*failed)++;
 			if (r < 0)
 				return r;	/* transport error: the sensor needs reopening */
@@ -216,13 +218,18 @@ static inline bool fp_on_duplicate(struct goodix *s, const struct fp_policy *p,
 	v = fp_classify(p, dup->uid);
 	if (fp_verdict_deletes(v)) {
 		r = goodix_delete(s, dup->uid, &fail);
-		if (r == GOODIX_OK || r == GOODIX_NORECORD) {
-			FP_LOGW("user %d: this finger was already stored on the sensor as %s (%s): deleted it; "
-				"enroll the finger again", (int)p->user, dup->uid, fp_verdict_text(v));
+		if (r == GOODIX_OK) {
+			FP_LOGW("user %d: this finger was already stored on the sensor as %s (%s): deleted it "
+				"(no longer listed)", (int)p->user, dup->uid, fp_verdict_text(v));
 			return true;
 		}
-		FP_LOGW("user %d: this finger is already stored on the sensor as %s (%s); deleting it failed: "
-			"%d (sensor code %d)", (int)p->user, dup->uid, fp_verdict_text(v), r, fail);
+		if (r == GOODIX_NORECORD)
+			FP_LOGW("user %d: check-duplicate matched %s (%s), but the sensor's template list does not "
+				"contain it: cannot delete it", (int)p->user, dup->uid, fp_verdict_text(v));
+		else
+			FP_LOGW("user %d: this finger is already stored on the sensor as %s (%s); deleting it "
+				"failed: %d (sensor code 0x%02x)", (int)p->user, dup->uid, fp_verdict_text(v), r,
+				(unsigned int)fail);
 		return false;
 	}
 	if (v == FP_KEEP_ENROLLED)
@@ -233,6 +240,35 @@ static inline bool fp_on_duplicate(struct goodix *s, const struct fp_policy *p,
 			"enrolled here; remove it there or use another finger", (int)p->user, dup->uid,
 			fp_verdict_text(v));
 	return false;
+}
+
+#define FP_ENROLL_RESTARTS 2
+
+/*
+ * goodix_enroll, and when the finger matches a stored template the policy lets this HAL delete: delete it
+ * (verified) and start the enrollment over, at most FP_ENROLL_RESTARTS times, so the user is not sent back
+ * to Settings. Returns goodix_enroll's result; a GOODIX_DUPLICATE that comes back is one that stays.
+ * *restarted counts the restarts (progress starts again from the first stage each time).
+ */
+static inline int fp_enroll(struct goodix *s, const struct fp_policy *p, const char *uid,
+			    const struct goodix_ev *ev, int *fail, struct goodix_template *dup, int *restarted)
+{
+	int r;
+
+	for (*restarted = 0;; (*restarted)++) {
+		*fail = 0;
+		r = goodix_enroll(s, uid, ev, fail, dup);
+		if (r != GOODIX_DUPLICATE)
+			return r;
+		if (!fp_on_duplicate(s, p, dup, *fail))
+			return r;
+		if (*restarted == FP_ENROLL_RESTARTS) {
+			FP_LOGW("user %d: still matching a stored template after %d restarts: giving up",
+				(int)p->user, *restarted);
+			return r;
+		}
+		FP_LOGI("user %d: enrollment restarts: touch the sensor again", (int)p->user);
+	}
 }
 
 #endif

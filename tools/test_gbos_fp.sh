@@ -38,7 +38,8 @@ chmod +x "$W/gbos/gbos_fp"
 run_service() (
   G="$W/gbos"
   USBDEVS="$W/usb"
-  export G USBDEVS
+  N=7
+  export G USBDEVS N
   if [ "$1" = default ]; then unset FINGERPRINT; else FINGERPRINT=$1; export FINGERPRINT; fi
   log() { :; }
   findfs() { [ -n "${FAKE_GBOSSYS:-}" ] && echo "$FAKE_GBOSSYS"; }
@@ -57,6 +58,11 @@ printf '%s\n' "$RC" | grep -q 'service gbos_fp /postinstall/gbos/gbos_fp' &&
   && ok "early-start, lazy oneshot HAL service for exact Goodix USB ID" || bad "Goodix service selection"
 
 [ -z "$(run_service 0)" ] && ok "FINGERPRINT=0 opt-out" || bad "fingerprint opt-out"
+
+RC=$(run_service default)
+printf '%s\n' "$RC" | grep -q '^service gbos_fp_log /system/bin/logcat -b main -v threadtime -s gbos_fp -f /postinstall/gbos/logs/boot-7/fingerprint.txt$' &&
+  printf '%s\n' "$RC" | grep -q ' start gbos_fp_log$' \
+  && ok "gbos_fp lines kept in their own log (fingerprint.txt)" || bad "fingerprint log service"
 
 # --no-gbos-install only when neither stage0 ($SYS) nor findfs sees a GBOSSYS install
 RC=$(unset SYS FAKE_GBOSSYS; run_service default)

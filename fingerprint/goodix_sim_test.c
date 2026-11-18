@@ -35,7 +35,15 @@ static int sim_ioctl(int fd, unsigned long request, ...);
 
 #define PKT_MAX (GOODIX_HEADER_SIZE + GOODIX_MAX_PAYLOAD + GOODIX_CRC_SIZE)
 
-struct stored { struct goodix_template t; int finger; };
+/* rec: the record as the firmware keeps and lists it (little-endian length first) */
+struct stored { struct goodix_template t; int finger; uint8_t rec[GOODIX_MAX_RECORD + 2]; size_t rec_len; };
+
+enum {
+	DELETE_TID_UID,		/* deletes the template whose tid and uid match */
+	DELETE_EXACT,		/* only an exact copy of the stored record deletes it */
+	DELETE_IGNORED,		/* answers success, keeps the template (what boot-11 looked like) */
+	DELETE_NO_RECORD,	/* answers "no such record" (0x9c), keeps the template */
+};
 
 static struct {
 	struct stored db[GOODIX_MAX_TEMPLATES];
@@ -43,6 +51,9 @@ static struct {
 	int finger;			/* the finger on the sensor during an enroll */
 	uint8_t dup_status;		/* what a3 returns for a duplicate (boot-10: 2) */
 	uint8_t commit_status;
+	bool account_id;		/* the firmware writes its own account id into a committed record */
+	int delete_mode;
+	int deletes;			/* a7 commands received */
 	/* packets to send, in order */
 	uint8_t q[32][PKT_MAX];
 	size_t qlen[32];
@@ -58,7 +69,8 @@ static struct {
 	uint8_t cmds[512];
 	int ncmds;
 	int stale_sent;
-	char log[16][256];
+	bool ghost_dup;			/* a3 names a template that LIST does not return */
+	char log[64][256];
 	int nlog;
 } sim;
 
@@ -67,14 +79,14 @@ static void sim_log(const char *format, ...)
 	va_list ap;
 
 	va_start(ap, format);
-	vsnprintf(sim.log[sim.nlog % 16], sizeof(sim.log[0]), format, ap);
+	vsnprintf(sim.log[sim.nlog % 64], sizeof(sim.log[0]), format, ap);
 	va_end(ap);
 	sim.nlog++;
 }
 
 static bool logged(const char *needle)
 {
-	for (int i = 0; i < 16 && i < sim.nlog; i++)
+	for (int i = 0; i < 64 && i < sim.nlog; i++)
 		if (strstr(sim.log[i], needle))
 			return true;
 	return false;
@@ -93,17 +105,22 @@ static void emit(uint8_t buf[][PKT_MAX], size_t *lens, int *n, uint8_t cmd0, uin
 	(*n)++;
 }
 
-static void store(const char *uid, int finger)
+static void store_tid(const char *uid, int finger, const uint8_t *tid)
 {
 	struct stored *s = &sim.db[sim.n++];
 
 	memset(s, 0, sizeof(*s));
 	for (int i = 0; i < GOODIX_TEMPLATE_ID_SIZE; i++)
-		s->t.tid[i] = (uint8_t)(sim.n * 16 + i);
+		s->t.tid[i] = tid ? tid[i] : (uint8_t)(sim.n * 16 + i);
 	snprintf(s->t.uid, sizeof(s->t.uid), "%s", uid);
 	s->t.uid_len = strlen(uid);
 	s->finger = finger;
+	assert(goodix_encode_finger_id(s->rec, sizeof(s->rec), &s->rec_len, s->t.tid, s->t.uid) == 0);
+	if (sim.account_id)
+		memset(s->rec + 2 + 4, 0xa5, 32);	/* record bytes 4..35 */
 }
+
+static void store(const char *uid, int finger) { store_tid(uid, finger, NULL); }
 
 static int find(const char *uid)
 {
@@ -113,12 +130,10 @@ static int find(const char *uid)
 	return -1;
 }
 
-static size_t put_record(uint8_t *out, const struct goodix_template *t)
+static size_t put_record(uint8_t *out, const struct stored *s)
 {
-	size_t len;
-
-	assert(goodix_encode_finger_id(out, 200, &len, t->tid, t->uid) == 0);
-	return len;	/* little-endian record length, then the record */
+	memcpy(out, s->rec, s->rec_len);
+	return s->rec_len;	/* little-endian record length, then the record */
 }
 
 /* The firmware's answer to one command. */
@@ -150,16 +165,23 @@ static void respond(uint8_t cmd0, uint8_t cmd1, const uint8_t *in, size_t in_len
 		r[1] = (uint8_t)sim.n;
 		len = 2;
 		for (i = 0; i < sim.n; i++)
-			len += put_record(r + len, &sim.db[i].t);
+			len += put_record(r + len, &sim.db[i]);
 		break;
 	case GOODIX_CMD_DELETE:
 		assert(cmd1 == GOODIX_CMD_DELETE_ONE && in_len > 2);
+		assert((size_t)(in[0] | in[1] << 8) == in_len - 2);
 		assert(goodix_parse_finger_id(in + 2, in_len - 2, &t) == 0);
-		if ((i = find(t.uid)) < 0 || memcmp(sim.db[i].t.tid, t.tid, sizeof(t.tid)) != 0) {
+		sim.deletes++;
+		i = find(t.uid);
+		if (i >= 0 && sim.delete_mode == DELETE_EXACT &&
+		    !(sim.db[i].rec_len == in_len && memcmp(sim.db[i].rec, in, in_len) == 0))
+			i = -1;
+		if (i >= 0 && memcmp(sim.db[i].t.tid, t.tid, sizeof(t.tid)) != 0)
+			i = -1;
+		if (sim.delete_mode == DELETE_NO_RECORD || i < 0)
 			r[0] = GOODIX_NO_RECORD;
-		} else {
+		else if (sim.delete_mode != DELETE_IGNORED)
 			sim.db[i] = sim.db[--sim.n];
-		}
 		break;
 	case GOODIX_CMD_ENROLL_INIT:
 		memset(r + 1, 0x77, GOODIX_TEMPLATE_ID_SIZE);
@@ -179,18 +201,25 @@ static void respond(uint8_t cmd0, uint8_t cmd1, const uint8_t *in, size_t in_len
 		for (i = 0; i < sim.n; i++)
 			if (sim.db[i].finger == sim.finger)
 				dup = i;
-		if (dup >= 0) {
+		if (sim.ghost_dup) {
+			struct stored ghost;
+
+			memset(&ghost, 0, sizeof(ghost));
+			snprintf(ghost.t.uid, sizeof(ghost.t.uid), "GBOS-cccccccc-u10-00000077");
+			assert(goodix_encode_finger_id(ghost.rec, sizeof(ghost.rec), &ghost.rec_len, ghost.t.tid,
+						       ghost.t.uid) == 0);
 			r[0] = sim.dup_status;
-			len = 1 + put_record(r + 1, &sim.db[dup].t);
+			len = 1 + put_record(r + 1, &ghost);
+		} else if (dup >= 0) {
+			r[0] = sim.dup_status;
+			len = 1 + put_record(r + 1, &sim.db[dup]);
 		}
 		break;
 	case GOODIX_CMD_COMMIT:
 		assert(goodix_parse_finger_id(in + 2, in_len - 2, &t) == 0);
 		r[0] = sim.commit_status;
-		if (sim.commit_status < GOODIX_ERROR_THRESHOLD) {
-			store(t.uid, sim.finger);
-			memcpy(sim.db[sim.n - 1].t.tid, t.tid, sizeof(t.tid));
-		}
+		if (sim.commit_status < GOODIX_ERROR_THRESHOLD)
+			store_tid(t.uid, sim.finger, t.tid);
 		break;
 	default:
 		assert(!"command the simulator does not know");
@@ -418,7 +447,7 @@ static void test_boot10_stale_template(void)
 
 	/* if the cleanup could not run before: the duplicate is deleted and the next attempt works */
 	assert(fp_on_duplicate(&s, &p, &dup, fail));
-	assert(sim.n == 0 && logged("deleted it; enroll the finger again"));
+	assert(sim.n == 0 && logged("deleted it (no longer listed)"));
 	assert(enroll(&s, "GBOS-L-aaaaaaaa-u10-00000042", &fail, &dup) == GOODIX_OK);
 	assert(find("GBOS-L-aaaaaaaa-u10-00000042") >= 0 && !sim.shield);
 
@@ -547,6 +576,130 @@ static void test_cancel_in_response_wait(void)
 	goodix_close(&s);
 }
 
+/*
+ * boot-11: the delete was answered, the template stayed, and the HAL said "deleted it". A delete now counts
+ * only once the template is gone from the list, and the record goes out exactly as the sensor listed it.
+ */
+static void test_delete_verified(void)
+{
+	static const int32_t none[1] = { 0 };
+	struct fp_policy p = { "aaaaaaaa", true, true, 10, none, 0, true };
+	struct goodix_template listed[GOODIX_MAX_TEMPLATES];
+	struct goodix s;
+	size_t count;
+	uint8_t fid[GOODIX_MAX_UID + 72];
+	size_t fid_len;
+	int fail, deleted, failed;
+
+	/* firmware that matches tid and uid */
+	sim_reset();
+	store("GBOS-cccccccc-u10-2ab7f1c0", 1);
+	open_dev(&s);
+	assert(goodix_delete(&s, "GBOS-cccccccc-u10-2ab7f1c0", &fail) == GOODIX_OK && sim.n == 0 && sim.deletes == 1);
+	assert(logged("(listed record, 96 bytes, type 01, finger 01): status 0x00"));
+	assert(goodix_delete(&s, "GBOS-cccccccc-u10-2ab7f1c0", &fail) == GOODIX_NORECORD);
+	goodix_close(&s);
+
+	/* firmware that keeps its own bytes in the record and deletes only on an exact copy: the listed
+	 * record works, the record re-encoded from tid and uid (what the boot-11 HAL sent) does not */
+	sim_reset();
+	sim.account_id = true;
+	sim.delete_mode = DELETE_EXACT;
+	store("GBOS-cccccccc-u10-2ab7f1c0", 1);
+	open_dev(&s);
+	assert(goodix_list_templates(&s, listed, &count, &fail) == GOODIX_OK && count == 1);
+	assert(goodix_encode_finger_id(fid, sizeof(fid), &fid_len, listed[0].tid, listed[0].uid) == 0);
+	assert(goodix_delete_record(&s, fid + 2, fid_len - 2) == GOODIX_NO_RECORD && sim.n == 1);
+	assert(goodix_delete(&s, "GBOS-cccccccc-u10-2ab7f1c0", &fail) == GOODIX_OK && sim.n == 0);
+	goodix_close(&s);
+
+	/* acknowledged but kept: reported as a failure, both record forms tried */
+	sim_reset();
+	sim.account_id = true;
+	sim.delete_mode = DELETE_IGNORED;
+	store("GBOS-cccccccc-u10-2ab7f1c0", 1);
+	open_dev(&s);
+	assert(goodix_delete(&s, "GBOS-cccccccc-u10-2ab7f1c0", &fail) == GOODIX_FAILED);
+	assert(fail == GOODIX_FAILED && sim.n == 1 && sim.deletes == 2);
+	assert(logged("delete GBOS-cccccccc-u10-2ab7f1c0: still listed after status 0x00"));
+	assert(logged("(re-encoded record"));
+	/* and the session cleanup counts it as failed, so op_enroll tries again */
+	assert(fp_reconcile(&s, &p, &deleted, &failed, &fail) == GOODIX_OK && deleted == 0 && failed == 1);
+	assert(logged("sensor template GBOS-cccccccc-u10-2ab7f1c0: from an earlier live boot"));
+	goodix_close(&s);
+
+	/* "no such record" for a listed template is not a deletion either */
+	sim_reset();
+	sim.delete_mode = DELETE_NO_RECORD;
+	store("GBOS-cccccccc-u10-2ab7f1c0", 1);
+	open_dev(&s);
+	assert(goodix_delete(&s, "GBOS-cccccccc-u10-2ab7f1c0", &fail) == GOODIX_FAILED);
+	assert(fail == GOODIX_NO_RECORD && sim.n == 1 && sim.deletes == 1);
+	goodix_close(&s);
+}
+
+/* boot-11 again: after the verified delete, the enrollment starts over instead of failing */
+static void test_boot11_restart(void)
+{
+	struct fp_policy p = { "5f0bf067", true, true, 10, NULL, 0, true };
+	struct goodix_template dup;
+	struct goodix s;
+	int fail, restarted;
+
+	sim_reset();
+	sim.account_id = true;
+	sim.delete_mode = DELETE_EXACT;
+	sim.dup_status = 2;
+	store("GBOS-1c2ac773-u10-5cfb789b", 1);
+	sim.finger = 1;
+	open_dev(&s);
+	assert(fp_enroll(&s, &p, "GBOS-L-5f0bf067-u10-4c4a2bc2", NULL, &fail, &dup, &restarted) == GOODIX_OK);
+	assert(restarted == 1 && sim.n == 1 && find("GBOS-L-5f0bf067-u10-4c4a2bc2") >= 0);
+	assert(logged("enrollment restarts: touch the sensor again"));
+	goodix_close(&s);
+
+	/* the delete does not take: no restart, the duplicate is reported */
+	sim_reset();
+	sim.delete_mode = DELETE_IGNORED;
+	sim.dup_status = 2;
+	store("GBOS-1c2ac773-u10-5cfb789b", 1);
+	sim.finger = 1;
+	open_dev(&s);
+	assert(fp_enroll(&s, &p, "GBOS-L-5f0bf067-u10-4c4a2bc2", NULL, &fail, &dup, &restarted) == GOODIX_DUPLICATE);
+	assert(restarted == 0 && fail == 2 && sim.n == 1 && logged("deleting it failed"));
+	goodix_close(&s);
+
+	/* check-duplicate names a template the list does not have: nothing to delete, no restart */
+	sim_reset();
+	sim.ghost_dup = true;
+	sim.dup_status = 2;
+	open_dev(&s);
+	assert(fp_enroll(&s, &p, "GBOS-L-5f0bf067-u10-4c4a2bc2", NULL, &fail, &dup, &restarted) == GOODIX_DUPLICATE);
+	assert(restarted == 0 && sim.deletes == 0 && logged("template list does not contain it"));
+	goodix_close(&s);
+
+	/* two stale copies of the finger: two restarts; a third gives up */
+	sim_reset();
+	sim.dup_status = 2;
+	store("GBOS-1c2ac773-u10-5cfb789b", 1);
+	store("GBOS-L-0badcafe-u10-00000001", 1);
+	sim.finger = 1;
+	open_dev(&s);
+	assert(fp_enroll(&s, &p, "GBOS-L-5f0bf067-u10-4c4a2bc2", NULL, &fail, &dup, &restarted) == GOODIX_OK);
+	assert(restarted == 2 && sim.n == 1);
+	goodix_close(&s);
+	sim_reset();
+	sim.dup_status = 2;
+	store("GBOS-1c2ac773-u10-5cfb789b", 1);
+	store("GBOS-L-0badcafe-u10-00000001", 1);
+	store("GBOS-L-0badcafe-u10-00000002", 1);
+	sim.finger = 1;
+	open_dev(&s);
+	assert(fp_enroll(&s, &p, "GBOS-L-5f0bf067-u10-4c4a2bc2", NULL, &fail, &dup, &restarted) == GOODIX_DUPLICATE);
+	assert(restarted == 2 && sim.n == 0 && logged("giving up"));	/* the third is deleted too: the next attempt works */
+	goodix_close(&s);
+}
+
 /* More stale packets than GOODIX_MAX_STALE is a protocol error, not an endless read. */
 static void test_stale_limit(void)
 {
@@ -577,6 +730,8 @@ int main(void)
 	test_cancel_in_ack_wait();
 	test_cancel_in_response_wait();
 	test_stale_limit();
+	test_delete_verified();
+	test_boot11_restart();
 	unlink(node);
 	puts("GOODIX_SIM_TEST_PASS");
 	return 0;

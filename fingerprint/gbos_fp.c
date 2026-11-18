@@ -985,7 +985,15 @@ static void op_enroll(struct session *ss, const struct hat *hat)
 			return;
 		}
 	}
-	r = goodix_enroll(&dev, name, &ev, &fail, &dup);
+	{
+		struct fp_policy p = session_policy(ss);
+		int restarted;
+
+		r = fp_enroll(&dev, &p, name, &ev, &fail, &dup, &restarted);
+		if (restarted)
+			LOGI("user %d: enrollment restarted %d time(s) after deleting a stale template", ss->user,
+			     restarted);
+	}
 	/* Settings cancels its "find the sensor" enroll at the first touch: an I/O error on the way out is still a
 	 * cancel to the framework */
 	if (r < 0 && r != -ECANCELED && goodix_cancel_requested(&dev)) {
@@ -1007,10 +1015,7 @@ static void op_enroll(struct session *ss, const struct hat *hat)
 	} else if (r == -ECANCELED) {
 		cb_error(ss, ERR_CANCELED, 0);
 		settle_after_cancel();
-	} else if (r == GOODIX_DUPLICATE) {
-		struct fp_policy p = session_policy(ss);
-
-		fp_on_duplicate(&dev, &p, &dup, fail);
+	} else if (r == GOODIX_DUPLICATE) {	/* fp_enroll logged who owns it and why it stays */
 		LOGE("user %d: enroll failed: finger already stored on the sensor (sensor code %d)", ss->user, fail);
 		cb_error(ss, ERR_UNABLE_TO_PROCESS, fail);
 	} else if (r == GOODIX_FAILED) {

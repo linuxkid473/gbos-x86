@@ -52,10 +52,16 @@ struct goodix_packet {
 	size_t payload_len;
 };
 
+#define GOODIX_MAX_RECORD 160
+
 struct goodix_template {
 	uint8_t tid[GOODIX_TEMPLATE_ID_SIZE];
 	char uid[GOODIX_MAX_UID + 1];
 	size_t uid_len;
+	/* the finger id record exactly as the sensor sent it (raw_len 0 if longer than GOODIX_MAX_RECORD):
+	 * deleting with these bytes cannot differ from what the firmware stored in any field */
+	uint8_t raw[GOODIX_MAX_RECORD];
+	size_t raw_len;
 };
 
 static inline uint8_t goodix_crc8(const uint8_t *data, size_t len)
@@ -187,6 +193,9 @@ static inline int goodix_parse_finger_id(const uint8_t *data, size_t len,
 	if (len < 69 + uid_len)
 		return -1;
 	memcpy(template->tid, data + 36, GOODIX_TEMPLATE_ID_SIZE);
+	template->raw_len = len <= GOODIX_MAX_RECORD ? len : 0;
+	if (template->raw_len)
+		memcpy(template->raw, data, len);
 	template->uid_len = 0;
 	template->uid[0] = 0;
 	if (uid_len == 0 || uid_len > GOODIX_MAX_UID)

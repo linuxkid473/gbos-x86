@@ -304,7 +304,7 @@ static void test_template_encoding(void)
 	encoded[2] = 67;
 	encoded[70] = 57;
 	memcpy(encoded + 38, tid, sizeof(tid));
-	assert(goodix_parse_finger_id(encoded + 2, 127, &decoded) == 1);
+	assert(goodix_parse_finger_id(encoded + 2, 126, &decoded) == 1);
 	assert(decoded.uid_len == 0);
 	assert(memcmp(decoded.tid, tid, sizeof(tid)) == 0);
 }
