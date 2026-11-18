@@ -14,6 +14,11 @@ $HOSTCC -std=c11 -O2 -Wall -Wextra -Werror -I"$ROOT/fingerprint" \
 "$W/goodix_test" | grep -q '^GOODIX_PROTOCOL_TEST_PASS$' \
   && ok "Goodix packet, template, runtime-config, and mock transport tests" \
   || bad "Goodix protocol tests"
+$HOSTCC -std=c11 -O2 -Wall -Wextra -Werror -I"$ROOT/fingerprint" \
+  -o "$W/goodix_sim_test" "$ROOT/fingerprint/goodix_sim_test.c"
+"$W/goodix_sim_test" | grep -q '^GOODIX_SIM_TEST_PASS$' \
+  && ok "simulated sensor: stale-template cleanup policy, duplicate handling, cancel recovery" \
+  || bad "Goodix simulated-sensor tests"
 
 sh -n "$ROOT/usb/hook.sh" "$ROOT/usb/install.sh" "$ROOT/fingerprint/build.sh" \
   "$ROOT/fingerprint/build_image.sh" \
@@ -36,6 +41,7 @@ run_service() (
   export G USBDEVS
   if [ "$1" = default ]; then unset FINGERPRINT; else FINGERPRINT=$1; export FINGERPRINT; fi
   log() { :; }
+  findfs() { [ -n "${FAKE_GBOSSYS:-}" ] && echo "$FAKE_GBOSSYS"; }
   . "$W/detect.sh"
   . "$W/service.sh"
   printf '%s' "$FPRC"
@@ -51,6 +57,19 @@ printf '%s\n' "$RC" | grep -q 'service gbos_fp /postinstall/gbos/gbos_fp' &&
   && ok "early-start, lazy oneshot HAL service for exact Goodix USB ID" || bad "Goodix service selection"
 
 [ -z "$(run_service 0)" ] && ok "FINGERPRINT=0 opt-out" || bad "fingerprint opt-out"
+
+# --no-gbos-install only when neither stage0 ($SYS) nor findfs sees a GBOSSYS install
+RC=$(unset SYS FAKE_GBOSSYS; run_service default)
+printf '%s\n' "$RC" | grep -q '^service gbos_fp /postinstall/gbos/gbos_fp --no-gbos-install$' \
+  && ok "no install anywhere: HAL may clean up earlier live boots' templates" || bad "no-install flag missing"
+RC=$(SYS=/dev/nvme0n1p2; FAKE_GBOSSYS=; export SYS FAKE_GBOSSYS; run_service default)
+printf '%s\n' "$RC" | grep -q '^service gbos_fp /postinstall/gbos/gbos_fp$' \
+  && ok "install seen by stage0: no --no-gbos-install" || bad "no-install flag despite stage0 install"
+RC=$(unset SYS; FAKE_GBOSSYS=/dev/nvme0n1p2; export FAKE_GBOSSYS; run_service default)
+printf '%s\n' "$RC" | grep -q '^service gbos_fp /postinstall/gbos/gbos_fp$' \
+  && ok "install appearing after stage0: no --no-gbos-install" || bad "no-install flag despite late install"
+grep -q '"--no-gbos-install"' "$ROOT/fingerprint/gbos_fp.c" \
+  && ok "HAL parses --no-gbos-install" || bad "HAL ignores --no-gbos-install"
 
 printf '6383\n' > "$W/usb/1-1/idProduct"
 [ -z "$(run_service 1)" ] && ok "unmatched USB product does not start HAL" || bad "USB product scoping"

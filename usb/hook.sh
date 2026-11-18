@@ -656,8 +656,15 @@ fi
     if [ -x "$G/gbos_fp" ]; then
       FPDEV=$(gbos_goodix_fp)
       if [ -n "$FPDEV" ]; then
+        # --no-gbos-install lets a live boot delete old-style (GBOS-<id>-...) sensor templates of earlier
+        # live boots. Only when neither stage0 ($SYS) nor findfs now sees a GBOSSYS install: an install
+        # may still use such a template, and a disk that was slow to appear must not count as "none".
+        FPARGS=
+        if [ -z "${SYS:-}" ] && [ -z "$(findfs LABEL=GBOSSYS 2>/dev/null)" ]; then
+          FPARGS=" --no-gbos-install"
+        fi
         FPRC="# Experimental Goodix MOC HAL for the exact USB sensor $FPDEV.
-service gbos_fp /postinstall/gbos/gbos_fp
+service gbos_fp /postinstall/gbos/gbos_fp$FPARGS
     class hal
     user system
     group system usb
@@ -669,7 +676,7 @@ on post-fs-data
     mkdir /data/vendor/crosfp 0770 system system
     mkdir /data/vendor/crosfp/gbos_fp 0770 system system
     start gbos_fp"
-        log "hook: fingerprint: starting Goodix HAL for $FPDEV"
+        log "hook: fingerprint: starting Goodix HAL for $FPDEV${FPARGS:+ (no gbOS86 install found)}"
       else
         log "hook: fingerprint: Goodix 27c6:6384 not present; CrosFP left as-is"
       fi
