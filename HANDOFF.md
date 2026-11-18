@@ -6,6 +6,37 @@ SHA-NI, 256-bit VAES/VPCLMULQDQ, AVX-IFMA and AVX-512; the lapis binaries use th
 
 - 2026-11-16 **USB storage: preserve Android vold support for external USB while protecting the GBOS stick.** `hook.sh` resolves the detected GBOS stick partition to its parent disk and bind-mounts an empty stage0 `/dev` directory over that disk's sysfs block node before `switch_root`; this hides the whole stick (including both partitions) from Android's coldplug scan. The generic `voldmanaged=usb` fstab rule is retained when no GBOS stick is present or the device-specific mask succeeds; unresolved paths or mount failures keep the fail-closed rule removal. If neither safeguard can be applied, stage0 stops before Android. `tools/test_boot_tuning.sh` covers the boot-disk-only mask, external USB fstab eligibility, and fallback. This is host-test evidence only; Android coldplug and hardware storage mounting still need a boot test. No physical media or image was touched.
 
+## 2026-11-18: Latitude 7320 tablet mode and rotation (WIP, analysis only, nothing changed on the stick)
+- **Rotation lost on boot-9 (16:24), worked on boot-10 (16:35), kernel #61 both.** `sensor-trial.txt` boot-9:
+  `mFixedToUserRotation=true`, `fixed-to-user-rotation` reads `default` and the display SettingsEntry has
+  `mFixedToUserRotation=null`, although `rotation-policy.txt` had set `disabled` at 16:24:43. boot-10 keeps
+  `mFixedToUserRotation=1` (disabled). Both boots' RotationLockHistory show a second `caller=LaptopController` entry:
+  boot-9 at 16:24:44.330 (about 1.4 s *after* the policy command), boot-10 at 16:35:36.459 (about 2.6 s *before* it).
+  Disassembly of `services.jar` (`DisplayRotation$LaptopController.refreshConfig`, called from `foldStateChanged`):
+  in device state SLATE it calls `setFixedToUserRotation(1)` (disabled); otherwise, with `mIsPc` and LID_OPEN, it
+  resets the user rotation to landscape and calls `setFixedToUserRotation(0)` (default, which is "fixed" on a PC).
+  So the one-shot `cmd window fixed-to-user-rotation disabled` races every device-state callback (and will also be
+  undone after any later lid/device-state change). The user's RotationLockTile toggles in boot-9 could not help while
+  fixed-to-user was on. `services.jar` also reads `config.override_forced_orient` in `DisplayRotation.configure`
+  (AOSP uses it to clear `mDefaultFixedToUserRotation`); a candidate deterministic fix, side effects not yet checked.
+  boot-9's logcat starts at 16:24:45.9, so the event itself is not in logcat.
+- **Device state comes from `desktop-services.jar` `DesktopDeviceStateProvider`:** TABLET (state 3, slate property 103)
+  only when `InputManager.isInTabletMode()` (SW_TABLET_MODE) and lid open; otherwise OPEN/LID_OPEN. With no
+  SW_TABLET_MODE source Android is never in tablet state, so LaptopController always locks rotation.
+- **No tablet switch:** INTC1051 binds `intel_hid`; there is no INT33D6 ACPI device, so `intel_vbtn` (CONFIG=m) has
+  nothing to bind. `intel_hid` auto mode gives SW_TABLET_MODE only for chassis types 31/32, and then only after the
+  first 0xCC/0xCD notify ("switch event received" in dmesg); none of boot-8/9/10 has that line, and the chassis type is
+  not logged. Untested candidate (no kernel rebuild): `options intel_hid enable_sw_tablet_mode=2` (VGBS at probe, so
+  Android sees the initial state; `=1` creates the device on the first event, which Android misses).
+- **Soft keyboard:** `DisplayContent.computeScreenConfiguration` counts every non-virtual ALPHABETIC device that can
+  dispatch to the display, so the always-present i8042 keyboard (and, on these boots, the HP USB keyboard and
+  2.4G receiver) keep `keyboard=qwerty`, and the IME stays hidden. `PhoneWindowManager.adjustConfigurationLw` only
+  hides it via the lid state. Vendor `AT_Translated_Set_2_keyboard.idc` only sets `keyboard.builtIn = 1` and a
+  ChromeOS backlight node; no IDC key ignores a device. Planned: a switch-driven helper that detaches `atkbd` via
+  `/sys/bus/serio/devices/serioN/drvctl` (`none` / `atkbd`) in tablet mode, or sets `show_ime_with_hard_keyboard`;
+  plus a hwdetect report of `/proc/bus/input/devices`, `capabilities/sw`, chassis type, the resolved
+  `intel_hid` `enable_sw_tablet_mode`, and `getevent -qS` switch state from an Android-side service.
+
 ## 2026-11-15: Latitude 7320 sensor trial overlay
 - The latest live boot logged `cannot create overlay` because `/new` was already
   read-only EROFS. The trial helper now uses a tmpfs mount under stage0's `/dev`,
