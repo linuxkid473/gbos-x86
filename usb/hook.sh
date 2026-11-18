@@ -570,6 +570,47 @@ done
 # Fake crossystem (no ChromeOS firmware on this laptop)
 [ -f $G/crossystem ] && mount --bind $G/crossystem /new/vendor/bin/crossystem && log "hook: crossystem faked"
 
+# Latitude 7320 Detachable tablet mode (usb/tablet_mode.sh, log logs/boot-N/tablet-mode.txt): on-screen keyboard when the
+# cover is detached (TABLET_KEYBOARD=ime|unbind|0) and, with the rotation trial selected, keeps
+# fixed-to-user-rotation disabled through Google's LaptopController resets. TABLET_MODE=0 turns the helper off.
+# ROTATION_OVERRIDE=1 additionally sets config.override_forced_orient (read only by DisplayRotation.configure in
+# services.jar: "default" then stops meaning fixed on a PC, for every display, external monitors included).
+gbos_tablet_mode_config() {
+  GBOS_TABLET_MODE_START=
+  GBOS_TABLET_MODE_SERVICE=
+  GBOS_ROTATION_OVERRIDE_PROP=
+  _tm_sys=${SYSFS:-/sys}
+  if [ "$(cat "$_tm_sys/class/dmi/id/sys_vendor" 2>/dev/null)" != "Dell Inc." ] ||
+     [ "$(cat "$_tm_sys/class/dmi/id/product_name" 2>/dev/null)" != "Latitude 7320 Detachable" ]; then
+    return 0
+  fi
+  if [ "${TABLET_MODE:-1}" = 0 ]; then
+    log "hook: tablet mode helper disabled (TABLET_MODE=0)"
+    return 0
+  fi
+  if [ ! -f "$G/tablet_mode.sh" ]; then
+    log "hook: tablet mode helper missing ($G/tablet_mode.sh)"
+    return 0
+  fi
+  case "${TABLET_KEYBOARD:-ime}" in
+    ime|unbind|0) _tm_kbd=${TABLET_KEYBOARD:-ime} ;;
+    *) log "hook: TABLET_KEYBOARD=$TABLET_KEYBOARD unknown, using ime"; _tm_kbd=ime ;;
+  esac
+  _tm_rot=0
+  [ "${GBOS_SENSOR_ROTATION_POLICY_SELECTED:-0}" = 1 ] && _tm_rot=1
+  if [ "$_tm_rot" = 1 ] && [ "${ROTATION_OVERRIDE:-0}" = 1 ]; then
+    GBOS_ROTATION_OVERRIDE_PROP="    setprop config.override_forced_orient true"
+  fi
+  GBOS_TABLET_MODE_START="    start gbos_tablet_mode"
+  GBOS_TABLET_MODE_SERVICE="service gbos_tablet_mode /system/bin/sh /postinstall/gbos/tablet_mode.sh /postinstall/gbos/logs/boot-$N/tablet-mode.txt $_tm_rot $_tm_kbd
+    user root
+    group root input
+    seclabel u:r:shell:s0
+    oneshot
+    disabled"
+  log "hook: tablet mode helper queued (rotation=$_tm_rot keyboard=$_tm_kbd override_forced_orient=${ROTATION_OVERRIDE:-0})"
+}
+
 # Logcat to the stick: expose the USB volume inside Android at /postinstall, and overlay
 # /system/etc/init with a copy plus gbos.rc (a logcat service writing to this boot's log dir).
 # "vid:pid" (lower-case hex, as in Android's IDC file names) of every touchpad that is not on USB, from /proc/bus/input/devices.
@@ -646,8 +687,9 @@ fi
     mkdir /data/system/devices/idc 0775 system system$IDCRC"
   fi
   GBOS_SENSOR_TRIAL_START=
-  GBOS_SENSOR_ROTATION_POLICY_START=
-  GBOS_SENSOR_ROTATION_POLICY_SERVICE=
+  GBOS_TABLET_MODE_START=
+  GBOS_TABLET_MODE_SERVICE=
+  GBOS_ROTATION_OVERRIDE_PROP=
   GBOS_CAMERA_CAPTURE_START=
   GBOS_CAMERA_CAPTURE_SENSOR=${CAMERA_CAPTURE_SENSOR:-ov5675}
   if [ "${CAMERA_CAPTURE_PROBE:-0}" = 1 ] && [ "${FROM:-}" = stick ] &&
@@ -657,16 +699,7 @@ fi
   if [ "${GBOS_SENSOR_HAL_SELECTED:-0}" = 1 ] && [ -f "$G/sensor_trial_diag.sh" ]; then
     GBOS_SENSOR_TRIAL_START="    start gbos_sensor_trial"
   fi
-  if [ "${GBOS_SENSOR_ROTATION_POLICY_SELECTED:-0}" = 1 ] &&
-     [ -f "$G/sensor_rotation_policy.sh" ]; then
-    GBOS_SENSOR_ROTATION_POLICY_START="    start gbos_rotation_policy"
-    GBOS_SENSOR_ROTATION_POLICY_SERVICE="service gbos_rotation_policy /system/bin/sh /postinstall/gbos/sensor_rotation_policy.sh /postinstall/gbos/logs/boot-$N/rotation-policy.txt
-    user root
-    group root
-    seclabel u:r:shell:s0
-    oneshot
-    disabled"
-  fi
+  gbos_tablet_mode_config
   FPRC=
   if [ "${FINGERPRINT:-1}" != 0 ]; then
     if [ -x "$G/gbos_fp" ]; then
@@ -745,7 +778,7 @@ service gbos_sensor_trial /system/bin/sh /postinstall/gbos/sensor_trial_diag.sh 
     oneshot
     disabled
 
-$GBOS_SENSOR_ROTATION_POLICY_SERVICE
+$GBOS_TABLET_MODE_SERVICE
 
 # Capture camera probe state as soon as Android finishes booting.
 service gbos_cameradiag /system/bin/sh -c ". /postinstall/gbos/hwdetect.sh; ( date; gbos_report_camera_bus_devices; gbos_report_camera_media_graph; gbos_report_camera_debug ) > /postinstall/gbos/logs/boot-$N/camera.txt 2>&1"
@@ -765,6 +798,7 @@ service gbos_camera_capture /system/bin/sh /postinstall/gbos/installer/bin/camer
 # DRM card0 is configured directly in stage0_init before Android init starts.
 on early-init
     setprop sys.gbos_dri_fixed 1
+$GBOS_ROTATION_OVERRIDE_PROP
 on property:sys.gbos_dri_fixed=1
     restart vendor.drm-widevine-hal
 
@@ -787,7 +821,7 @@ $GBOS_KVM_TRACE_STOP
     start gbos_skip_setup
     start gbos_optimize
     start gbos_sensordiag
-$GBOS_SENSOR_ROTATION_POLICY_START
+$GBOS_TABLET_MODE_START
 $GBOS_SENSOR_TRIAL_START
     start gbos_cameradiag
 $GBOS_CAMERA_CAPTURE_START

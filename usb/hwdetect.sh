@@ -93,12 +93,39 @@ gbos_load_soundwire_codecs() {
   fi
 }
 
+# Latitude 7320 Detachable: intel_hid (INTC1051; there is no INT33D6 for intel_vbtn) is the only SW_TABLET_MODE source.
+# In auto mode it creates its switch only for chassis types 31/32 and only after the first 0xCC/0xCD notify, which
+# boots 8-10 (2026-11-18) never logged ("switch event received"), so Android never reached tablet state.
+# enable_sw_tablet_mode=2 reads VGBS at probe, so Android sees the initial state too. The parameter is read-only (0444):
+# it must be in modprobe.d before coldplug loads intel_hid. TABLET_SWITCH=0 (gbos.cfg) keeps the kernel's auto mode,
+# TABLET_SWITCH=1 selects at-first-event; MODOPTS="intel_hid.enable_sw_tablet_mode=N" wins over both.
+# Prints the modprobe.d line (if any).
+gbos_tablet_switch_opts() {
+  sys=${GBOS_SYSFS_ROOT:-/sys}
+  [ "$(cat "$sys/class/dmi/id/sys_vendor" 2>/dev/null)" = "Dell Inc." ] || return 0
+  [ "$(cat "$sys/class/dmi/id/product_name" 2>/dev/null)" = "Latitude 7320 Detachable" ] || return 0
+  case " $MODOPTS " in
+    *" intel_hid.enable_sw_tablet_mode="*)
+      log "hwdetect: intel_hid tablet switch from MODOPTS" >&2
+      return 0 ;;
+  esac
+  case "${TABLET_SWITCH:-2}" in
+    0) log "hwdetect: TABLET_SWITCH=0: intel_hid tablet switch left in auto mode" >&2; return 0 ;;
+    1|2) ;;
+    *) log "hwdetect: TABLET_SWITCH=$TABLET_SWITCH unknown, using 2" >&2; TABLET_SWITCH=2 ;;
+  esac
+  echo "options intel_hid enable_sw_tablet_mode=${TABLET_SWITCH:-2}"
+  log "hwdetect: intel_hid enable_sw_tablet_mode=${TABLET_SWITCH:-2} (Latitude 7320 Detachable, chassis_type $(cat "$sys/class/dmi/id/chassis_type" 2>/dev/null))" >&2
+}
+
 # MODOPTS="module.param=value ..." (gbos.cfg): configure module parameters generically via /etc/modprobe.d/
 # and /etc/modprobe.conf so that when modalias coldplug loads a driver for a detected device, the parameters
 # are applied naturally without hardcoding drivers or loading modules for hardware not present.
 gbos_modopts() {
   mkdir -p /etc/modprobe.d 2>/dev/null
   : > /etc/modprobe.d/gbos.conf
+  # Before MODOPTS, so a MODOPTS option for the same module comes later and wins.
+  gbos_tablet_switch_opts >> /etc/modprobe.d/gbos.conf
 
   # Backward compatibility: map legacy XE_PARAMS to options xe ...
   if [ -n "$XE_PARAMS" ]; then
@@ -385,6 +412,31 @@ gbos_report_camera_debug() (
   trap - EXIT
 )
 
+# Input devices and switches (tablet mode: which device reports SW_LID / SW_TABLET_MODE, the serio port atkbd is on,
+# and what intel_hid resolved its tablet-switch mode to).
+gbos_report_input() {
+  sys=${GBOS_SYSFS_ROOT:-/sys}
+  echo "== tablet switch: chassis_type=$(cat "$sys/class/dmi/id/chassis_type" 2>/dev/null)" \
+       "intel_hid enable_sw_tablet_mode=$(cat "$sys/module/intel_hid/parameters/enable_sw_tablet_mode" 2>/dev/null || echo '(intel_hid not loaded)')" \
+       "intel_vbtn=$(grep -q '^intel_vbtn ' "${GBOS_PROC_MODULES:-/proc/modules}" 2>/dev/null && echo loaded || echo 'not loaded')"
+  echo "modprobe.d: $(grep -h intel_hid /etc/modprobe.d/*.conf 2>/dev/null | tr '\n' ';')"
+  echo "ACPI: $(ls "$sys/bus/acpi/devices" 2>/dev/null | grep -E '^(INTC1051|INTC1070|INTC1078|INT33D6|INT33D5|PNP0C0D|PNP0C60)' | tr '\n' ' ')"
+  echo "== input capabilities (input name: ev sw)"
+  for i in "$sys"/class/input/input*; do
+    [ -e "$i/name" ] || continue
+    echo "${i##*/} $(cat "$i/name" 2>/dev/null): ev=$(cat "$i/capabilities/ev" 2>/dev/null) sw=$(cat "$i/capabilities/sw" 2>/dev/null)"
+  done
+  echo "== serio ports (port description driver bind_mode)"
+  for p in "$sys"/bus/serio/devices/serio*; do
+    [ -e "$p" ] || continue
+    echo "${p##*/} $(cat "$p/description" 2>/dev/null) driver=$(readlink "$p/driver" 2>/dev/null | sed 's#.*/##') bind_mode=$(cat "$p/bind_mode" 2>/dev/null)"
+  done
+  echo "== intel_hid / intel_vbtn dmesg"
+  dmesg 2>/dev/null | grep -iE 'intel[-_]hid|intel[-_]vbtn|INTC10[57][018]|INT33D6|switch event|5 button|platform supports|Intel HID' | tail -n 20
+  echo "== /proc/bus/input/devices"
+  cat "${GBOS_INPUT_DEVICES:-/proc/bus/input/devices}" 2>&1
+}
+
 gbos_hw_report() {
   [ -n "$L" ] || return 0
   {
@@ -449,6 +501,7 @@ gbos_hw_report() {
     done
     echo "== driver messages (wifi, graphics, camera, sensors, audio, bluetooth; first 250)"
     dmesg | grep -iE 'iwlwifi|iwlmvm|iwlmld|\bxe [0-9a-f:.]+|\[drm|ipu[0-9]|intel-ipu|ivsc|camera|hid[_-]sensor|intel_ish|ishtp|iio|sof-audio|snd_sof|sof-firmware|soundwire|cs42l43|Bluetooth: hci|btintel|No config found|unsupported' | head -250
+    gbos_report_input
     echo "== lsmod"; lsmod
   } > $L/hwdetect.txt 2>&1
   log "hwdetect: report written (hwdetect.txt)"

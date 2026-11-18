@@ -128,10 +128,19 @@ and has a higher static-overlay priority than the generated vendor RRO. The
 boot hook stages it into the same temporary vendor overlay as the Sensors HAL,
 only for the exact Latitude 7320 DMI and only while `SENSOR_HAL=1`.
 
-Desktop mode separately defaults the display to fixed-to-user rotation. After
-`sys.boot_completed`, a narrowly gated one-shot service runs
-`cmd window fixed-to-user-rotation disabled` and saves the command result in
-`rotation-policy.txt`. `sensor-trial.txt` also captures the mode, active
+Desktop mode separately defaults the display to fixed-to-user rotation, and
+Google's `DisplayRotation$LaptopController` resets it to `default` (fixed on a
+PC) and locks the rotation on every device-state callback outside tablet state:
+at boot, and after every lid or tablet-switch change. A one-shot
+`cmd window fixed-to-user-rotation disabled` therefore only won when it ran
+after the boot-time reset (lost on boot-9, 2026-11-18). After
+`sys.boot_completed`, `usb/tablet_mode.sh` (service `gbos_tablet_mode`, exact
+Latitude 7320 DMI) re-applies `disabled` whenever it reads anything else: every
+2 s for the first minute, 1/3/6 s after every lid or tablet-switch event, then
+every 30 s. Each re-apply is logged in `tablet-mode.txt`. `ROTATION_OVERRIDE=1`
+also sets `config.override_forced_orient` (opt-in, because it applies to
+external displays too). The rotation lock tile still decides between free
+and locked rotation. `sensor-trial.txt` also captures the mode, active
 framework overlays and display dump. This changes neither the accelerometer transform nor the Android rotation
 setting. The 2026-11-15 Live test confirmed `mSupportAutoRotation=true`,
 `mFixedToUserRotation=false`, active accelerometer events and sensor-driven
