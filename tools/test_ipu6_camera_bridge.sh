@@ -104,6 +104,30 @@ for value in 0 30 '' 1x; do
     esac
 done
 
+# Supervisor, run for real with a fake bridge: a failed idle stop (status 4) restarts that bridge at once
+# with --idle-stop 0 without using up a restart; later exits (even 4 again) are ordinary restarts, so the
+# loop still ends after BRIDGE_RESTARTS.
+supervisor=$(awk '/^BRIDGE_RESTARTS=/ { on = 1 } on { print } on && /^exit "\$status"$/ { exit }' "$BRIDGE")
+echo "$supervisor" | grep -q 'EXIT_IDLE_FAILED=4'
+printf '#!/bin/sh\necho "$*" >> "$FAKE_ARGS"\nexit 4\n' > "$tmp/fake-bridge"
+chmod +x "$tmp/fake-bridge"
+sup_out=$(
+    set +e  # as in the launcher (set -u only)
+    sleep() { :; }
+    FAKE_ARGS=$tmp/args; export FAKE_ARGS
+    BRIDGE=$tmp/fake-bridge LOGDIR=$tmp REAR_LOG=$tmp/rear.log CAL= REAR_ROTATION=0 IDLE_STOP=15
+    sh -c 'exit 4' & BRIDGE_PID=$!
+    REAR_PID_RUN=
+    eval "$supervisor"
+) || true
+[ "$(echo "$sup_out" | grep -c 'front idle stop failed; restarted front bridge pid=[0-9]* with idle stop off for this boot')" = 1 ]
+echo "$sup_out" | grep -q 'ERROR: front bridge out of restarts'
+[ "$(wc -l < "$tmp/args")" = 4 ]
+[ "$(grep -c '^--idle-stop 0 /dev/media0 /dev/video64' "$tmp/args")" = 4 ]
+# The rear gets its own switch; the front's setting is untouched by it.
+grep -Fq '"$BRIDGE" --sensor ov8856 --rotate "$REAR_ROTATION" --idle-stop "$REAR_IDLE_STOP"' "$BRIDGE"
+grep -Fq 'REAR_IDLE_STOP=0' "$BRIDGE"
+
 # Front uevent: byte-identical to the one the launcher wrote before the rear camera existed.
 cat > "$tmp/front.expected" <<'EOF'
 DRIVER=uvcvideo

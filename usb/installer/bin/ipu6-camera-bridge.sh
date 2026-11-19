@@ -52,7 +52,7 @@ fi
 echo "rear camera: $([ "$REAR" = 1 ] && echo "on, rotation $REAR_ROTATION" || echo off)"
 # Idle stop: each bridge stops its sensor stream after this many seconds without a consumer
 # (the ISYS refuses system suspend while a stream is open) and restarts it when an app streams.
-# The bridge stays running meanwhile, so the supervisor below never sees an idle stop.
+# The bridge stays running meanwhile; only a failed stop or restart exits (status 4, see the supervisor).
 # CAMERA_IDLE_STOP=0 keeps both sensors streaming as before; CAMERA_IDLE_STOP=15 is the bridge's own default.
 # Off unless set: on boot-13 (2026-11-19) the first idle stop hit "stream stop/close time out" in the ISYS and
 # the bridge never streamed again, so no app could open a camera. Until a restart works on hardware, empty or
@@ -330,7 +330,10 @@ echo "Bridge ready; supervising pid=$BRIDGE_PID${REAR_PID_RUN:+ and rear pid=$RE
 # BRIDGE_RESTARTS times per sensor, 5 s after its exit, appending to its runtime log. A bridge
 # that ran for BRIDGE_HEALTHY_S before exiting gets its restarts back: with idle stops a bridge
 # runs for days and starts its sensor many times, so only failures in a row count. Idle stops
-# themselves never exit. The loopback nodes and their sysfs identities stay, and one bridge
+# themselves never exit. A bridge whose idle stop or restart failed (a step blocked for 12 s, the
+# restart failed, or no frame came 5 s after it) exits with status 4: it is restarted at once
+# (without using up a restart) with --idle-stop 0, so that camera streams without idle stops
+# for the rest of the boot. The loopback nodes and their sysfs identities stay, and one bridge
 # dying never stops the other. The script ends (for init) only when the front bridge has used
 # up its restarts and the rear is gone too.
 BRIDGE_RESTARTS=3
@@ -339,14 +342,17 @@ FRONT_RESTARTS=0
 REAR_RESTARTS=0
 FRONT_SINCE=$(date +%s)
 REAR_SINCE=$FRONT_SINCE
+EXIT_IDLE_FAILED=4
+FRONT_IDLE_STOP=$IDLE_STOP
+REAR_IDLE_STOP=$IDLE_STOP
 start_front() {
-    "$BRIDGE" /dev/media0 /dev/video64 ${CAL:+"$CAL"} \
+    "$BRIDGE" --idle-stop "$FRONT_IDLE_STOP" /dev/media0 /dev/video64 ${CAL:+"$CAL"} \
         >> "$LOGDIR/camera-bridge-runtime.txt" 2>&1 &
     BRIDGE_PID=$!
     FRONT_SINCE=$(date +%s)
 }
 start_rear() {
-    "$BRIDGE" --sensor ov8856 --rotate "$REAR_ROTATION" /dev/media0 /dev/video65 ${CAL:+"$CAL"} \
+    "$BRIDGE" --sensor ov8856 --rotate "$REAR_ROTATION" --idle-stop "$REAR_IDLE_STOP" /dev/media0 /dev/video65 ${CAL:+"$CAL"} \
         >> "$REAR_LOG" 2>&1 &
     REAR_PID_RUN=$!
     REAR_SINCE=$(date +%s)
@@ -366,7 +372,11 @@ while [ -n "$BRIDGE_PID$REAR_PID_RUN" ]; do
         if ran_long "$FRONT_SINCE"; then
             FRONT_RESTARTS=0
         fi
-        if [ "$FRONT_RESTARTS" -lt "$BRIDGE_RESTARTS" ]; then
+        if [ "$status" = "$EXIT_IDLE_FAILED" ] && [ "$FRONT_IDLE_STOP" != 0 ]; then
+            FRONT_IDLE_STOP=0
+            start_front
+            echo "$(date +%T) front idle stop failed; restarted front bridge pid=$BRIDGE_PID with idle stop off for this boot"
+        elif [ "$FRONT_RESTARTS" -lt "$BRIDGE_RESTARTS" ]; then
             FRONT_RESTARTS=$((FRONT_RESTARTS + 1))
             sleep 5
             start_front
@@ -383,7 +393,11 @@ while [ -n "$BRIDGE_PID$REAR_PID_RUN" ]; do
         if ran_long "$REAR_SINCE"; then
             REAR_RESTARTS=0
         fi
-        if [ "$REAR_RESTARTS" -lt "$BRIDGE_RESTARTS" ]; then
+        if [ "$rear_status" = "$EXIT_IDLE_FAILED" ] && [ "$REAR_IDLE_STOP" != 0 ]; then
+            REAR_IDLE_STOP=0
+            start_rear
+            echo "$(date +%T) rear idle stop failed; restarted rear bridge pid=$REAR_PID_RUN with idle stop off for this boot"
+        elif [ "$REAR_RESTARTS" -lt "$BRIDGE_RESTARTS" ]; then
             REAR_RESTARTS=$((REAR_RESTARTS + 1))
             sleep 5
             start_rear
