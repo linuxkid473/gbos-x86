@@ -1,6 +1,8 @@
 #define CAMERA_BRIDGE_TEST
 #include "../kernel/ipu6-loopback.c"
 #include <stdarg.h>
+#include <fcntl.h>
+#include <sys/wait.h>
 
 static int test_gamma(void)
 {
@@ -1366,6 +1368,264 @@ static int test_idle_args(void)
 	return 0;
 }
 
+/*
+ * Fake IPU6 capture and loopback nodes for the idle stop/restart (boot-13: the bridges hung
+ * after the first idle stop). The log records each call: S=STREAMOFF, s=STREAMON, R<n>=REQBUFS,
+ * Q<i>=QBUF, U=QUERYBUF, E=DQEVENT.
+ */
+static char idle_log[128];
+static int fake_events;		/* usage events pending on the loopback */
+static int fake_dqevent_blocked;	/* a DQEVENT was issued with nothing pending */
+static unsigned long fake_fail;	/* request that fails */
+static int fake_fail_reqbufs3;	/* REQBUFS with count 3 fails */
+
+static void idle_log_add(const char *fmt, ...)
+{
+	va_list ap;
+	size_t n = strlen(idle_log);
+
+	va_start(ap, fmt);
+	vsnprintf(idle_log + n, sizeof(idle_log) - n, fmt, ap);
+	va_end(ap);
+}
+
+static int fake_ioctl(int fd, unsigned long request, void *arg)
+{
+	(void)fd;
+	if (request == VIDIOC_DQEVENT) {
+		idle_log_add("E");
+		if (!fake_events) {
+			fake_dqevent_blocked = 1;	/* the real call would sleep here */
+			errno = EAGAIN;
+			return -1;
+		}
+		fake_events--;
+		return 0;
+	}
+	if (request == VIDIOC_STREAMOFF)
+		idle_log_add("S");
+	else if (request == VIDIOC_STREAMON)
+		idle_log_add("s");
+	else if (request == VIDIOC_QBUF)
+		idle_log_add("Q%u", ((struct v4l2_buffer *)arg)->index);
+	else if (request == VIDIOC_QUERYBUF)
+		idle_log_add("U");
+	else if (request == VIDIOC_REQBUFS) {
+		struct v4l2_requestbuffers *r = arg;
+		idle_log_add("R%u", r->count);
+		if (r->count == 3 && fake_fail_reqbufs3) {
+			errno = EIO;
+			return -1;
+		}
+	}
+	if (request == fake_fail) {
+		errno = EIO;
+		return -1;
+	}
+	return 0;
+}
+
+static int fake_poll(struct pollfd *fds, nfds_t n, int timeout)
+{
+	(void)n;
+	(void)timeout;
+	fds[0].revents = fake_events ? POLLPRI : 0;
+	return fake_events ? 1 : 0;
+}
+
+static void fake_reset(struct capture *c, int streaming)
+{
+	memset(c, 0, sizeof(*c));
+	c->fd = 99;
+	c->count = 3;
+	c->streaming = streaming;
+	idle_log[0] = 0;
+	fake_events = 0;
+	fake_dqevent_blocked = 0;
+	fake_fail = 0;
+	fake_fail_reqbufs3 = 0;
+	bridge_ioctl_hook = fake_ioctl;
+	bridge_poll_hook = fake_poll;
+}
+
+static int idle_quiet(int (*fn)(void))
+{
+	/* The steps log to stdout; keep the test output readable. */
+	fflush(stdout);
+	int saved = dup(STDOUT_FILENO), null = open("/dev/null", O_WRONLY);
+	dup2(null, STDOUT_FILENO);
+	int r = fn();
+	fflush(stdout);
+	dup2(saved, STDOUT_FILENO);
+	close(saved);
+	close(null);
+	bridge_ioctl_hook = NULL;
+	bridge_poll_hook = NULL;
+	return r;
+}
+
+/* The drain must never issue a DQEVENT with nothing pending: on a blocking fd it sleeps. */
+static int idle_drain_body(void)
+{
+	struct capture c;
+
+	fake_reset(&c, 0);
+	if (loopback_drain_events(7) != 0 || fake_dqevent_blocked || strcmp(idle_log, ""))
+		return 1;
+	fake_events = 3;
+	if (loopback_drain_events(7) != 3 || fake_dqevent_blocked || strcmp(idle_log, "EEE"))
+		return 2;
+	fake_events = 40;	/* bounded per call */
+	if (loopback_drain_events(7) != 16 || fake_events != 24)
+		return 3;
+	return 0;
+}
+
+static int test_idle_drain(void)
+{
+	return idle_quiet(idle_drain_body);
+}
+
+static int idle_pause_resume_body(void)
+{
+	struct capture c;
+	struct af_state af = { .fd = -1 };
+
+	/* Stop: STREAMOFF only, buffers kept; events drained without waiting. */
+	fake_reset(&c, 1);
+	fake_events = 1;
+	if (idle_pause_stream(&c, &af, 7) || c.streaming || c.count != 3 ||
+	    strcmp(idle_log, "SE") || fake_dqevent_blocked)
+		return 1;
+	/* Restart: requeue the kept buffers, stream on. No REQBUFS. */
+	idle_log[0] = 0;
+	if (idle_resume_stream(&c) || !c.streaming || strcmp(idle_log, "Q0Q1Q2s"))
+		return 2;
+	/* A second stop/restart cycle works the same. */
+	idle_log[0] = 0;
+	if (idle_pause_stream(&c, &af, 7) || idle_resume_stream(&c) || strcmp(idle_log, "SQ0Q1Q2s"))
+		return 3;
+
+	/* STREAMOFF fails: the buffers are released, the restart requests new ones. */
+	fake_reset(&c, 1);
+	fake_fail = VIDIOC_STREAMOFF;
+	if (!idle_pause_stream(&c, &af, 7) || c.streaming || c.count || strcmp(idle_log, "SR0"))
+		return 4;
+	fake_fail = 0;
+	fake_fail_reqbufs3 = 1;
+	idle_log[0] = 0;
+	if (!idle_resume_stream(&c) || c.streaming || strcmp(idle_log, "R3"))
+		return 5;
+
+	/* STREAMON fails with the kept buffers: release, start over; that fails too -> error. */
+	fake_reset(&c, 0);
+	fake_fail = VIDIOC_STREAMON;
+	fake_fail_reqbufs3 = 1;
+	if (!idle_resume_stream(&c) || c.streaming || c.count || strcmp(idle_log, "Q0Q1Q2sR0R3"))
+		return 6;
+	/* A QBUF that fails stops queueing at once. */
+	fake_reset(&c, 0);
+	fake_fail = VIDIOC_QBUF;
+	fake_fail_reqbufs3 = 1;
+	if (!idle_resume_stream(&c) || strcmp(idle_log, "Q0R0R3"))
+		return 7;
+	/* The lens is closed at the stop. */
+	fake_reset(&c, 1);
+	af.fd = open("/dev/null", O_RDONLY);
+	af.present = 1;
+	if (af.fd < 0 || idle_pause_stream(&c, &af, 7) || af.fd != -1 || af.present)
+		return 8;
+	return 0;
+}
+
+static int test_idle_pause_resume(void)
+{
+	return idle_quiet(idle_pause_resume_body);
+}
+
+/* A STREAMOFF that never returns: the watchdog ends the process with EXIT_IDLE_FAILED. */
+static int blocking_ioctl(int fd, unsigned long request, void *arg)
+{
+	(void)fd;
+	(void)arg;
+	if (request == VIDIOC_STREAMOFF || request == VIDIOC_STREAMON)
+		for (;;)
+			pause();
+	return 0;
+}
+
+static int test_idle_watchdog(void)
+{
+	for (int which = 0; which < 2; which++) {
+		double t0 = monotonic_s();
+		fflush(stdout);
+		pid_t pid = fork();
+		if (pid < 0)
+			return 1;
+		if (pid == 0) {
+			int null = open("/dev/null", O_WRONLY);
+			dup2(null, STDOUT_FILENO);
+			dup2(null, STDERR_FILENO);
+			struct capture c = { .fd = 99, .count = 3, .streaming = !which };
+			struct af_state af = { .fd = -1 };
+			idle_step_timeout_s = 1;
+			bridge_ioctl_hook = blocking_ioctl;
+			if (which == 0)
+				idle_pause_stream(&c, &af, 7);
+			else
+				idle_resume_stream(&c);
+			_exit(0);	/* the step returned: the watchdog did not fire */
+		}
+		int status, w;
+		/* Our own deadline: a watchdog that never fires must fail the test, not hang it. */
+		while ((w = waitpid(pid, &status, WNOHANG)) == 0 && monotonic_s() - t0 < 6.0)
+			usleep(20000);
+		if (w != pid) {
+			kill(pid, SIGKILL);
+			waitpid(pid, &status, 0);
+			return 2;
+		}
+		double took = monotonic_s() - t0;
+		if (!WIFEXITED(status) || WEXITSTATUS(status) != EXIT_IDLE_FAILED)
+			return 3 + which;
+		if (took < 0.9 || took > 4.0)
+			return 5 + which;
+	}
+	/* Disarmed after a step that returned: no stray alarm later. */
+	struct capture c;
+	fake_reset(&c, 1);
+	idle_step_timeout_s = 1;
+	int r = idle_quiet(idle_drain_body);	/* any short step sequence */
+	fake_reset(&c, 1);
+	struct af_state af = { .fd = -1 };
+	fflush(stdout);
+	int saved = dup(STDOUT_FILENO), null = open("/dev/null", O_WRONLY);
+	dup2(null, STDOUT_FILENO);
+	idle_pause_stream(&c, &af, 7);
+	fflush(stdout);
+	dup2(saved, STDOUT_FILENO);
+	close(saved);
+	close(null);
+	bridge_ioctl_hook = NULL;
+	bridge_poll_hook = NULL;
+	idle_step_timeout_s = IDLE_STEP_TIMEOUT_S;
+	if (r || alarm(0) != 0)
+		return 7;
+	return 0;
+}
+
+/* A restart without a good frame within RESTART_FIRST_FRAME_S has failed. */
+static int test_idle_restart_deadline(void)
+{
+	if (idle_restart_overdue(-1, 1000))
+		return 1;	/* not restarting */
+	if (idle_restart_overdue(100, 100 + RESTART_FIRST_FRAME_S - 0.1))
+		return 2;
+	if (!idle_restart_overdue(100, 100 + RESTART_FIRST_FRAME_S + 0.1))
+		return 3;
+	return EXIT_IDLE_FAILED == 4 && EXIT_IDLE_FAILED != 3 ? 0 : 4;
+}
+
 int main(void)
 {
 	(void)capture_to_loopback;
@@ -1410,6 +1670,14 @@ int main(void)
 			return printf("test_restart_exposure %d\n", r), 320 + r;
 		if ((r = test_idle_args()))
 			return printf("test_idle_args %d\n", r), 330 + r;
+		if ((r = test_idle_drain()))
+			return printf("test_idle_drain %d\n", r), 1;
+		if ((r = test_idle_pause_resume()))
+			return printf("test_idle_pause_resume %d\n", r), 1;
+		if ((r = test_idle_watchdog()))
+			return printf("test_idle_watchdog %d\n", r), 1;
+		if ((r = test_idle_restart_deadline()))
+			return printf("test_idle_restart_deadline %d\n", r), 1;
 	}
 	if (test_no_cfa_grid())
 		return 40 + test_no_cfa_grid();

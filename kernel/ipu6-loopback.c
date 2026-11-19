@@ -1386,7 +1386,7 @@ static int bridge_should_convert(int readers)
  * sleep while any stream is open (-EBUSY): on boot-12, 24 of 25 s2idle attempts failed with
  * "isys_suspend ... returns -16" while both bridges streamed with no consumer, and both
  * sensors stayed powered. After IDLE_STOP_S without a consumer the bridge stops its stream
- * (STREAMOFF, buffers released, lens subdev closed: the sensor and VCM power down) but keeps
+ * (STREAMOFF with the buffers kept, lens subdev closed: the sensor and VCM power down) but keeps
  * the loopback output and the sensor's controls, so Android still sees the camera and the
  * exposure is kept. A consumer (readers_active, or v4l2loopback's client-usage event) starts
  * the stream again.
@@ -1428,6 +1428,75 @@ static int idle_decide(struct idle_state *s, int readers, double now, double tim
 	return IDLE_KEEP;
 }
 
+/*
+ * Idle stop and restart steps go through these, so the host tests can make a step fail or
+ * block. Outside the tests they are plain ioctl() and poll().
+ */
+#ifdef CAMERA_BRIDGE_TEST
+static int (*bridge_ioctl_hook)(int fd, unsigned long request, void *arg);
+static int (*bridge_poll_hook)(struct pollfd *fds, nfds_t n, int timeout);
+static int bridge_ioctl(int fd, unsigned long request, void *arg)
+{
+	return bridge_ioctl_hook ? bridge_ioctl_hook(fd, request, arg) : ioctl(fd, request, arg);
+}
+static int bridge_poll(struct pollfd *fds, nfds_t n, int timeout)
+{
+	return bridge_poll_hook ? bridge_poll_hook(fds, n, timeout) : poll(fds, n, timeout);
+}
+#else
+#define bridge_ioctl ioctl
+#define bridge_poll poll
+#endif
+
+/*
+ * Idle stop/restart watchdog. Boot-13 (2026-11-19): after the first idle stop both bridges went
+ * silent and never streamed again, so no app could open a camera. Each step is now logged, and
+ * a step that does not return within IDLE_STEP_TIMEOUT_S ends the process with
+ * EXIT_IDLE_FAILED: the launcher then starts a fresh bridge with idle stops off for the rest of
+ * the boot. (The IPU6 firmware's own stop and close timeouts are 2 s each.) A wait the kernel
+ * cannot interrupt still delays the exit until it returns.
+ */
+#define IDLE_STEP_TIMEOUT_S 12
+static unsigned int idle_step_timeout_s = IDLE_STEP_TIMEOUT_S;	/* the tests shorten it */
+#define EXIT_IDLE_FAILED 4
+/* After a restart the first good frame must come within this, or the restart has failed. */
+#define RESTART_FIRST_FRAME_S 5.0
+static const char *volatile idle_step = "";
+
+/* woke_at: when the consumer appeared (< 0 once a good frame came after the restart). */
+static int idle_restart_overdue(double woke_at, double now)
+{
+	return woke_at >= 0 && now - woke_at > RESTART_FIRST_FRAME_S;
+}
+
+static void idle_watchdog_fired(int sig)
+{
+	static const char a[] = "ipu6: idle step '", b[] =
+		"' blocked; exiting so the launcher restarts the bridge without idle stops\n";
+	const char *step = idle_step;
+
+	(void)sig;
+	(void)!write(STDERR_FILENO, a, sizeof(a) - 1);
+	(void)!write(STDERR_FILENO, step, strlen(step));
+	(void)!write(STDERR_FILENO, b, sizeof(b) - 1);
+	_exit(EXIT_IDLE_FAILED);
+}
+
+/* Name the step about to run and arm the watchdog for it; seconds 0 disarms. */
+static void idle_watchdog(const char *step, unsigned int seconds)
+{
+	struct sigaction sa = { .sa_handler = idle_watchdog_fired };
+
+	idle_step = step;
+	if (seconds) {
+		sigemptyset(&sa.sa_mask);
+		sigaction(SIGALRM, &sa, NULL);	/* no SA_RESTART: interrupt the blocked call */
+		printf("bridge: idle step: %s\n", step);
+		fflush(stdout);
+	}
+	alarm(seconds);
+}
+
 /* The IPU6 capture node's buffers; started and stopped as a unit. */
 struct capture {
 	int fd;
@@ -1448,7 +1517,7 @@ static void capture_release(struct capture *c)
 			munmap(c->buffers[i].data, c->buffers[i].length);
 			c->buffers[i].data = NULL;
 		}
-	if (c->fd >= 0 && c->count && ioctl(c->fd, VIDIOC_REQBUFS, &request))
+	if (c->fd >= 0 && c->count && bridge_ioctl(c->fd, VIDIOC_REQBUFS, &request))
 		perror("release IPU6 buffers");
 	c->count = 0;
 }
@@ -1457,10 +1526,30 @@ static void capture_stop(struct capture *c)
 {
 	enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 
-	if (c->streaming && ioctl(c->fd, VIDIOC_STREAMOFF, &type))
+	if (c->streaming && bridge_ioctl(c->fd, VIDIOC_STREAMOFF, &type))
 		perror("VIDIOC_STREAMOFF");
 	c->streaming = 0;
 	capture_release(c);
+}
+
+/*
+ * Idle stop: STREAMOFF only. That ends the ISYS stream (stream_opened, which blocks system
+ * suspend, drops at stream stop) and the sensor's s_stream, while the buffers stay requested and
+ * mapped, so the restart is QBUF + STREAMON and avoids REQBUFS on a firmware that has just timed
+ * out. 0 on success; on failure the buffers are released too and capture_resume() starts over.
+ */
+static int capture_pause(struct capture *c)
+{
+	enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+
+	if (!c->streaming)
+		return 0;
+	c->streaming = 0;
+	if (bridge_ioctl(c->fd, VIDIOC_STREAMOFF, &type) == 0)
+		return 0;
+	perror("idle stop: VIDIOC_STREAMOFF");
+	capture_release(c);
+	return -1;
 }
 
 /* Request, map and queue the buffers, then stream on. 0 on success; on failure all released. */
@@ -1471,7 +1560,7 @@ static int capture_start(struct capture *c)
 	};
 	enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 
-	if (ioctl(c->fd, VIDIOC_REQBUFS, &request)) {
+	if (bridge_ioctl(c->fd, VIDIOC_REQBUFS, &request)) {
 		perror("VIDIOC_REQBUFS");
 		return -1;
 	}
@@ -1482,7 +1571,7 @@ static int capture_start(struct capture *c)
 	}
 	for (unsigned int i = 0; i < c->count; i++) {
 		struct v4l2_buffer b = { .type = type, .memory = V4L2_MEMORY_MMAP, .index = i };
-		if (ioctl(c->fd, VIDIOC_QUERYBUF, &b) || b.length < c->min_size ||
+		if (bridge_ioctl(c->fd, VIDIOC_QUERYBUF, &b) || b.length < c->min_size ||
 		    b.length > MAX_FRAME_BYTES)
 			goto fail;
 		c->buffers[i].length = b.length;
@@ -1492,10 +1581,10 @@ static int capture_start(struct capture *c)
 			c->buffers[i].data = NULL;
 			goto fail;
 		}
-		if (ioctl(c->fd, VIDIOC_QBUF, &b))
+		if (bridge_ioctl(c->fd, VIDIOC_QBUF, &b))
 			goto fail;
 	}
-	if (ioctl(c->fd, VIDIOC_STREAMON, &type)) {
+	if (bridge_ioctl(c->fd, VIDIOC_STREAMON, &type)) {
 		perror("start IPU6 capture");
 		goto fail;
 	}
@@ -1504,6 +1593,37 @@ static int capture_start(struct capture *c)
 fail:
 	capture_release(c);
 	return -1;
+}
+
+/*
+ * Restart after an idle stop: queue the kept buffers and stream on. If that fails (or the pause
+ * already released them), release everything and start from REQBUFS. 0 on success.
+ */
+static int capture_resume(struct capture *c)
+{
+	enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	unsigned int i;
+
+	if (c->streaming)
+		return 0;
+	if (c->count) {
+		for (i = 0; i < c->count; i++) {
+			struct v4l2_buffer b = { .type = type, .memory = V4L2_MEMORY_MMAP, .index = i };
+			if (bridge_ioctl(c->fd, VIDIOC_QBUF, &b)) {
+				perror("idle restart: VIDIOC_QBUF");
+				break;
+			}
+		}
+		if (i == c->count && bridge_ioctl(c->fd, VIDIOC_STREAMON, &type) == 0) {
+			c->streaming = 1;
+			return 0;
+		}
+		if (i == c->count)
+			perror("idle restart: VIDIOC_STREAMON");
+		fprintf(stderr, "idle restart: kept buffers failed; requesting new ones\n");
+		capture_release(c);
+	}
+	return capture_start(c);
 }
 
 /* v4l2loopback's private event: a capture client started or stopped streaming. */
@@ -1516,12 +1636,26 @@ static int loopback_subscribe_usage(int fd)
 	return ioctl(fd, VIDIOC_SUBSCRIBE_EVENT, &sub) == 0;
 }
 
-static void loopback_drain_events(int fd)
+/*
+ * Dequeue pending client-usage events without ever waiting. The loopback node is opened
+ * without O_NONBLOCK, and there VIDIOC_DQEVENT sleeps until the next event: on boot-13 that is
+ * where both bridges hung right after the idle stop (no "stream stopped" line; each app open
+ * woke the call for one event, and it went back to sleep). So only dequeue while poll() says an
+ * event is pending. Returns the number dequeued.
+ */
+static int loopback_drain_events(int fd)
 {
 	struct v4l2_event ev;
+	int n = 0;
 
-	for (int i = 0; i < 16 && ioctl(fd, VIDIOC_DQEVENT, &ev) == 0; i++)
-		;
+	while (n < 16) {
+		struct pollfd p = { .fd = fd, .events = POLLPRI };
+		if (bridge_poll(&p, 1, 0) <= 0 || !(p.revents & POLLPRI) ||
+		    bridge_ioctl(fd, VIDIOC_DQEVENT, &ev))
+			break;
+		n++;
+	}
+	return n;
 }
 
 static void write_black(int fd, unsigned char *frame)
@@ -1751,6 +1885,50 @@ static int find_lens(const struct graph *g, const struct media_v2_topology *t, _
 	return -1;
 }
 
+/*
+ * The idle stop, one watched and logged step at a time: STREAMOFF (buffers kept), close the lens
+ * (the VCM powers down), drain the loopback's usage events without waiting. Returns 0 when
+ * STREAMOFF worked; on -1 the buffers were released and the restart requests new ones.
+ */
+static int idle_pause_stream(struct capture *cap, struct af_state *af, int outfd)
+{
+	double t0 = monotonic_s();
+
+	idle_watchdog("stop: STREAMOFF", idle_step_timeout_s);
+	int r = capture_pause(cap);
+	printf("bridge: idle stop: STREAMOFF %s in %.2f s\n",
+	       r ? "failed, buffers released" : "done, buffers kept", monotonic_s() - t0);
+	if (monotonic_s() - t0 > 3.0)
+		printf("bridge: idle stop: slow STREAMOFF (IPU6 firmware stop/close timeouts?)\n");
+	if (af->fd >= 0) {
+		idle_watchdog("stop: close lens", idle_step_timeout_s);
+		close(af->fd);
+	}
+	af->fd = -1;
+	af->present = 0;
+	af->phase = 0;
+	idle_watchdog("stop: drain loopback events", idle_step_timeout_s);
+	int events = loopback_drain_events(outfd);
+	idle_watchdog("", 0);
+	printf("bridge: idle stop: %d usage event%s drained; total %.2f s\n", events,
+	       events == 1 ? "" : "s", monotonic_s() - t0);
+	fflush(stdout);
+	return r;
+}
+
+/* The restart, watched and logged: QBUF the kept buffers and STREAMON (or start over). */
+static int idle_resume_stream(struct capture *cap)
+{
+	double t0 = monotonic_s();
+
+	idle_watchdog("restart: QBUF and STREAMON", idle_step_timeout_s);
+	int r = capture_resume(cap);
+	idle_watchdog("", 0);
+	printf("bridge: idle restart: stream %s in %.2f s\n", r ? "failed" : "on", monotonic_s() - t0);
+	fflush(stdout);
+	return r;
+}
+
 static int capture_to_loopback(const char *media_dev, const char *out_dev,
 			       const struct sensor_profile *profile)
 {
@@ -1916,10 +2094,12 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev,
 			/* A frame at once, so the consumer is not left waiting; real ones follow. */
 			have_output = 0;
 			write_black(outfd, output);
+			idle_watchdog("restart: active frame controls", idle_step_timeout_s);
 			ae_set_idle(&ae, 0);	/* the planned frame, before the sensor powers up */
-			if (capture_start(&cap)) {
-				fprintf(stderr, "ipu6: sensor stream restart failed; exiting for the launcher\n");
-				result = 3;
+			if (idle_resume_stream(&cap)) {
+				fprintf(stderr, "ipu6: sensor stream restart failed; exiting so the launcher "
+					"restarts the bridge without idle stops\n");
+				result = EXIT_IDLE_FAILED;
 				break;
 			}
 			idle.stopped = 0;
@@ -1936,6 +2116,13 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev,
 			if (errno == EINTR) continue;
 			perror("poll IPU6");
 			result = 1;
+			break;
+		}
+		if (idle_restart_overdue(woke_at, monotonic_s())) {
+			fprintf(stderr, "ipu6: no good sensor frame %.1f s after the idle restart; exiting so "
+				"the launcher restarts the bridge without idle stops\n",
+				monotonic_s() - woke_at);
+			result = EXIT_IDLE_FAILED;
 			break;
 		}
 		if (!ready) {
@@ -1974,15 +2161,9 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev,
 			printf("bridge: no consumer for %.0f s; stopping the sensor stream (stop %u)\n",
 			       idle_stop_s, idle.stops + 1);
 			fflush(stdout);
-			capture_stop(&cap);	/* the dequeued buffer goes with the rest */
-			if (af.fd >= 0)
-				close(af.fd);
-			af.fd = -1;
-			af.present = 0;
-			af.phase = 0;
+			idle_pause_stream(&cap, &af, outfd);	/* the dequeued buffer is requeued on restart */
 			idle.stopped = 1;
 			idle.stops++;
-			loopback_drain_events(outfd);
 			printf("bridge: sensor stream stopped in %.1f s; sensor%s powered down, waiting for a consumer\n",
 			       monotonic_s() - t0, have_lens ? " and lens" : "");
 			fflush(stdout);

@@ -1011,3 +1011,17 @@ SHA-NI, 256-bit VAES/VPCLMULQDQ, AVX-IFMA and AVX-512; the lapis binaries use th
     `test_cancel_during_open` covers the boot-13 cancel, with nothing left in the pipe. Mutants with enrol-mode capture, without the finger-up wait, or with the old post-acknowledgement cancel fail the tests.
   - *Built:* `usb/gbos_fp` SHA-256 `ddc471629060a8736c897192660e2f940e994d60f21ac551580d77281b391f32`. Not deployed.
   - *Next boot:* in `fingerprint.txt`, an unlock touch should show `capture quality/coverage` and `identify: status 0x00, score ..., template GBOS-L-...`. If the status is still nonzero with good quality and coverage, the template itself is suspect (enrol capture or commit), and the logged status is the lead.
+- 2026-11-19 **Boot-13 idle-stop hang: cause and fix (bridge `3c248339…`, launcher `6b76b7ff…`; host-tested only, not deployed).**
+  - *Where it blocked:* after STREAMOFF and REQBUFS(0), the idle stop called `loopback_drain_events()`, a loop of `VIDIOC_DQEVENT` on the loopback node. The node is opened without `O_NONBLOCK`, and there DQEVENT sleeps until the next event (`v4l2_event_dequeue(..., f_flags & O_NONBLOCK)`). So each bridge slept before printing "sensor stream stopped". Every app open or close woke it for one event (the 0x5659 audits at 151.4 and 154.2 s) and it went back to sleep, so the restart check never ran. Selinux audits are rate-limited samples (`audit_rate_limit=5`), not a trace, which is why the first DQEVENT at ~142 s doesn't appear. The ISYS stop/close timeouts are real but didn't cause the hang: STREAMOFF returned.
+  - *Fix:*
+    - The drain only dequeues while `poll(POLLPRI, 0)` reports an event.
+    - The idle stop is STREAMOFF only: the ISYS `stream_opened` count, which blocks suspend, drops at stream stop. The buffers stay mapped, and the restart is QBUF + STREAMON, with a fallback to REQBUFS from scratch.
+    - Every stop/restart step is logged (`bridge: idle step: ...`, `idle stop: STREAMOFF done ... in X s`, `idle restart: stream on in X s`). A SIGALRM watchdog (12 s per step) ends a blocked step with exit status 4. A failed restart, or no good frame 5 s after the consumer appeared, also exits 4.
+    - On status 4 the launcher restarts that bridge at once with `--idle-stop 0`, so that camera streams for the rest of the boot without using up a restart.
+  - The launcher default stays off (`CAMERA_IDLE_STOP` unset = 0). To test the restart, set `CAMERA_IDLE_STOP=15` and look for those lines and for `first sensor frame ... after the consumer appeared`.
+  - Tests:
+    - fake ioctl/poll for the drain (no DQEVENT with nothing pending), pause/resume ordering and failures;
+    - a forked child whose STREAMOFF/STREAMON blocks forever, which must exit 4 in about 1 s;
+    - the restart deadline;
+    - the real supervisor loop against a fake bridge that exits 4.
+  - Negative controls (the old drain, no alarm, no status-4 branch) fail.
