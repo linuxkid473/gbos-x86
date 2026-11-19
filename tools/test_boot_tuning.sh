@@ -287,8 +287,8 @@ for s in d["Sensors"]:
     t = s.get("HotThreshold")
     if t: assert len(t) == 7 and t[6] == "NaN", s["Name"]
 assert "CoolingDevices" not in d' "$CFGJ"
-grep -q 'for d in patched audio installer kmod ksu a11y surface thermal; do' "$ROOT/tools/deploy_stick.sh"
-grep -q 'surface ksu thermal; do' "$ROOT/tools/make_gbos86_image.sh"
+grep -q 'for d in patched audio installer kmod ksu a11y surface thermal[ a-z]*; do' "$ROOT/tools/deploy_stick.sh"
+grep -q 'surface ksu thermal[ a-z]*; do' "$ROOT/tools/make_gbos86_image.sh"
 
 # RAPL report: firmware power limits recorded before Android.
 P="$TMP/thermsys/class/powercap/intel-rapl:0"

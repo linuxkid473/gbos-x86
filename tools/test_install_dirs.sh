@@ -8,7 +8,7 @@ T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 G=$T/gbos
 # a11y: stage0 screen reader, only used when booting the stick. logs: written per boot.
 STICK_ONLY="a11y logs"
-NEED="firmware patched audio installer kmod modules surface ksu sensors camera thermal"
+NEED="firmware patched audio installer kmod modules surface ksu sensors camera thermal display"
 for d in $NEED $STICK_ONLY; do mkdir -p "$G/$d"; done
 # The DIRS assignments, as install.sh runs them.
 sed -n '/^DIRS="/,/^for d in \$DIRS; do \[ -d/p' "$ROOT/usb/install.sh" | grep -v -e "^for d in \$DIRS" -e "\$FILES" > "$T/dirs.sh"
