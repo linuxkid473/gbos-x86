@@ -181,8 +181,10 @@ gbos_enable_latitude7320_sensors() {
   _sensor_sysfs=${SYSFS:-/sys}
   _sensor_hal_name=android.hardware.sensors@2.1-trogdor-subhal.so
   _sensor_hal_path=/vendor/lib64/$_sensor_hal_name
+  # Signed static RRO (config_supportAutoRotation=true) from usb/display/, built by tools/build_rotation_policy_overlay.sh.
+  # A stick's older gbos/sensors/ copy is the unsigned aapt2 build Android never registered and is not used.
   _sensor_policy_name=gbos-latitude7320-rotation-policy.apk
-  _sensor_policy_source=$G/sensors/$_sensor_policy_name
+  _sensor_policy_source=$G/display/$_sensor_policy_name
   _sensor_policy_target=$_sensor_root/vendor/overlay/$_sensor_policy_name
   _sensor_vendor=$_sensor_root/vendor
   _sensor_hals=$_sensor_vendor/etc/sensors/hals.conf

@@ -28,6 +28,8 @@ cat > "$T/bin/cmd" <<'EOF'
 case "$1 $2" in
   "window fixed-to-user-rotation") echo "disabled" ;;
   "overlay list") echo "[x] android.overlay.gbos.latitude7320.rotation" ;;
+  "overlay lookup") [ "$*" = "overlay lookup --verbose android android:bool/config_supportAutoRotation" ] &&
+    echo "Overlaid: android.overlay.gbos.latitude7320.rotation" ;;
   *) exit 1 ;;
 esac
 EOF
@@ -41,7 +43,9 @@ PATH="$T/bin:$PATH" sh "$ROOT/usb/sensor_trial_diag.sh" "$T/out"
 [ "$(grep -c '^Sensor Event: test' "$T/out")" = 11 ]
 [ "$(grep -c '^rotation=1' "$T/out")" = 11 ]
 [ "$(grep -c '^disabled$' "$T/out")" = 11 ]
-[ "$(grep -c 'android.overlay.gbos.latitude7320.rotation' "$T/out")" = 11 ]
+[ "$(grep -c '^\[x\] android.overlay.gbos.latitude7320.rotation$' "$T/out")" = 11 ]
+[ "$(grep -c '^-- config_supportAutoRotation resolution$' "$T/out")" = 11 ]
+[ "$(grep -c '^Overlaid: android.overlay.gbos.latitude7320.rotation$' "$T/out")" = 11 ]
 [ "$(grep -c '^-- adaptive brightness (screen_brightness_mode 1)$' "$T/out")" = 11 ]
 [ "$(grep -c 'mLoadedFrom=/vendor/etc/displayconfig/display_port_0.xml' "$T/out")" = 11 ]
 [ "$(grep -c 'mAutoBrightnessEnabled=true' "$T/out")" = 11 ]

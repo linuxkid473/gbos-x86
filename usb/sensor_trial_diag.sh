@@ -15,6 +15,10 @@ sleep 60
     cmd window fixed-to-user-rotation 2>&1 || echo "ERROR: cannot query fixed-to-user-rotation mode"
     echo "-- enabled framework resource overlays"
     cmd overlay list android 2>&1
+    # which overlay supplies the value (answers why mSupportAutoRotation was already true with the Lapis RRO's false)
+    echo "-- config_supportAutoRotation resolution"
+    timeout 15 cmd overlay lookup --verbose android android:bool/config_supportAutoRotation 2>&1 ||
+      echo "ERROR: overlay lookup failed"
     echo "-- adaptive brightness (screen_brightness_mode $(settings get system screen_brightness_mode 2>&1))"
     ab=$(timeout 15 dumpsys display 2>&1 | grep -E 'mLoadedFrom|AutoBrightnessAvailable|mUseSoftwareAutoBrightnessConfig|mAutoBrightnessEnabled|mLightSensor=|mAmbientLightSensor=|mAmbientLux=|BrightnessEvent' | tail -n 12)
     [ -n "$ab" ] && echo "$ab" || echo "No adaptive brightness output"
