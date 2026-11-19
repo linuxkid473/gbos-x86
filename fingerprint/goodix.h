@@ -58,6 +58,7 @@ struct goodix {
 	uint8_t sequence;
 	uint8_t config[26];
 	char fw_version[9];
+	bool delete_blocked;	/* a delete removed some other template too: no more deletes while this process runs */
 };
 
 struct goodix_usb_bulk {
@@ -774,6 +775,46 @@ static inline int goodix_delete_payload(struct goodix *s, const uint8_t *payload
 	return response.result;
 }
 
+static inline bool goodix_same_template(const struct goodix_template *a, const struct goodix_template *b)
+{
+	return a->uid_len == b->uid_len && memcmp(a->uid, b->uid, a->uid_len) == 0 &&
+	       memcmp(a->tid, b->tid, GOODIX_TEMPLATE_ID_SIZE) == 0;
+}
+
+/*
+ * After one delete attempt: list again and compare with the list from before the first attempt. Returns a
+ * negative errno, else sets *gone (the target is no longer listed) and returns how many of the other
+ * templates have disappeared (0 unless the firmware deleted more than it was asked to).
+ */
+static inline int goodix_delete_check(struct goodix *s, const struct goodix_template *before, size_t nbefore,
+				      const struct goodix_template *t, bool *gone, int *fail)
+{
+	struct goodix_template after[GOODIX_MAX_TEMPLATES];
+	size_t nafter = 0;
+	int r, lost = 0;
+
+	if ((r = goodix_list_templates(s, after, &nafter, fail)) != GOODIX_OK)
+		return r < 0 ? r : -EPROTO;
+	*gone = true;
+	for (size_t j = 0; j < nafter; j++)
+		if (goodix_same_template(&after[j], t))
+			*gone = false;
+	for (size_t i = 0; i < nbefore; i++) {
+		bool kept = false;
+
+		if (goodix_same_template(&before[i], t))
+			continue;
+		for (size_t j = 0; j < nafter && !kept; j++)
+			kept = goodix_same_template(&after[j], &before[i]);
+		if (!kept) {
+			GOODIX_LOGE("delete %s also removed %s from the sensor", t->uid,
+				    before[i].uid_len ? before[i].uid : "an unnamed template");
+			lost++;
+		}
+	}
+	return lost;
+}
+
 /*
  * Delete one listed template and check that the sensor's list no longer has it. Boot-11 and boot-12 sent
  * a7:04, which firmware 01010264 acknowledges with 0x00 while keeping the template; libfprint deletes with
@@ -782,30 +823,54 @@ static inline int goodix_delete_payload(struct goodix *s, const uint8_t *payload
  *               length prefix and the record without its last two bytes)
  *   listed      the length prefix and the record exactly as the sensor listed it
  *   re-encoded  the length prefix and the whole record rebuilt from tid and uid, if it differs from the listed one
- * Returns GOODIX_OK (gone), GOODIX_FAILED (*fail: the last delete status, or GOODIX_FAILED if the sensor
- * reported success but still lists it) or a negative errno.
+ * libfprint never sends the last two, so they go out only while every stored template is gbos_fp's (named
+ * GBOS-): a firmware that took an odd payload as a wildcard must not cost Windows Hello its prints. After every
+ * attempt the whole list is compared with the one from before; if any other template went missing, no delete
+ * is sent again until gbos_fp restarts (s->delete_blocked).
+ * Returns GOODIX_OK (gone, nothing else lost), GOODIX_FAILED (*fail: the last delete status, or GOODIX_FAILED
+ * if the sensor reported success but still lists it, another template was lost, or deletes are blocked) or a
+ * negative errno.
  */
 static inline int goodix_delete_template(struct goodix *s, const struct goodix_template *t, int *fail)
 {
 	uint8_t fid[GOODIX_MAX_UID + 72], listed[GOODIX_MAX_RECORD + 2];
 	struct goodix_delete_form { const uint8_t *payload; size_t len; const char *form; } forms[3];
-	size_t fid_len = 0;
+	struct goodix_template before[GOODIX_MAX_TEMPLATES];
+	size_t fid_len = 0, nbefore = 0;
 	int nforms = 0, status = GOODIX_FAILED, r;
-	bool encoded;
+	bool encoded, others_gbos = true, gone, listed_now = false;
 
 	if (!t->uid_len)
 		return -EINVAL;
+	if (s->delete_blocked) {
+		GOODIX_LOGW("delete %s not sent: an earlier delete removed other templates", t->uid);
+		*fail = GOODIX_FAILED;
+		return GOODIX_FAILED;
+	}
+	if ((r = goodix_list_templates(s, before, &nbefore, fail)) != GOODIX_OK)
+		return r < 0 ? r : -EPROTO;
+	for (size_t i = 0; i < nbefore; i++) {
+		if (goodix_same_template(&before[i], t))
+			listed_now = true;
+		else if (before[i].uid_len < 5 || memcmp(before[i].uid, "GBOS-", 5) != 0)
+			others_gbos = false;
+	}
+	if (!listed_now)
+		return GOODIX_OK;
 	encoded = goodix_encode_finger_id(fid, sizeof(fid), &fid_len, t->tid, t->uid) == 0;
 	if (encoded)
 		forms[nforms++] = (struct goodix_delete_form){ fid, fid_len - 2, "libfprint" };
-	if (t->raw_len) {
+	if (others_gbos && t->raw_len) {
 		listed[0] = (uint8_t)t->raw_len;
 		listed[1] = (uint8_t)(t->raw_len >> 8);
 		memcpy(listed + 2, t->raw, t->raw_len);
 		forms[nforms++] = (struct goodix_delete_form){ listed, t->raw_len + 2, "listed" };
 	}
-	if (encoded && !(t->raw_len == fid_len - 2 && memcmp(t->raw, fid + 2, t->raw_len) == 0))
+	if (others_gbos && encoded && !(t->raw_len == fid_len - 2 && memcmp(t->raw, fid + 2, t->raw_len) == 0))
 		forms[nforms++] = (struct goodix_delete_form){ fid, fid_len, "re-encoded" };
+	if (!others_gbos)
+		GOODIX_LOGI("delete %s: the sensor holds templates not named GBOS-, so only libfprint's payload is sent",
+			    t->uid);
 	for (int i = 0; i < nforms; i++) {
 		r = goodix_delete_payload(s, forms[i].payload, forms[i].len);
 		if (r < 0)
@@ -815,9 +880,16 @@ static inline int goodix_delete_template(struct goodix *s, const struct goodix_t
 			    forms[i].form, (unsigned int)forms[i].len, forms[i].payload[3], forms[i].payload[4],
 			    (unsigned int)status);
 		for (int check = 0; check < 2; check++) {
-			if ((r = goodix_template_listed(s, t->uid, fail)) < 0)
+			if ((r = goodix_delete_check(s, before, nbefore, t, &gone, fail)) < 0)
 				return r;
-			if (!r)
+			if (r > 0) {
+				s->delete_blocked = true;
+				GOODIX_LOGE("delete %s (%s record) removed %d other template(s): no more deletes until "
+					    "gbos_fp restarts", t->uid, forms[i].form, r);
+				*fail = GOODIX_FAILED;
+				return GOODIX_FAILED;
+			}
+			if (gone)
 				return GOODIX_OK;
 			if (status != GOODIX_SUCCESS)
 				break;

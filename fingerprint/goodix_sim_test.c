@@ -43,8 +43,9 @@ struct stored { struct goodix_template t; int finger; uint8_t rec[GOODIX_MAX_REC
  * a7:01 (delete all) aborts the test.
  */
 enum {
-	DELETE_TID_UID,		/* deletes the template whose tid and uid match */
-	DELETE_TID,		/* matches the tid alone (then libfprint's short payload works as well) */
+	DELETE_TID,		/* matches the tid (libfprint's short payload works, as fprintd's delete does) */
+	DELETE_TID_UID,		/* deletes the template whose tid and uid match (libfprint's payload gets 0x9c) */
+	DELETE_WILDCARD,	/* libfprint's payload: 0x00, nothing deleted; a whole record: every template goes */
 	DELETE_EXACT,		/* only an exact copy of the stored record deletes it */
 	DELETE_IGNORED,		/* answers success, keeps the template */
 	DELETE_NO_RECORD,	/* answers "no such record" (0x9c), keeps the template */
@@ -201,6 +202,11 @@ static void respond(uint8_t cmd0, uint8_t cmd1, const uint8_t *in, size_t in_len
 		memset(rec, 0, sizeof(rec));
 		memcpy(rec, in + 2, in_len - 2);
 		assert(goodix_parse_finger_id(rec, declared, &t) == 0);
+		if (sim.delete_mode == DELETE_WILDCARD) {
+			if (in_len == declared + 2)
+				sim.n = 0;
+			break;
+		}
 		i = sim.delete_mode == DELETE_TID ? find_tid(t.tid) : find(t.uid);
 		if (i >= 0 && sim.delete_mode == DELETE_EXACT &&
 		    !(sim.db[i].rec_len == in_len && memcmp(sim.db[i].rec, in, in_len) == 0))
@@ -680,6 +686,7 @@ static void test_delete_verified(void)
 
 	/* firmware that matches tid and uid */
 	sim_reset();
+	sim.delete_mode = DELETE_TID_UID;
 	store("GBOS-cccccccc-u10-2ab7f1c0", 1);
 	open_dev(&s);
 	/* libfprint's short payload loses the uid's last byte, so this firmware answers 0x9c; the listed record works */
@@ -753,6 +760,55 @@ static void test_delete_verified(void)
 	open_dev(&s);
 	assert(goodix_delete(&s, "GBOS-cccccccc-u10-2ab7f1c0", &fail) == GOODIX_FAILED);
 	assert(fail == GOODIX_NO_RECORD && sim.n == 1 && sim.deletes == 2);	/* libfprint, listed (= re-encoded) */
+	goodix_close(&s);
+}
+
+/*
+ * A firmware that took an odd a7:00 payload as "delete everything" must not get the chance to erase Windows
+ * Hello's prints, and once it has erased anything else, no delete is sent again.
+ */
+static void test_delete_collateral(void)
+{
+	struct goodix s;
+	int fail;
+
+	/* only gbos_fp's templates: the listed record wipes both; detected, reported, deletes blocked */
+	sim_reset();
+	sim.delete_mode = DELETE_WILDCARD;
+	store("GBOS-1c2ac773-u10-5cfb789b", 1);
+	store("GBOS-L-956073cf-u10-13b9e5e2", 2);
+	open_dev(&s);
+	assert(goodix_delete(&s, "GBOS-1c2ac773-u10-5cfb789b", &fail) == GOODIX_FAILED && fail == GOODIX_FAILED);
+	assert(sim.n == 0 && sim.deletes == 2 && s.delete_blocked);
+	assert(logged("delete GBOS-1c2ac773-u10-5cfb789b also removed GBOS-L-956073cf-u10-13b9e5e2 from the sensor"));
+	assert(logged("(listed record) removed 1 other template(s): no more deletes until gbos_fp restarts"));
+	/* blocked: nothing is sent, even for a template the firmware still lists, and across close and open */
+	store("GBOS-L-956073cf-u10-00000001", 3);
+	goodix_close(&s);
+	assert(goodix_open(&s) == 0);
+	assert(goodix_delete(&s, "GBOS-L-956073cf-u10-00000001", &fail) == GOODIX_FAILED);
+	assert(sim.deletes == 2 && sim.n == 1 && logged("not sent: an earlier delete removed other templates"));
+	goodix_close(&s);
+
+	/* a Windows Hello print on the sensor: libfprint's payload only, so the wildcard never fires */
+	goodix_init(&s);
+	sim_reset();
+	sim.delete_mode = DELETE_WILDCARD;
+	store("GBOS-1c2ac773-u10-5cfb789b", 1);
+	store("FP1-20261117-7-3F2A9B11-david", 2);
+	open_dev(&s);
+	assert(goodix_delete(&s, "GBOS-1c2ac773-u10-5cfb789b", &fail) == GOODIX_FAILED);
+	assert(sim.deletes == 1 && sim.n == 2 && find("FP1-20261117-7-3F2A9B11-david") >= 0 && !s.delete_blocked);
+	assert(logged("holds templates not named GBOS-, so only libfprint's payload is sent"));
+	goodix_close(&s);
+
+	/* and with a working firmware, libfprint's payload removes the target and leaves Windows' print */
+	sim_reset();
+	store("GBOS-1c2ac773-u10-5cfb789b", 1);
+	store("FP1-20261117-7-3F2A9B11-david", 2);
+	open_dev(&s);
+	assert(goodix_delete(&s, "GBOS-1c2ac773-u10-5cfb789b", &fail) == GOODIX_OK);
+	assert(sim.deletes == 1 && sim.n == 1 && find("FP1-20261117-7-3F2A9B11-david") == 0);
 	goodix_close(&s);
 }
 
@@ -851,6 +907,7 @@ int main(void)
 	test_stale_limit();
 	test_delete_verified();
 	test_boot11_restart();
+	test_delete_collateral();
 	unlink(node);
 	puts("GOODIX_SIM_TEST_PASS");
 	return 0;
