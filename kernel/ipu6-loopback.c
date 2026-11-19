@@ -559,8 +559,30 @@ static unsigned char clamp8(int value)
 }
 
 /* Image tuning (static so the host tests can vary them). */
-static int chroma_radius = 2;		/* 5x5 U/V box filter */
+static int chroma_radius = 2;		/* colour averaged over (2r+1)^2 output pixels; 0 = per pixel */
 #define TNR_THRESHOLD 14		/* luma steps (0..255) still treated as noise */
+/*
+ * Above HIGH_GAIN_X total sensor gain the colour neighbourhood grows by one step at
+ * HIGH_GAIN_X and another at 2 x HIGH_GAIN_X (5x5 -> 7x7 -> 9x9), the temporal luma
+ * threshold grows with the square root of the gain (noise does), up to 2x, and colour is
+ * faded out across strong luma edges, where the 4x4 window straddles the edge and its
+ * R, B and G sites see different sides (purple/green speckle on 2026-11-18 boot-11).
+ */
+#define HIGH_GAIN_X 8.0
+#define EDGE_DESATURATION 0.7	/* most colour removed at the strongest edges */
+
+static int chroma_radius_for_gain(double gain)
+{
+	if (chroma_radius <= 0)
+		return 0;
+	return chroma_radius + (gain > HIGH_GAIN_X) + (gain > 2 * HIGH_GAIN_X);
+}
+
+static int tnr_threshold_for_gain(double gain)
+{
+	double k = gain > HIGH_GAIN_X ? sqrt(gain / HIGH_GAIN_X) : 1.0;
+	return (int)(TNR_THRESHOLD * (k > 2.0 ? 2.0 : k) + 0.5);
+}
 #define HIGHLIGHT_START (LINEAR_MAX * 85 / 100)	/* raw level where clipping handling starts */
 
 /*
@@ -571,6 +593,8 @@ static int output_rotate180;
 
 static int16_t plane_y[OUT_HEIGHT][OUT_WIDTH], plane_u[OUT_HEIGHT][OUT_WIDTH],
 	plane_v[OUT_HEIGHT][OUT_WIDTH], plane_tmp[OUT_HEIGHT][OUT_WIDTH];
+/* Linear (pre-gamma) R, G, B per output pixel, and their neighbourhood averages. */
+static int16_t lin_plane[3][OUT_HEIGHT][OUT_WIDTH], lin_avg[3][OUT_HEIGHT][OUT_WIDTH];
 static unsigned char tnr_previous[OUT_HEIGHT][OUT_WIDTH];
 static int tnr_have_previous;
 
@@ -607,16 +631,11 @@ static void box_filter_plane(int16_t plane[OUT_HEIGHT][OUT_WIDTH], int r)
 	}
 }
 
-static void smooth_chroma(int r)
-{
-	box_filter_plane(plane_u, r);
-	box_filter_plane(plane_v, r);
-}
-
-static void rgb_at(const uint16_t *raw, unsigned int width, unsigned int height,
-		   unsigned int stride, const unsigned int gain_q12[3],
-		   unsigned int x, unsigned int y, const unsigned int *shading_q12,
-		   int rgb[3])
+/* Linear-light R, G, B (0..LINEAR_MAX) of the 4x4 window at x, y. */
+static void rgb_linear_at(const uint16_t *raw, unsigned int width, unsigned int height,
+			  unsigned int stride, const unsigned int gain_q12[3],
+			  unsigned int x, unsigned int y, const unsigned int *shading_q12,
+			  int rgb[3])
 {
 	/*
 	 * A 4x4 window holds every site of the 4x4 mosaic exactly once (2 R, 2 B, 8 G,
@@ -702,8 +721,62 @@ static void rgb_at(const uint16_t *raw, unsigned int width, unsigned int height,
 		}
 	}
 	for (int channel = 0; channel < 3; channel++)
-		rgb[channel] = gamma_lut[rgb[channel] > (int)LINEAR_MAX ? LINEAR_MAX
-							      : (unsigned int)rgb[channel]];
+		if (rgb[channel] > (int)LINEAR_MAX)
+			rgb[channel] = (int)LINEAR_MAX;
+}
+
+/*
+ * Colour from neighbourhood averages in linear light, luma per pixel. Averaging after the
+ * gamma curve (the earlier U/V box filter) is biased: gamma is concave, so the noisier
+ * channels (R and B: 2 of 16 sites each, IR subtracted, amplified by the colour matrix)
+ * lose more than G, and noisy greys turned green at high gain (2026-11-18 boot-11). Here
+ * each pixel keeps its own linear luminance but takes the R:G:B ratios of the (2r+1)^2
+ * average; near strong luma edges those ratios are pulled towards grey.
+ */
+static void linear_colour_to_yuv(int r, double gain)
+{
+	for (int c = 0; c < 3; c++) {
+		memcpy(lin_avg[c], lin_plane[c], sizeof(lin_avg[c]));
+		if (r > 0)
+			box_filter_plane(lin_avg[c], r);
+	}
+	int edges = r > 0 && gain > HIGH_GAIN_X;
+	for (int oy = 0; oy < OUT_HEIGHT; oy++)
+		for (int ox = 0; ox < OUT_WIDTH; ox++) {
+			int lr = lin_plane[0][oy][ox], lg = lin_plane[1][oy][ox], lb = lin_plane[2][oy][ox];
+			int ar = lin_avg[0][oy][ox], ag = lin_avg[1][oy][ox], ab = lin_avg[2][oy][ox];
+			int c[3];
+			int64_t ylin = 2126LL * lr + 7152LL * lg + 722LL * lb;	/* x 10000 */
+			int64_t yavg = 2126LL * ar + 7152LL * ag + 722LL * ab;
+			if (r == 0 || yavg <= 0) {
+				c[0] = lr; c[1] = lg; c[2] = lb;
+			} else {
+				/* Strength of the local luma edge, relative to the local level. */
+				double keep = 1.0;
+				if (edges) {
+					int xl = ox > 0 ? ox - 1 : ox, xr = ox + 1 < OUT_WIDTH ? ox + 1 : ox;
+					int yu = oy > 0 ? oy - 1 : oy, yd = oy + 1 < OUT_HEIGHT ? oy + 1 : oy;
+					double gx = fabs((double)lin_plane[1][oy][xr] - lin_plane[1][oy][xl]);
+					double gy = fabs((double)lin_plane[1][yd][ox] - lin_plane[1][yu][ox]);
+					double rel = (gx + gy) / (ag + 32.0);
+					double t = (rel - 0.5) / 1.0;
+					t = t < 0 ? 0 : t > 1 ? 1 : t;
+					keep = 1.0 - EDGE_DESATURATION * t;
+				}
+				int avg[3] = { ar, ag, ab };
+				for (int k = 0; k < 3; k++) {
+					double ratio = (double)avg[k] * 10000.0 / (double)yavg;
+					ratio = 1.0 + keep * (ratio - 1.0);
+					double v = (double)ylin / 10000.0 * ratio;
+					c[k] = v < 0 ? 0 : v > LINEAR_MAX ? (int)LINEAR_MAX : (int)(v + 0.5);
+				}
+			}
+			for (int k = 0; k < 3; k++)
+				c[k] = gamma_lut[c[k]];
+			plane_y[oy][ox] = (int16_t)((77 * c[0] + 150 * c[1] + 29 * c[2] + 128) >> 8);
+			plane_u[oy][ox] = (int16_t)((-43 * c[0] - 85 * c[1] + 128 * c[2]) >> 8);
+			plane_v[oy][ox] = (int16_t)((128 * c[0] - 107 * c[1] - 21 * c[2]) >> 8);
+		}
 }
 
 static int convert_bayer_yuyv(const uint16_t *raw, unsigned int width,
@@ -735,32 +808,33 @@ static int convert_bayer_yuyv(const uint16_t *raw, unsigned int width,
 				shading[1] = lsc_map[1][oy][ox];
 				shading[2] = lsc_map[2][oy][ox];
 			}
-			rgb_at(raw, width, height, stride, gain_q12, sx, sy, lsc_active ? shading : NULL, c);
+			rgb_linear_at(raw, width, height, stride, gain_q12, sx, sy,
+				      lsc_active ? shading : NULL, c);
 			/* Lens shading stays indexed by sensor position; only the output is turned. */
 			unsigned int ty = output_rotate180 ? OUT_HEIGHT - 1 - oy : oy;
 			unsigned int tx = output_rotate180 ? OUT_WIDTH - 1 - ox : ox;
-			plane_y[ty][tx] = (int16_t)((77 * c[0] + 150 * c[1] + 29 * c[2] + 128) >> 8);
-			plane_u[ty][tx] = (int16_t)((-43 * c[0] - 85 * c[1] + 128 * c[2]) >> 8);
-			plane_v[ty][tx] = (int16_t)((128 * c[0] - 107 * c[1] - 21 * c[2]) >> 8);
+			for (int k = 0; k < 3; k++)
+				lin_plane[k][ty][tx] = (int16_t)c[k];
 		}
 	}
 	/*
 	 * 2. Chroma noise: R and B are only 2 of 16 sites, so at high gain colour speckle
-	 * dominates. Average U/V over a (2r+1)^2 neighbourhood; luma keeps full detail.
+	 * dominates. Colour comes from a neighbourhood average in linear light (growing with
+	 * gain); luma keeps full detail.
 	 */
-	if (chroma_radius > 0)
-		smooth_chroma(chroma_radius);
+	linear_colour_to_yuv(chroma_radius_for_gain(sensor_total_gain), sensor_total_gain);
 	/*
 	 * 3. Luma noise: recursive temporal filter. Where a pixel changed by no more than
 	 * TNR_THRESHOLD since the last output it moves only a third of the way, averaging
 	 * noise in still areas; larger changes (motion) pass through at once, so no ghosts.
 	 */
+	int tnr_threshold = tnr_threshold_for_gain(sensor_total_gain);
 	for (unsigned int oy = 0; oy < OUT_HEIGHT; oy++)
 		for (unsigned int ox = 0; ox < OUT_WIDTH; ox++) {
 			int y = plane_y[oy][ox];
 			if (tnr_have_previous) {
 				int d = y - tnr_previous[oy][ox];
-				if (d >= -TNR_THRESHOLD && d <= TNR_THRESHOLD)
+				if (d >= -tnr_threshold && d <= tnr_threshold)
 					y = tnr_previous[oy][ox] + (d >= 0 ? (d + 1) / 3 : -((-d + 1) / 3));
 			}
 			y = clamp8(y);
@@ -1181,10 +1255,174 @@ static int frame_health_bad(struct frame_health *h, double now, const char *what
 	return 1;
 }
 
+/*
+ * Rear lens focus (OV8856 module 0BA801T3 with a DW9714 voice-coil motor). The VCM driver
+ * binds, but nothing opened its subdev, so it stayed runtime-suspended and the lens sat at
+ * its rest stop: the whole rear picture was blurred (2026-11-18 boot-11). The bridge keeps
+ * the lens subdev open (powered) and runs a contrast-detect scan whenever a consumer starts:
+ * coarse steps over the DAC range where the module focuses, then fine steps around the
+ * sharpest, holding auto-exposure meanwhile. Sharpness: squared differences between
+ * same-colour sites two pixels apart in the central ninth, relative to its brightness.
+ * The module's Windows tuning (optomechanics record 13) lists 278, 400 and 1023, which we
+ * read as the infinity and macro DAC codes and the maximum (not confirmed); AF_START is a
+ * thin-lens estimate for about 1.5 m (f = 2.83 mm, same record) used until a scan ends.
+ */
+#define AF_START 286
+#define AF_COARSE_MIN 230
+#define AF_COARSE_MAX 470
+#define AF_COARSE_STEP 20
+#define AF_FINE_STEP 5
+#define AF_SETTLE 2	/* frames after a move before measuring (lens and exposure lag) */
+
+struct af_state {
+	int fd, present, min, max, value;
+	int phase;	/* 0 idle, 1 coarse scan, 2 fine scan */
+	int pos, hi, step, settle, best_pos, coarse_best;
+	double best_score;
+};
+
+static int af_move(struct af_state *af, int pos)
+{
+	struct v4l2_control c = { .id = V4L2_CID_FOCUS_ABSOLUTE };
+
+	if (pos < af->min) pos = af->min;
+	if (pos > af->max) pos = af->max;
+	c.value = pos;
+#ifdef CAMERA_BRIDGE_TEST
+	if (af->fd < 0) {
+		af->value = pos;
+		return 0;
+	}
+#endif
+	if (ioctl(af->fd, VIDIOC_S_CTRL, &c)) {
+		perror("af: set lens position; focus control off");
+		af->present = 0;
+		af->phase = 0;
+		return -1;
+	}
+	af->value = pos;
+	return 0;
+}
+
+/* Open the lens subdev and take its FOCUS_ABSOLUTE range; absent lens = no AF (front). */
+static void af_init(struct af_state *af, const char *lens_path)
+{
+	struct v4l2_queryctrl q = { .id = V4L2_CID_FOCUS_ABSOLUTE };
+
+	memset(af, 0, sizeof(*af));
+	af->fd = -1;
+	if (!lens_path)
+		return;
+	af->fd = open(lens_path, O_RDWR | O_CLOEXEC);
+	if (af->fd < 0 || ioctl(af->fd, VIDIOC_QUERYCTRL, &q) || q.maximum <= q.minimum) {
+		perror("af: lens subdev unusable; fixed focus");
+		if (af->fd >= 0)
+			close(af->fd);
+		af->fd = -1;
+		return;
+	}
+	af->present = 1;
+	af->min = q.minimum;
+	af->max = q.maximum;
+	if (af_move(af, AF_START) == 0)
+		printf("af: lens %s range %d..%d, start %d\n", lens_path, af->min, af->max, af->value);
+}
+
+static void af_start(struct af_state *af)
+{
+	if (!af->present)
+		return;
+	af->phase = 1;
+	af->step = AF_COARSE_STEP;
+	af->hi = AF_COARSE_MAX;
+	af->best_score = -1;
+	af->best_pos = af->value;
+	af->settle = AF_SETTLE;
+	af_move(af, AF_COARSE_MIN);
+	af->pos = af->value;
+}
+
+static double af_sharpness(const uint16_t *raw, unsigned int width, unsigned int height,
+			   unsigned int stride)
+{
+	unsigned int x0 = width / 3, x1 = 2 * width / 3, y0 = height / 3, y1 = 2 * height / 3;
+	double sum = 0, level = 0;
+	unsigned long n = 0;
+
+	for (unsigned int y = y0; y + 2 < y1; y += 2)
+		for (unsigned int x = x0; x + 2 < x1; x++) {
+			double v = raw_at(raw, width, height, stride, (int)x, (int)y);
+			double dx = v - raw_at(raw, width, height, stride, (int)x + 2, (int)y);
+			double dy = v - raw_at(raw, width, height, stride, (int)x, (int)y + 2);
+			sum += dx * dx + dy * dy;
+			level += v;
+			n++;
+		}
+	if (!n)
+		return 0;
+	level /= n;
+	return sum / n / (level * level + 1.0);
+}
+
+/* One converted frame. Returns 1 while a scan runs (hold AE). */
+static int af_frame(struct af_state *af, const uint16_t *raw, unsigned int width,
+		    unsigned int height, unsigned int stride)
+{
+	if (!af->present || !af->phase)
+		return 0;
+	if (af->settle > 0) {
+		af->settle--;
+		return 1;
+	}
+	double score = af_sharpness(raw, width, height, stride);
+	if (score > af->best_score) {
+		af->best_score = score;
+		af->best_pos = af->pos;
+	}
+	if (af->pos + af->step <= af->hi) {
+		af_move(af, af->pos + af->step);
+		af->pos = af->value;
+		af->settle = AF_SETTLE;
+		return af->present;
+	}
+	if (af->phase == 1) {
+		af->coarse_best = af->best_pos;
+		af->phase = 2;
+		af->step = AF_FINE_STEP;
+		af->hi = af->coarse_best + AF_COARSE_STEP - AF_FINE_STEP;
+		af->best_score = -1;
+		af_move(af, af->coarse_best - AF_COARSE_STEP + AF_FINE_STEP);
+		af->pos = af->value;
+		af->settle = AF_SETTLE;
+		return af->present;
+	}
+	af->phase = 0;
+	af_move(af, af->best_pos);
+	printf("af: focus at %d (coarse %d, sharpness %.4g)\n", af->value, af->coarse_best,
+	       af->best_score);
+	fflush(stdout);
+	return 0;
+}
+
+/* The lens entity a sensor's ancillary link points to, as a /dev path; 0 if found. */
+static int find_lens(const struct graph *g, const struct media_v2_topology *t, __u32 sensor_id,
+		     char *path, size_t size)
+{
+	for (__u32 i = 0; i < t->num_links; i++) {
+		const struct media_v2_link *l = &g->links[i];
+		if ((l->flags & MEDIA_LNK_FL_LINK_TYPE) == MEDIA_LNK_FL_ANCILLARY_LINK &&
+		    l->source_id == sensor_id)
+			return device_path(g, t, l->sink_id, path, size);
+	}
+	return -1;
+}
+
 static int capture_to_loopback(const char *media_dev, const char *out_dev,
 			       const struct sensor_profile *profile)
 {
 	struct ae_state ae = { .fd = -1 };
+	struct af_state af = { .fd = -1 };
+	char lens_path[128];
 	struct graph graph = { 0 };
 	struct media_v2_topology topology;
 	struct media_device_info info = { 0 };
@@ -1324,6 +1562,8 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev,
 		goto done;
 	}
 	ae_init(&ae, sfd, (int)sensor.format.height);
+	af_init(&af, find_lens(&graph, &topology, path.sensor->id, lens_path, sizeof(lens_path)) ?
+		NULL : lens_path);
 	signal(SIGINT, stop_bridge);
 	signal(SIGTERM, stop_bridge);
 	printf("bridge active: %ux%u %s to %ux%u YUYV%s; sensor remains streaming until stop\n",
@@ -1369,6 +1609,8 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev,
 			last_readers = readers;
 			tnr_reset();	/* the scene may have changed while idle */
 			ae_set_idle(&ae, !bridge_should_convert(readers));
+			if (bridge_should_convert(readers))
+				af_start(&af);
 		}
 		const char *bad = (b.flags & V4L2_BUF_FLAG_ERROR) ? "error-marked" :
 			b.bytesused < (uint64_t)video.fmt.pix.bytesperline * video.fmt.pix.height ||
@@ -1407,7 +1649,11 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev,
 		} else {
 			have_output = 1;
 		}
-		ae_frame(&ae, mean_green);
+		int af_busy = bridge_should_convert(readers) &&
+			af_frame(&af, buffers[b.index].data, video.fmt.pix.width,
+				 video.fmt.pix.height, video.fmt.pix.bytesperline);
+		if (!af_busy)
+			ae_frame(&ae, mean_green);
 		frame_count++;
 		if (frame_count == 30 || frame_count % 900 == 0)
 			log_cfa_phases(buffers[b.index].data, video.fmt.pix.width,
@@ -1421,6 +1667,8 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev,
 done:
 	if (streaming && ioctl(vfd, VIDIOC_STREAMOFF, &type))
 		perror("VIDIOC_STREAMOFF");
+	if (af.fd >= 0)
+		close(af.fd);
 	if (ae.fd >= 0)
 		ae_restore(&ae);
 	for (unsigned int i = 0; i < buffer_count; i++)
