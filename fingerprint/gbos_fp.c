@@ -825,6 +825,22 @@ static void on_sensor_event(void *ctx, int kind, int value)
 	}
 }
 
+/*
+ * goodix_open() failed. -ECANCELED is the framework cancelling the operation while the sensor was being opened
+ * (boot-13: keyguard restarts authentication right after a lockout is cleared): report a cancel, as
+ * BiometricScheduler expects, not ERR_HW_UNAVAILABLE, which made it recreate the session every time.
+ */
+static void open_failed(struct session *ss, int r, const char *when)
+{
+	if (r == -ECANCELED) {
+		LOGI("user %d: cancelled while opening the sensor%s", ss->user, when);
+		cb_error(ss, ERR_CANCELED, 0);
+		return;
+	}
+	LOGE("user %d: sensor open failed%s: %d", ss->user, when, r);
+	cb_error(ss, ERR_HW_UNAVAILABLE, 0);
+}
+
 /* A rejected finger: count it and lock out at the thresholds. True when the operation must end. */
 static bool count_failure(struct session *ss)
 {
@@ -885,8 +901,7 @@ static void op_authenticate(struct session *ss)
 	}
 	LOGI("user %d: authenticate starting (%d enrollments)", ss->user, st->n);
 	if ((r = goodix_open(&dev)) < 0) {
-		LOGE("user %d: sensor open failed: %d", ss->user, r);
-		cb_error(ss, ERR_HW_UNAVAILABLE, 0);
+		open_failed(ss, r, "");
 		return;
 	}
 	for (;;) {
@@ -986,16 +1001,14 @@ static void op_enroll(struct session *ss, const struct hat *hat)
 	}
 	LOGI("user %d: enroll %d starting as %s", ss->user, id, name);
 	if ((r = goodix_open(&dev)) < 0) {
-		LOGE("user %d: sensor open failed: %d", ss->user, r);
-		cb_error(ss, ERR_HW_UNAVAILABLE, 0);
+		open_failed(ss, r, "");
 		return;
 	}
 	/* createSession queued a cleanup; if it could not run, do it now, before the sensor's duplicate check */
 	if (!ss->reconciled && reconcile(ss) < 0) {
 		goodix_close(&dev);
 		if ((r = goodix_open(&dev)) < 0) {
-			LOGE("user %d: sensor open failed after the template cleanup: %d", ss->user, r);
-			cb_error(ss, ERR_HW_UNAVAILABLE, 0);
+			open_failed(ss, r, " after the template cleanup");
 			return;
 		}
 	}

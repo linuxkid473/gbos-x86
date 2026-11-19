@@ -280,7 +280,9 @@ static inline int goodix_command_timeout(struct goodix *s, uint8_t cmd0, uint8_t
 			    cmd0, cmd1, packet.payload[0]);
 		return -EPROTO;
 	}
-	if (goodix_cancel_requested(s)) {
+	/* a command that cannot be cancelled is answered at once: read its response, or it is left in the pipe as a
+	 * stale packet for the next command (boot-13: a cancel during the open's d0:00) */
+	if (cancellable && goodix_cancel_requested(s)) {
 		s->need_reset = true;
 		return -ECANCELED;
 	}
@@ -518,13 +520,28 @@ static inline int goodix_wait_finger_up(struct goodix *s)
 	}
 }
 
+#define GOODIX_VERIFY_MIN_COVERAGE 35	/* libfprint fp_verify_capture_cb() */
+
+/*
+ * One a2 capture; waits for a finger. libfprint captures differently for the two uses:
+ *   enroll  {0, config[4], config[5]}, then quality >= config[4] and coverage >= config[5] (fp_enroll_capture_cb)
+ *   verify  {1, config[10], config[11]}, then quality > 0 and coverage >= 35 (fp_verify_sm_run_state and
+ *           fp_verify_capture_cb). Boot-13 identified after an enroll-mode capture: every touch was a no-match.
+ * Returns GOODIX_OK, GOODIX_RETRY (a finger was there, but the image is unusable), GOODIX_FAILED or a
+ * negative errno.
+ */
 static inline int goodix_capture(struct goodix *s, const struct goodix_ev *ev,
-				 int stage, int *fail)
+				 int stage, bool verify, int *fail)
 {
 	uint8_t parameters[3] = { 0, s->config[4], s->config[5] };
 	struct goodix_response response;
 	int r;
 
+	if (verify) {
+		parameters[0] = 1;
+		parameters[1] = s->config[10];
+		parameters[2] = s->config[11];
+	}
 	goodix_emit(ev, GOODIX_EV_CAPTURE, 0);
 	r = goodix_command(s, GOODIX_CMD_CAPTURE, 0, parameters, sizeof(parameters),
 			   true, &response);
@@ -532,6 +549,8 @@ static inline int goodix_capture(struct goodix *s, const struct goodix_ev *ev,
 		return r;
 	if (response.result >= GOODIX_ERROR_THRESHOLD) {
 		*fail = response.result;
+		if (verify)
+			GOODIX_LOGI("identify: capture status 0x%02x", response.result);
 		goodix_emit(ev, GOODIX_EV_RETRY, stage);
 		return GOODIX_RETRY;
 	}
@@ -539,7 +558,10 @@ static inline int goodix_capture(struct goodix *s, const struct goodix_ev *ev,
 		*fail = GOODIX_FAILED;
 		return GOODIX_FAILED;
 	}
-	if (response.data[0] < s->config[4] || response.data[1] < s->config[5]) {
+	if (verify)
+		GOODIX_LOGI("identify: capture quality %u, coverage %u", response.data[0], response.data[1]);
+	if (verify ? response.data[0] == 0 || response.data[1] < GOODIX_VERIFY_MIN_COVERAGE :
+		     response.data[0] < s->config[4] || response.data[1] < s->config[5]) {
 		goodix_emit(ev, GOODIX_EV_RETRY, stage);
 		return GOODIX_RETRY;
 	}
@@ -602,7 +624,7 @@ static inline int goodix_enroll(struct goodix *s, const char *uid,
 	}
 	memcpy(tid, response.data, sizeof(tid));
 	for (stage = 0; stage < GOODIX_ENROLL_STAGES; ) {
-		r = goodix_capture(s, ev, stage, fail);
+		r = goodix_capture(s, ev, stage, false, fail);
 		if (r == GOODIX_RETRY)
 			continue;
 		if (r != GOODIX_OK) {
@@ -677,6 +699,13 @@ done:
 	return result;
 }
 
+/*
+ * One touch: capture (verify mode), a5 identify, and, when the finger was on the sensor but did not match or
+ * gave an unusable image, wait until it is lifted, so the caller's next attempt is a new touch (boot-13: five
+ * no-matches 290 ms apart from one touch, then a lockout). libfprint's a5 reply: status (0 = match), then
+ * reject detail (16 bits), score (32), study (8), a 16-bit record length and the matched template's record.
+ * Returns GOODIX_OK (*matched: one of uids), GOODIX_NOMATCH, GOODIX_RETRY, GOODIX_FAILED or a negative errno.
+ */
 static inline int goodix_identify(struct goodix *s, const char *const *uids, int count,
 				  const struct goodix_ev *ev, char *matched, int *fail)
 {
@@ -684,45 +713,56 @@ static inline int goodix_identify(struct goodix *s, const char *const *uids, int
 	struct goodix_response response;
 	struct goodix_template found;
 	int r, result = GOODIX_FAILED;
-	bool shield = false, ours = false;
+	bool shield = false, ours = false, touched = false;
 
 	if (count <= 0 || count > 255)
 		return -EINVAL;
 	if ((r = goodix_power_shield(s, GOODIX_CMD_SHIELD_ON)) < 0)
 		return r;
 	shield = true;
-	r = goodix_capture(s, ev, 0, fail);
+	r = goodix_capture(s, ev, 0, true, fail);
 	if (r != GOODIX_OK) {
+		touched = r == GOODIX_RETRY;
 		result = r;
 		goto done;
 	}
+	touched = true;
 	if ((r = goodix_command(s, GOODIX_CMD_IDENTIFY, 0, nonce, sizeof(nonce),
 				false, &response)) < 0)
 		goto done;
 	if (response.result != GOODIX_SUCCESS) {
+		GOODIX_LOGI("identify: status 0x%02x: no match", response.result);
 		result = GOODIX_NOMATCH;
 		goto done;
 	}
 	if (response.len < 9) {
+		GOODIX_LOGW("identify: status 0x00 but a %u-byte reply", (unsigned int)response.len);
 		*fail = GOODIX_FAILED;
 		goto done;
 	}
 	{
 		size_t record_len = (size_t)response.data[7] |
 				    (size_t)response.data[8] << 8;
+		uint32_t score = (uint32_t)response.data[2] | (uint32_t)response.data[3] << 8 |
+				 (uint32_t)response.data[4] << 16 | (uint32_t)response.data[5] << 24;
+
+		(void)score;	/* logged only */
 
 		if (record_len > response.len - 9 ||
 		    goodix_parse_finger_id(response.data + 9, record_len, &found) < 0) {
+			GOODIX_LOGW("identify: status 0x00, score %u, but no readable template record", score);
 			*fail = GOODIX_FAILED;
 			goto done;
 		}
-	}
-	for (int i = 0; i < count; i++) {
-		if (found.uid_len == strlen(uids[i]) &&
-		    memcmp(found.uid, uids[i], found.uid_len) == 0) {
-			ours = true;
-			break;
+		for (int i = 0; i < count; i++) {
+			if (found.uid_len == strlen(uids[i]) &&
+			    memcmp(found.uid, uids[i], found.uid_len) == 0) {
+				ours = true;
+				break;
+			}
 		}
+		GOODIX_LOGI("identify: status 0x00, score %u, study %u, template %s%s", score, response.data[6],
+			    found.uid_len ? found.uid : "(unnamed)", ours ? "" : " (not one of this user's)");
 	}
 	if (!ours) {
 		result = GOODIX_NOMATCH;
@@ -733,6 +773,14 @@ static inline int goodix_identify(struct goodix *s, const char *const *uids, int
 done:
 	if (r < 0 && result == GOODIX_FAILED)
 		result = r;
+	if (touched && (result == GOODIX_NOMATCH || result == GOODIX_RETRY)) {
+		int up = goodix_wait_finger_up(s);
+
+		if (up < 0) {
+			result = up;
+			r = up;
+		}
+	}
 	if (shield && r != -ECANCELED && !s->need_reset) {
 		int off = goodix_power_shield(s, GOODIX_CMD_SHIELD_OFF);
 
