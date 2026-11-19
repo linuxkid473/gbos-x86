@@ -784,6 +784,16 @@ on post-fs-data
       log "hook: fingerprint: gbos_fp binary missing; CrosFP left as-is"
     fi
   fi
+  # Debug backchannel, off by default: with RUN_SH_BACKCHANNEL=1 in gbos.cfg, gbos_sync runs /postinstall/gbos/run.sh as root (output in
+  # run.log, then deletes it). The gbos FAT is mounted umask=000 and SELinux is permissive, so while it is on any app or process that can
+  # write there gets root within 5 s. Only for debugging a laptop with no shell or adb; remove the line afterwards.
+  if [ "${RUN_SH_BACKCHANNEL:-0}" = 1 ]; then
+    GBOS_RUN_SH='if [ -f /postinstall/gbos/run.sh ]; then sh /postinstall/gbos/run.sh > /postinstall/gbos/run.log 2>&1; rm -f /postinstall/gbos/run.sh; fi; '
+    log "hook: RUN_SH_BACKCHANNEL=1: gbos_sync runs /postinstall/gbos/run.sh as root (any app can write it; debug only)"
+  else
+    GBOS_RUN_SH=
+    if [ -f $G/run.sh ]; then log "hook: gbos/run.sh present but ignored (RUN_SH_BACKCHANNEL is not 1 in gbos.cfg)"; fi
+  fi
   cat > /tmp/sysinit/gbos.rc <<RC
 # Rotate at 1 MB: on this stick, data written past ~4 MB of a file that stays open never reaches
 # the FAT cluster chain before power-off (fsck: "size ... should at most be 4046848"). Rotating
@@ -801,8 +811,8 @@ service gbos_crashlog /system/bin/logcat -b crash -v threadtime -f /postinstall/
     seclabel u:r:shell:s0
 
 # The laptop is usually powered off by hand, so flush the logs to the stick every 5 s.
-# Also executes /postinstall/gbos/run.sh as root backchannel if present.
-service gbos_sync /system/bin/sh -c "while true; do sleep 5; if [ -f /postinstall/gbos/run.sh ]; then sh /postinstall/gbos/run.sh > /postinstall/gbos/run.log 2>&1; rm -f /postinstall/gbos/run.sh; fi; sync; done"
+# GBOS_RUN_SH is empty unless RUN_SH_BACKCHANNEL=1 (see above). hook.sh expands it here, so init never sees a property reference.
+service gbos_sync /system/bin/sh -c "while true; do sleep 5; ${GBOS_RUN_SH}sync; done"
     user root
     group root
     seclabel u:r:shell:s0

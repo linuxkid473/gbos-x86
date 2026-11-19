@@ -1062,3 +1062,18 @@ SHA-NI, 256-bit VAES/VPCLMULQDQ, AVX-IFMA and AVX-512; the lapis binaries use th
   - *Test:* `fingerprint/fp_log_test.c` (host; run by `fingerprint/build.sh`) kills a logging child with SIGTERM and finds every line complete. A buffered stdio writer killed the same way leaves an empty file (negative control). A mutant without the write fails.
   - *Not changed:* the main `gbos_logcat` still loses under 4 KB at shutdown.
   - *Built:* `usb/gbos_fp` SHA-256 `d322a24f09b2fce1357b37bbb923dc3bf98ee1486dbe62a503d8cafb6c273e1f`, `usb/hook.sh` `5ba8e62b4f90ba2ecc15861d986f99a641ed03293b349416b453dd7101e6df8b`. Not deployed.
+- 2026-11-19 **Security: the `gbos_sync` run.sh root backchannel is now off by default (requested by the "Boot log errors" session; built, not deployed).**
+  `gbos_sync` (added in `9ab314c`) ran `/postinstall/gbos/run.sh` as root (`u:r:shell:s0`) every 5 s and deleted it. The gbos FAT is mounted `umask=000`
+  and SELinux is permissive, so any app with storage access, or any process, could drop run.sh and get root within 5 s. Nothing in the repo, the docs or
+  `tools/` writes run.sh (HANDOFF's other `run.sh` is `usb/localai/run.sh`, which is a different file), so no workflow depended on it.
+  - *Now:* `hook.sh` builds the loop body at hook time. It includes the run.sh step only when gbos.cfg has exactly `RUN_SH_BACKCHANNEL=1`, read by stage0 before
+    Android starts, and logs `hook: RUN_SH_BACKCHANNEL=1: ...` to stage0-dmesg. Otherwise the service is
+    `while true; do sleep 5; sync; done`. The periodic `sync` stays because the logs need it (the laptop is powered off by hand). A leftover
+    `gbos/run.sh` with the flag off is logged as `gbos/run.sh present but ignored`. The generated .rc line has no `$` and keeps its seclabel.
+    `install.sh` copies the stick's gbos.cfg, so an install made while the flag is on inherits it. Remove the line from both copies when done.
+  - *Test:* `tools/test_run_sh_backchannel.sh` cuts the gate and the service line out of hook.sh and generates the rc line for unset, empty, 0, yes, true,
+    2 and " 1" (all off) and for 1 (on). It runs the loop body once against a fake /postinstall and checks that nothing outside the gate mentions
+    gbos/run.sh. The pre-change hook.sh fails it.
+  - *Still open (not fixed here):* the FAT is world-writable, and Android runs root code from it: `gbos_fp`, `soft_gk`, the diag scripts started 60 to 70 s
+    after boot, and `hook.sh`/`gbos.cfg` on the next boot. So an app can still get root, more slowly. The real fix is to mount it without
+    `umask=000`, e.g. `uid=0,gid=0,fmask=0133,dmask=0022`, or read-only for apps.
