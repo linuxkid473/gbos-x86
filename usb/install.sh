@@ -97,7 +97,10 @@ umount /mnt/stickefi 2>/dev/null || true
 FILES="super.img super.layout hook.sh stick_fat.sh aidiag.sh native_zygote.sh early_patch.sh sensor_vendor_overlay.sh sensor_trial_diag.sh tablet_mode.sh hwdetect.sh sensordiag.sh mask_vendor_modules.sh apex_patch.sh crossystem bootdisk.img libkm_compat.so system_ext_manifest.xml soft_gk"
 [ -f "$G/gbos_fp" ] && FILES="$FILES gbos_fp"
 DIRS="firmware patched audio installer kmod modules surface ksu"
-[ ! -d "$G/sensors" ] || DIRS="$DIRS sensors"
+# Optional, used at boot when present: sensors/, camera/ (calibration extracted from the Windows tuning files,
+# stick only, never in git: read by installer/bin/ipu6-camera-bridge.sh), thermal/ (hook.sh's Latitude 7320
+# thermal config). Without camera/ and thermal/ an installed system silently booted without them.
+for d in sensors camera thermal; do [ ! -d "$G/$d" ] || DIRS="$DIRS $d"; done
 for f in $FILES; do [ -f $G/$f ] || die "missing gbos/$f on the stick"; done
 for d in $DIRS; do [ -d $G/$d ] || die "missing gbos/$d/ on the stick"; done
 tool sfdisk --version > /dev/null 2>&1 || die "partitioning tools in gbos/installer/ don't run"
