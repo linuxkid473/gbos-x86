@@ -243,6 +243,8 @@ static struct goodix dev;		/* the worker's; other threads only call goodix_reque
 static char instance[9];
 static bool data_live;			/* DATA_DIR is on tmpfs: forgotten at reboot */
 static bool no_install;			/* --no-gbos-install: hook.sh found no LABEL=GBOSSYS */
+static bool installed;			/* --installed (booted from the NVMe install), /data persistent per
+					 * statfs and its instance id stable: gbos_fp_policy.h FP_DELETE_REPLACED */
 static struct { int32_t user; int64_t value, expires; } challenges[16];	/* under mu */
 static struct { int32_t user; int64_t until; } timed[8];		/* under mu, monotonic ms */
 static AIBinder_Class *fp_cls, *session_cls, *cb_cls, *cancel_cls;
@@ -323,20 +325,32 @@ static bool is_hex8(const char *s)
 	return true;
 }
 
-/* A random id per /data, so two gbos installs on one laptop (stick and SSD) never share template names. */
-static void load_instance(void)
+/*
+ * A random id per /data, so two gbos installs on one laptop (stick and SSD) never share template names.
+ * Returns true when the id is this /data's for good: read from its file, or new and saved because there
+ * was none. An unreadable or damaged file is left alone (this run uses a temporary id and the cleanup
+ * treats other instances as it would on a live boot with an install).
+ */
+static bool load_instance(void)
 {
 	char buf[16];
 	uint32_t r;
+	int n = read_file(DATA_DIR "/instance", buf, sizeof(buf));
+	bool missing = n < 0 && errno == ENOENT;
 
-	if (read_file(DATA_DIR "/instance", buf, sizeof(buf)) >= 8 && is_hex8(buf)) {
+	if (n >= 8 && is_hex8(buf)) {
 		memcpy(instance, buf, 8);
 		instance[8] = 0;
-		return;
+		return true;
 	}
 	arc4random_buf(&r, sizeof(r));
 	snprintf(instance, sizeof(instance), "%08x", r);
-	write_file(DATA_DIR "/instance", instance, 8);
+	if (!missing) {
+		LOGE(DATA_DIR "/instance unreadable or damaged (%d, errno %d): using %s for this boot only",
+		     n, errno, instance);
+		return false;
+	}
+	return write_file(DATA_DIR "/instance", instance, 8);
 }
 
 static void st_load(struct user_state *st, int32_t user)
@@ -403,7 +417,7 @@ static struct fp_policy session_policy(const struct session *ss)
 {
 	struct fp_policy p = {
 		.instance = instance, .live = data_live, .no_install = no_install, .user = ss->user,
-		.ids = ss->st.ids, .n = ss->st.n, .ids_trusted = ss->st.trusted,
+		.ids = ss->st.ids, .n = ss->st.n, .ids_trusted = ss->st.trusted, .installed = installed,
 	};
 
 	return p;
@@ -1437,12 +1451,15 @@ int main(int argc, char **argv, char **envp)
 	pthread_t t;
 	int32_t ex;
 	struct statfs_buf fs;
+	bool boot_installed = false, persistent = false;
 	int i, probe_result = 0;
 
 	(void)envp;
 	for (i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--no-gbos-install") == 0)
 			no_install = true;
+		else if (strcmp(argv[i], "--installed") == 0)
+			boot_installed = true;
 		else
 			LOGW("ignoring unknown argument %s", argv[i]);
 	}
@@ -1450,13 +1467,18 @@ int main(int argc, char **argv, char **envp)
 	if (mkdir(DATA_DIR, 0700) != 0 && errno != EEXIST)
 		LOGE("mkdir " DATA_DIR ": %d", errno);
 	/* A statfs failure counts as persistent: it only ever makes the cleanup keep more templates. */
-	if (statfs(DATA_DIR, &fs) == 0)
+	if (statfs(DATA_DIR, &fs) == 0) {
 		data_live = fs.f_type == TMPFS_MAGIC || fs.f_type == RAMFS_MAGIC;
-	else
+		persistent = !data_live;
+	} else {
 		LOGW("statfs " DATA_DIR ": %d; treating /data as persistent", errno);
-	load_instance();
-	LOGI("data %s, gbOS86 install on this machine: %s", data_live ? "tmpfs (live boot)" : "persistent",
-	     no_install ? "none" : "present or unknown");
+	}
+	/* all three, or the install keeps other instances' templates as before */
+	installed = load_instance() && boot_installed && persistent && !no_install;
+	LOGI("data %s, gbOS86 install on this machine: %s%s", data_live ? "tmpfs (live boot)" : "persistent",
+	     no_install ? "none" : "present or unknown",
+	     installed ? "; this is the install's /data" :
+	     boot_installed ? "; booted from the install but its /data is not confirmed" : "");
 
 	/* hook.sh starts this before system_server; retries cover USB nodes still settling. */
 	for (i = 0; i < 12; i++) {

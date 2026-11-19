@@ -74,8 +74,16 @@ printf '%s\n' "$RC" | grep -q '^service gbos_fp /postinstall/gbos/gbos_fp$' \
 RC=$(unset SYS; FAKE_GBOSSYS=/dev/nvme0n1p2; export FAKE_GBOSSYS; run_service default)
 printf '%s\n' "$RC" | grep -q '^service gbos_fp /postinstall/gbos/gbos_fp$' \
   && ok "install appearing after stage0: no --no-gbos-install" || bad "no-install flag despite late install"
-grep -q '"--no-gbos-install"' "$ROOT/fingerprint/gbos_fp.c" \
-  && ok "HAL parses --no-gbos-install" || bad "HAL ignores --no-gbos-install"
+# --installed only when stage0 booted the NVMe install (FROM=nvme)
+RC=$(SYS=/dev/nvme0n1p2; FROM=nvme; FAKE_GBOSSYS=/dev/nvme0n1p2; export SYS FROM FAKE_GBOSSYS; run_service default)
+printf '%s\n' "$RC" | grep -q '^service gbos_fp /postinstall/gbos/gbos_fp --installed$' \
+  && ok "NVMe boot: HAL told it is the install" || bad "--installed missing on an NVMe boot"
+RC=$(SYS=/dev/nvme0n1p2; FROM=stick; FAKE_GBOSSYS=/dev/nvme0n1p2; export SYS FROM FAKE_GBOSSYS; run_service default)
+printf '%s\n' "$RC" | grep -q '^service gbos_fp /postinstall/gbos/gbos_fp$' \
+  && ok "live boot with an install: neither flag" || bad "flags on a live boot with an install"
+grep -q '"--no-gbos-install"' "$ROOT/fingerprint/gbos_fp.c" &&
+  grep -q '"--installed"' "$ROOT/fingerprint/gbos_fp.c" \
+  && ok "HAL parses --no-gbos-install and --installed" || bad "HAL ignores its flags"
 
 printf '6383\n' > "$W/usb/1-1/idProduct"
 [ -z "$(run_service 1)" ] && ok "unmatched USB product does not start HAL" || bad "USB product scoping"

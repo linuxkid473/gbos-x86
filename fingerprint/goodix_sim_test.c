@@ -335,8 +335,8 @@ static void test_names(void)
 static void test_policy(void)
 {
 	static const int32_t ids[] = { 0x11 };
-	struct fp_policy live = { "aaaaaaaa", true, true, 10, ids, 1, true };
-	struct fp_policy install = { "bbbbbbbb", false, false, 10, ids, 1, true };
+	struct fp_policy live = { "aaaaaaaa", true, true, 10, ids, 1, true, false };
+	struct fp_policy install = { "bbbbbbbb", false, false, 10, ids, 1, true, false };
 	struct fp_policy p;
 
 	/* live boot, no install */
@@ -368,6 +368,27 @@ static void test_policy(void)
 	assert(fp_classify(&p, "GBOS-bbbbbbbb-u10-00000011") == FP_KEEP_ENROLLED);
 	/* a live name with this instance but a persistent /data is not this /data's */
 	assert(fp_classify(&install, "GBOS-L-bbbbbbbb-u10-00000011") == FP_DELETE_OLD_LIVE);
+
+	/* the install's own /data (--installed, statfs persistent, instance stable): the only persistent
+	 * /data on the machine, so another persistent instance's /data is gone */
+	p = install;
+	p.installed = true;
+	assert(fp_classify(&p, "GBOS-1c2ac773-u10-5cfb789b") == FP_DELETE_REPLACED);	/* 2026-11-18 */
+	assert(fp_classify(&p, "GBOS-cccccccc-u0-00000011") == FP_DELETE_REPLACED);
+	assert(fp_classify(&p, "GBOS-bbbbbbbb-u10-00000011") == FP_KEEP_ENROLLED);
+	assert(fp_classify(&p, "GBOS-bbbbbbbb-u0-00000011") == FP_KEEP_OTHER_USER);
+	assert(fp_classify(&p, "GBOS-bbbbbbbb-u10-00000012") == FP_DELETE_UNKNOWN);
+	assert(fp_classify(&p, "FP1-20261117-7-3F2A9B11-david") == FP_KEEP_NOT_GBOS);
+	/* an id Android still lists keeps its template even under another instance (lost instance file) */
+	assert(fp_classify(&p, "GBOS-cccccccc-u10-00000011") == FP_KEEP_ENROLLED);
+	p.ids_trusted = false;
+	assert(fp_classify(&p, "GBOS-cccccccc-u10-00000033") == FP_KEEP_UNTRUSTED);
+	assert(fp_classify(&p, "GBOS-cccccccc-u0-00000033") == FP_DELETE_REPLACED);
+	/* never on tmpfs, whatever the flag says */
+	p = live;
+	p.no_install = false;
+	p.installed = true;
+	assert(fp_classify(&p, "GBOS-cccccccc-u10-2ab7f1c0") == FP_KEEP_OTHER_SYSTEM);
 }
 
 /* ---- against the simulated sensor ---- */
@@ -375,7 +396,7 @@ static void test_policy(void)
 static void test_reconcile_live(void)
 {
 	static const int32_t ids[] = { 0x11 };
-	struct fp_policy p = { "aaaaaaaa", true, true, 10, ids, 1, true };
+	struct fp_policy p = { "aaaaaaaa", true, true, 10, ids, 1, true, false };
 	struct goodix s;
 	int deleted, failed, fail = 0;
 
@@ -398,7 +419,7 @@ static void test_reconcile_live(void)
 static void test_reconcile_install(void)
 {
 	static const int32_t ids[] = { 0x11, 0x22 };
-	struct fp_policy p = { "bbbbbbbb", false, false, 10, ids, 2, true };
+	struct fp_policy p = { "bbbbbbbb", false, false, 10, ids, 2, true, false };
 	struct goodix s;
 	int deleted, failed, fail = 0;
 
@@ -411,11 +432,48 @@ static void test_reconcile_install(void)
 	assert(fp_reconcile(&s, &p, &deleted, &failed, &fail) == GOODIX_OK);
 	assert(deleted == 1 && sim.n == 3 && find("GBOS-L-dddddddd-u10-00000005") < 0);
 
+	/* the same sensor seen as the install's own /data: the other instance's template goes */
+	p.installed = true;
+	assert(fp_reconcile(&s, &p, &deleted, &failed, &fail) == GOODIX_OK);
+	assert(deleted == 1 && sim.n == 2 && find("GBOS-cccccccc-u10-00000033") < 0);
+	assert(logged("not this install's"));
+	p.installed = false;
+
 	/* state unreadable: this system's templates all stay, even ones Android may not know */
 	store("GBOS-bbbbbbbb-u10-00000044", 5);
 	p.ids_trusted = false;
 	assert(fp_reconcile(&s, &p, &deleted, &failed, &fail) == GOODIX_OK);
-	assert(deleted == 0 && sim.n == 4);
+	assert(deleted == 0 && sim.n == 3);
+	goodix_close(&s);
+}
+
+/* the first enrolment on the install meets the stale template of a pre-install live boot */
+static void test_install_stale_template(void)
+{
+	struct fp_policy p = { "bbbbbbbb", false, false, 10, NULL, 0, true, true };
+	struct goodix_template dup;
+	struct goodix s;
+	int fail, restarted = 0;
+
+	sim_reset();
+	sim.dup_status = 2;
+	store("GBOS-1c2ac773-u10-5cfb789b", 1);
+	sim.finger = 1;
+	open_dev(&s);
+	assert(fp_enroll(&s, &p, "GBOS-bbbbbbbb-u10-00000042", NULL, &fail, &dup, &restarted) == GOODIX_OK);
+	assert(restarted == 1 && sim.n == 1 && find("GBOS-bbbbbbbb-u10-00000042") >= 0);
+
+	goodix_close(&s);
+
+	/* without --installed the same template blocks that finger */
+	sim_reset();
+	sim.dup_status = 2;
+	store("GBOS-1c2ac773-u10-5cfb789b", 1);
+	sim.finger = 1;
+	p.installed = false;
+	open_dev(&s);
+	assert(fp_enroll(&s, &p, "GBOS-bbbbbbbb-u10-00000042", NULL, &fail, &dup, &restarted) == GOODIX_DUPLICATE);
+	assert(sim.n == 1 && logged("kept, so not enrolled here"));
 	goodix_close(&s);
 }
 
@@ -428,7 +486,7 @@ static int enroll(struct goodix *s, const char *uid, int *fail, struct goodix_te
 /* boot-10: 12 stages complete, then check-duplicate says 2 because yesterday's template is still stored */
 static void test_boot10_stale_template(void)
 {
-	struct fp_policy p = { "aaaaaaaa", true, true, 10, NULL, 0, true };
+	struct fp_policy p = { "aaaaaaaa", true, true, 10, NULL, 0, true, false };
 	struct goodix_template dup;
 	struct goodix s;
 	int fail, deleted, failed;
@@ -466,7 +524,7 @@ static void test_boot10_stale_template(void)
 static void test_duplicate_kept(void)
 {
 	static const int32_t ids[] = { 0x11 };
-	struct fp_policy p = { "aaaaaaaa", true, false, 10, ids, 1, true };
+	struct fp_policy p = { "aaaaaaaa", true, false, 10, ids, 1, true, false };
 	struct goodix_template dup;
 	struct goodix s;
 	int fail;
@@ -583,7 +641,7 @@ static void test_cancel_in_response_wait(void)
 static void test_delete_verified(void)
 {
 	static const int32_t none[1] = { 0 };
-	struct fp_policy p = { "aaaaaaaa", true, true, 10, none, 0, true };
+	struct fp_policy p = { "aaaaaaaa", true, true, 10, none, 0, true, false };
 	struct goodix_template listed[GOODIX_MAX_TEMPLATES];
 	struct goodix s;
 	size_t count;
@@ -641,7 +699,7 @@ static void test_delete_verified(void)
 /* boot-11 again: after the verified delete, the enrollment starts over instead of failing */
 static void test_boot11_restart(void)
 {
-	struct fp_policy p = { "5f0bf067", true, true, 10, NULL, 0, true };
+	struct fp_policy p = { "5f0bf067", true, true, 10, NULL, 0, true, false };
 	struct goodix_template dup;
 	struct goodix s;
 	int fail, restarted;
@@ -724,6 +782,7 @@ int main(void)
 	test_policy();
 	test_reconcile_live();
 	test_reconcile_install();
+	test_install_stale_template();
 	test_boot10_stale_template();
 	test_duplicate_kept();
 	test_commit_refused();

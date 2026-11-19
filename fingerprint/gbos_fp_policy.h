@@ -14,11 +14,15 @@
  *
  * Deleted: this /data's templates of the session's user that the HAL does not report to Android (the
  * framework only knows the ids enumerateEnrollments returned, so nothing it holds can point at them);
- * GBOS-L templates of another instance; and, only in a live boot on a machine with no gbOS86 install,
- * old-style templates of another instance (nothing left that could reference them).
- * Kept: everything not named by gbos_fp (Windows Hello, fprintd, ...), other users' templates, and any
- * old-style template of another instance while an install exists or this /data is persistent: an
- * installed gbOS86 may still use it.
+ * GBOS-L templates of another instance; old-style templates of another instance in a live boot on a
+ * machine with no gbOS86 install (nothing left that could reference them); and the same in the installed
+ * system itself: its /data is the only persistent one on the machine (stage0 mounts ext4 /data only when
+ * booting the NVMe install), so another persistent instance's /data was replaced (reinstall, wipe) or was
+ * a live boot before 2026-11-18. Without that rule a stale live-boot template blocks its finger on the
+ * install for good, since live boots keep old-style names once an install exists.
+ * Kept: everything not named by gbos_fp (Windows Hello, fprintd, ...), other users' templates, any
+ * old-style template of another instance in a live boot while an install exists (the install may use
+ * it), and in the install any template whose user and id Android still lists, whatever its instance.
  *
  * Include goodix.h first; define FP_LOGI/FP_LOGW for log output.
  */
@@ -47,6 +51,8 @@ struct fp_policy {
 	const int32_t *ids;	/* that user's enrollments, as reported to Android */
 	int n;
 	bool ids_trusted;	/* the user's state file was read, or does not exist (false on a read error) */
+	bool installed;		/* booted from the NVMe install (hook.sh --installed), /data confirmed persistent
+				 * by statfs, and this /data's instance file read or newly created */
 };
 
 enum fp_verdict {
@@ -58,6 +64,7 @@ enum fp_verdict {
 	FP_DELETE_UNKNOWN,	/* this /data, this user, not an enrollment Android knows */
 	FP_DELETE_OLD_LIVE,	/* a previous live boot's (GBOS-L) */
 	FP_DELETE_ORPHAN,	/* old-style, another /data, live boot and no install on this machine */
+	FP_DELETE_REPLACED,	/* old-style, another /data, seen from the install's own persistent /data */
 };
 
 static inline bool fp_verdict_deletes(enum fp_verdict v) { return v >= FP_DELETE_UNKNOWN; }
@@ -73,6 +80,7 @@ static inline const char *fp_verdict_text(enum fp_verdict v)
 	case FP_DELETE_UNKNOWN: return "this system's, but not an enrollment Android knows";
 	case FP_DELETE_OLD_LIVE: return "from an earlier live boot";
 	case FP_DELETE_ORPHAN: return "from an earlier live boot (old name; no gbOS86 install on this machine)";
+	case FP_DELETE_REPLACED: return "from an earlier /data (a live boot or a replaced install), not this install's";
 	}
 	return "?";
 }
@@ -153,6 +161,17 @@ static inline enum fp_verdict fp_classify(const struct fp_policy *p, const char 
 		return FP_DELETE_OLD_LIVE;
 	if (p->live && p->no_install)
 		return FP_DELETE_ORPHAN;
+	if (p->installed && !p->live) {
+		/* an instance file lost and recreated must not cost the user a finger Android still shows */
+		if (name.user == p->user) {
+			if (!p->ids_trusted)
+				return FP_KEEP_UNTRUSTED;
+			for (int i = 0; i < p->n; i++)
+				if ((uint32_t)p->ids[i] == name.id)
+					return FP_KEEP_ENROLLED;
+		}
+		return FP_DELETE_REPLACED;
+	}
 	return FP_KEEP_OTHER_SYSTEM;
 }
 
