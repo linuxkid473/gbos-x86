@@ -684,7 +684,51 @@ gbos_goodix_fp() {
   done
 }
 
+# Android must not be able to change the gbos volume. stage0_init.sh mounts it umask=000 (every file and directory 0777) and SELinux is
+# permissive, while Android runs root code from it: gbos_fp, soft_gk, the diag scripts, apex_patch.sh, and hook.sh and gbos.cfg on the next
+# boot. So any app could get root. vfat permissions belong to the superblock and a vfat remount ignores uid/gid/umask (HANDOFF.md 2026-11-18),
+# so they can only change in stage0_init.sh (a kernel rebuild). Here, per mount, Android gets:
+#   /postinstall              the volume, read-only, nosuid, nodev (a bind remount: stage0's /gbos, which the FAT shutdown watcher and the
+#                             kmsg copier use, stays writable). exec stays: gbos_fp, soft_gk and the camera tools run from it.
+#   /postinstall/gbos/logs    a 64 KB tmpfs, mode 0700 root: without CAP_DAC_OVERRIDE (apps, system_server) nothing can look inside.
+#   .../logs/boot-N           this boot's log directory ($L), read-write, nosuid, nodev, noexec. Every writer in Android is a root service.
+# Root keeps full access to the rest in a mount namespace of its own (apps never see it writable):
+#   unshare -m sh -c 'mount -o remount,bind,rw /postinstall && ...'        (audio/audio-profile.sh does this)
+# POSTINSTALL_RW=1 in gbos.cfg keeps the old world-writable /postinstall (debug only: any app can then get root).
+# PI = Android's /postinstall (/new/postinstall), LOGDIR = $L, N = boot number. Sets GBOS_LOGS_PRIVATE=1 when only root can reach logs/boot-N.
+# Lines start with "POSTINSTALL:" in stage0-dmesg.txt; "POSTINSTALL-RW" means apps can write something.
+gbos_postinstall_lockdown() { # PI LOGDIR N
+  GBOS_LOGS_PRIVATE=0
+  if [ "${POSTINSTALL_RW:-0}" = 1 ]; then
+    log "hook: POSTINSTALL-RW: /postinstall left writable for every app (POSTINSTALL_RW=1 in gbos.cfg; any app can get root; debug only)"
+    return 0
+  fi
+  if ! mount -o remount,bind,ro,nosuid,nodev "$1"; then
+    log "hook: POSTINSTALL-RW: read-only remount of /postinstall FAILED: every app can write gbos/ (and get root)"
+    return 1
+  fi
+  _pl=$1/gbos/logs/boot-$3
+  if mount -t tmpfs -o mode=0700,size=64k,nosuid,nodev,noexec gbos-logs "$1/gbos/logs"; then
+    if mkdir -m 0700 "$_pl" && mount --bind "$2" "$_pl"; then
+      GBOS_LOGS_PRIVATE=1
+      mount -o remount,bind,nosuid,nodev,noexec "$_pl" || log "hook: POSTINSTALL: logs/boot-$3 stays exec (noexec remount failed)"
+      log "hook: POSTINSTALL: /postinstall read-only for Android; logs/boot-$3 writable by root only"
+      return 0
+    fi
+    umount "$1/gbos/logs" 2>/dev/null
+  fi
+  # No root-only gateway: this boot's log directory directly (on the FAT's logs/boot-N); apps can write log files, nothing else.
+  if mount --bind "$2" "$_pl"; then
+    mount -o remount,bind,nosuid,nodev,noexec "$_pl" 2>/dev/null
+    log "hook: POSTINSTALL-RW: /postinstall read-only, but the root-only logs gateway FAILED: apps can write logs/boot-$3"
+    return 0
+  fi
+  log "hook: POSTINSTALL: /postinstall read-only, logs/boot-$3 bind FAILED: no logcat or diag logs from Android this boot"
+  return 1
+}
+
 if mount --bind /gbos /new/postinstall; then
+  gbos_postinstall_lockdown /new/postinstall "$L" "$N"
   mkdir -p /tmp/sysinit && cp -a /new/system/etc/init/. /tmp/sysinit/
 if [ -f /tmp/sysinit/gscutil.rc ]; then
   rm -f /tmp/sysinit/gscutil.rc && log "hook: gscutil disabled (no Google GSC; avoids /dev/tpm0 wait)"
@@ -784,15 +828,19 @@ on post-fs-data
       log "hook: fingerprint: gbos_fp binary missing; CrosFP left as-is"
     fi
   fi
-  # Debug backchannel, off by default: with RUN_SH_BACKCHANNEL=1 in gbos.cfg, gbos_sync runs /postinstall/gbos/run.sh as root (output in
-  # run.log, then deletes it). The gbos FAT is mounted umask=000 and SELinux is permissive, so while it is on any app or process that can
-  # write there gets root within 5 s. Only for debugging a laptop with no shell or adb; remove the line afterwards.
-  if [ "${RUN_SH_BACKCHANNEL:-0}" = 1 ]; then
-    GBOS_RUN_SH='if [ -f /postinstall/gbos/run.sh ]; then sh /postinstall/gbos/run.sh > /postinstall/gbos/run.log 2>&1; rm -f /postinstall/gbos/run.sh; fi; '
-    log "hook: RUN_SH_BACKCHANNEL=1: gbos_sync runs /postinstall/gbos/run.sh as root (any app can write it; debug only)"
-  else
-    GBOS_RUN_SH=
-    if [ -f $G/run.sh ]; then log "hook: gbos/run.sh present but ignored (RUN_SH_BACKCHANNEL is not 1 in gbos.cfg)"; fi
+  # Debug backchannel, off by default: with RUN_SH_BACKCHANNEL=1 in gbos.cfg, a gbos/run.sh put on the volume (from another computer) is
+  # moved into this boot's log directory now, and gbos_sync runs logs/boot-N/run.sh as root (output in logs/boot-N/run.log, then deletes it).
+  # Only while that directory is reachable by root alone (gbos_postinstall_lockdown above): any other writer of it would get root within 5 s.
+  # Only for debugging a laptop with no shell or adb; remove the line afterwards.
+  GBOS_RUN_SH=
+  if [ "${RUN_SH_BACKCHANNEL:-0}" = 1 ] && [ "${GBOS_LOGS_PRIVATE:-0}" = 1 ]; then
+    GBOS_RUN_SH="if [ -f /postinstall/gbos/logs/boot-$N/run.sh ]; then sh /postinstall/gbos/logs/boot-$N/run.sh > /postinstall/gbos/logs/boot-$N/run.log 2>&1; rm -f /postinstall/gbos/logs/boot-$N/run.sh; fi; "
+    if [ -f $G/run.sh ]; then mv -f $G/run.sh $L/run.sh || log "hook: RUN_SH_BACKCHANNEL=1: cannot move gbos/run.sh into logs/boot-$N"; fi
+    log "hook: RUN_SH_BACKCHANNEL=1: gbos_sync runs gbos/logs/boot-$N/run.sh as root (debug only)"
+  elif [ "${RUN_SH_BACKCHANNEL:-0}" = 1 ]; then
+    log "hook: RUN_SH_BACKCHANNEL=1 ignored: logs/boot-$N is not root-only this boot (see the POSTINSTALL lines)"
+  elif [ -f $G/run.sh ]; then
+    log "hook: gbos/run.sh present but ignored (RUN_SH_BACKCHANNEL is not 1 in gbos.cfg)"
   fi
   cat > /tmp/sysinit/gbos.rc <<RC
 # Rotate at 1 MB: on this stick, data written past ~4 MB of a file that stays open never reaches
