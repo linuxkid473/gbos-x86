@@ -151,6 +151,31 @@ for c in 0x040300 0x040380; do
 done
 grep -q '! has_hda_controller; then' "$ROOT/usb/stage0_init.sh"
 
+# Quiet kernel console (P4): the generic command line is quiet, the debug one stays verbose.
+GEN=$(cat "$ROOT/kernel/isa_emu_patch/generic_cmdline.txt")
+case " $GEN " in *" loglevel=4 "*) ;; *) echo "generic cmdline lacks loglevel=4" >&2; exit 1;; esac
+case " $GEN " in *" ignore_loglevel "*|*" loglevel=8 "*) echo "generic cmdline is not quiet" >&2; exit 1;; esac
+grep -q ' loglevel=8 ignore_loglevel ' "$ROOT/kernel/isa_emu_patch/debug_cmdline.txt"
+# The screen reader silences the console and stop.sh restores the command line's levels (quiet stays quiet, debug stays verbose).
+command mkdir -p "$TMP/a11ysys/module/printk/parameters" "$TMP/a11yproc/sys/kernel"
+for st in "N 4" "Y 8"; do
+  set -- $st
+  echo "$1" > "$TMP/a11ysys/module/printk/parameters/ignore_loglevel"
+  printf '%s\t4\t1\t7\n' "$2" > "$TMP/a11yproc/sys/kernel/printk"
+  ( GBOS_SYSFS_ROOT="$TMP/a11ysys" GBOS_PROC_ROOT="$TMP/a11yproc"; . "$ROOT/usb/a11y/printk.sh"
+    a11y_console_quiet "$TMP/printk.saved"; a11y_console_quiet "$TMP/printk.saved"
+    [ "$(cat "$_a11y_il")" = 0 ]
+    [ "$(cat "$_a11y_pk")" = 1 ]
+    a11y_console_restore "$TMP/printk.saved" )
+  want=0; [ "$1" = Y ] && want=1
+  [ "$(cat "$TMP/a11ysys/module/printk/parameters/ignore_loglevel")" = $want ]
+  [ "$(cat "$TMP/a11yproc/sys/kernel/printk")" = "$2" ]
+  [ ! -f "$TMP/printk.saved" ]
+done
+grep -q 'a11y_console_quiet \$A/printk.saved' "$ROOT/usb/a11y/start.sh"
+grep -q 'a11y_console_restore /a11y/printk.saved' "$ROOT/usb/a11y/stop.sh"
+! grep -q '^echo 1 > /sys/module/printk/parameters/ignore_loglevel' "$ROOT/usb/a11y/stop.sh"
+
 # Unimplemented framework HALs: drop only ISnapshot and IVideoChatManager; IAqueduct stays.
 sed -n '/^gbos_drop_vintf_hal() {/,/^}/p' "$HOOK" > "$TMP/hal.sh"
 sed -n '/^gbos_hide_unimplemented_hals() {/,/^}/p' "$HOOK" >> "$TMP/hal.sh"

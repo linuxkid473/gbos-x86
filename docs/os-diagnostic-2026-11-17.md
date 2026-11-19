@@ -150,7 +150,8 @@ Not implemented:
   runs before init stops the log writers: a watcher started by `hook.sh` remounts the volume read-only at init's
   `sync() before umount` step, and `hook.sh` logs a `FAT-CHECK` line plus `fat-check.txt` with a read-only
   `fsck.fat -n`). See HANDOFF.md 2026-11-18.
-- **P4** (quiet kernel console): needs a kernel rebuild, because the command line is embedded.
+- **P4** (quiet kernel console): implemented 2026-11-19 in kernel #62 (`generic_cmdline.txt`: `loglevel=4`, no
+  `ignore_loglevel`; the stage0 screen reader now restores the levels it found instead of forcing `ignore_loglevel` on).
 - **S2, S3, S6, P6**: investigations, not quick changes.
 
 Every suite in `tools/` passes except three, none caused by these changes:
