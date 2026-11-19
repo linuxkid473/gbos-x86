@@ -268,3 +268,40 @@ as `system` while the diagnostic runs as root. It skips active or unexpected
 devices and reports errors in `sensors.txt`. Remove the setting to disable the
 probe. This is diagnostic only: it does not select the experimental HAL or
 prove its runtime access.
+
+## Latitude 7320 adaptive brightness
+
+The sub-HAL's `als` light sensor reaches Android, but Google's framework config
+switches automatic brightness off: `config_automatic_brightness_available` is
+`false` in `framework-res.apk` and again in the Lapis vendor overlay
+(`framework-res__lapis__auto_generated_rro_vendor.apk`, priority 0). With it off,
+`DisplayDeviceConfig.isAutoBrightnessAvailable()` is false, DisplayPowerController
+opens no light sensor and Settings hides "Adaptive brightness" (boot-13:
+`mAutoBrightnessAvailable= false`, `mLightSensor=null`, every `BrightnessEvent`
+`lux=-1.0 ... FallbackBrightnessStrategy`).
+
+With the sensor HAL selected (exact Latitude DMI, `SENSOR_HAL=1`) and
+`ADAPTIVE_BRIGHTNESS` not `0`, `hook.sh` adds two files to the sensor HAL's
+writable vendor overlay:
+
+- `/vendor/overlay/gbos-latitude7320-brightness.apk` (`usb/display/`): a signed
+  static overlay of `android`, priority 101, that sets only
+  `config_automatic_brightness_available=true`. Source:
+  `brightness-policy/res/values/config.xml`. `tools/build_brightness_overlay.sh`
+  builds it with `tools/build_static_rro.py` (no aapt2 or apksigner: it writes
+  the manifest and `resources.arsc` exactly as aapt2 does, and signs with APK
+  Signature Scheme v2 and a throwaway key); `--check` verifies the committed APK
+  against the sources.
+- `/vendor/etc/displayconfig/display_port_0.xml` (`usb/display/latitude7320_display_port_0.xml`):
+  the built-in panel's lux curve, in backlight units, about `0.09 * lux^0.27`
+  (0.04 in the dark, 0.40 at 250 lux next to the 0.40 default brightness, full at
+  8000 lux). Google ships `display_port_1..10.xml` only. If a later build ships
+  its own `display_port_0.xml`, the hook keeps it.
+
+The lux curve can't go in the overlay: Google's product overlay
+`FrameworkDesktopOverlay` sets the `config_autoBrightness*` arrays, and product
+overlays rank above vendor ones. Without the display config, Google's desktop curve
+(0.27 at 300 lux) applies. `screen_brightness_mode` is not written: Google's
+desktop SettingsProvider overlay already defaults it to automatic, and the
+user's later choice stays. `sensor-trial.txt` logs the overlay list and the
+display's auto-brightness state in every snapshot.
