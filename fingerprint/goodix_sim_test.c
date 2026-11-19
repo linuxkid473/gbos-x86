@@ -38,10 +38,15 @@ static int sim_ioctl(int fd, unsigned long request, ...);
 /* rec: the record as the firmware keeps and lists it (little-endian length first) */
 struct stored { struct goodix_template t; int finger; uint8_t rec[GOODIX_MAX_RECORD + 2]; size_t rec_len; };
 
+/*
+ * How a7:00 behaves. Every mode answers a7:04 with 0x00 and deletes nothing (firmware 01010264, boot-12), and
+ * a7:01 (delete all) aborts the test.
+ */
 enum {
 	DELETE_TID_UID,		/* deletes the template whose tid and uid match */
+	DELETE_TID,		/* matches the tid alone (then libfprint's short payload works as well) */
 	DELETE_EXACT,		/* only an exact copy of the stored record deletes it */
-	DELETE_IGNORED,		/* answers success, keeps the template (what boot-11 looked like) */
+	DELETE_IGNORED,		/* answers success, keeps the template */
 	DELETE_NO_RECORD,	/* answers "no such record" (0x9c), keeps the template */
 };
 
@@ -54,6 +59,7 @@ static struct {
 	bool account_id;		/* the firmware writes its own account id into a committed record */
 	int delete_mode;
 	int deletes;			/* a7 commands received */
+	int deletes_04;			/* of them a7:04, which deletes nothing */
 	/* packets to send, in order */
 	uint8_t q[32][PKT_MAX];
 	size_t qlen[32];
@@ -130,6 +136,14 @@ static int find(const char *uid)
 	return -1;
 }
 
+static int find_tid(const uint8_t *tid)
+{
+	for (int i = 0; i < sim.n; i++)
+		if (memcmp(sim.db[i].t.tid, tid, GOODIX_TEMPLATE_ID_SIZE) == 0)
+			return i;
+	return -1;
+}
+
 static size_t put_record(uint8_t *out, const struct stored *s)
 {
 	memcpy(out, s->rec, s->rec_len);
@@ -142,6 +156,8 @@ static void respond(uint8_t cmd0, uint8_t cmd1, const uint8_t *in, size_t in_len
 	uint8_t r[GOODIX_MAX_PAYLOAD], ack[2] = { GOODIX_SUCCESS, cmd0 };
 	size_t len = 1;
 	struct goodix_template t;
+	uint8_t rec[GOODIX_MAX_RECORD];
+	size_t declared;
 	int i, dup = -1;
 	bool hold_ack = sim.cancel_cmd == cmd0 && sim.cancel_at == 0;
 	bool hold_resp = sim.cancel_cmd == cmd0;
@@ -168,11 +184,24 @@ static void respond(uint8_t cmd0, uint8_t cmd1, const uint8_t *in, size_t in_len
 			len += put_record(r + len, &sim.db[i]);
 		break;
 	case GOODIX_CMD_DELETE:
-		assert(cmd1 == GOODIX_CMD_DELETE_ONE && in_len > 2);
-		assert((size_t)(in[0] | in[1] << 8) == in_len - 2);
-		assert(goodix_parse_finger_id(in + 2, in_len - 2, &t) == 0);
+		if (cmd1 == 0x01) {
+			fprintf(stderr, "a7:01 (delete every template) sent\n");
+			abort();
+		}
 		sim.deletes++;
-		i = find(t.uid);
+		if (cmd1 == 0x04) {	/* boot-12: acknowledged, nothing deleted */
+			sim.deletes_04++;
+			break;
+		}
+		assert(cmd1 == GOODIX_CMD_DELETE_ONE && in_len > 2);
+		/* the whole record, or libfprint's payload: its declared length, two bytes short of the record */
+		declared = (size_t)(in[0] | in[1] << 8);
+		assert(in_len == declared + 2 || in_len == declared);
+		assert(declared <= sizeof(rec));
+		memset(rec, 0, sizeof(rec));
+		memcpy(rec, in + 2, in_len - 2);
+		assert(goodix_parse_finger_id(rec, declared, &t) == 0);
+		i = sim.delete_mode == DELETE_TID ? find_tid(t.tid) : find(t.uid);
 		if (i >= 0 && sim.delete_mode == DELETE_EXACT &&
 		    !(sim.db[i].rec_len == in_len && memcmp(sim.db[i].rec, in, in_len) == 0))
 			i = -1;
@@ -653,9 +682,40 @@ static void test_delete_verified(void)
 	sim_reset();
 	store("GBOS-cccccccc-u10-2ab7f1c0", 1);
 	open_dev(&s);
-	assert(goodix_delete(&s, "GBOS-cccccccc-u10-2ab7f1c0", &fail) == GOODIX_OK && sim.n == 0 && sim.deletes == 1);
-	assert(logged("(listed record, 96 bytes, type 01, finger 01): status 0x00"));
+	/* libfprint's short payload loses the uid's last byte, so this firmware answers 0x9c; the listed record works */
+	assert(goodix_delete(&s, "GBOS-cccccccc-u10-2ab7f1c0", &fail) == GOODIX_OK && sim.n == 0 && sim.deletes == 2);
+	assert(logged("(a7:00, libfprint record, 96 bytes, type 01, finger 01): status 0x9c"));
+	assert(logged("(a7:00, listed record, 98 bytes, type 01, finger 01): status 0x00"));
+	assert(sim.deletes_04 == 0);
 	assert(goodix_delete(&s, "GBOS-cccccccc-u10-2ab7f1c0", &fail) == GOODIX_NORECORD);
+	goodix_close(&s);
+
+	/* firmware that matches the tid: libfprint's payload, the first one sent, deletes it */
+	sim_reset();
+	sim.delete_mode = DELETE_TID;
+	store("GBOS-cccccccc-u10-2ab7f1c0", 1);
+	store("GBOS-dddddddd-u10-00000001", 2);
+	open_dev(&s);
+	assert(goodix_delete(&s, "GBOS-cccccccc-u10-2ab7f1c0", &fail) == GOODIX_OK && sim.deletes == 1);
+	assert(sim.n == 1 && find("GBOS-dddddddd-u10-00000001") == 0);
+	goodix_close(&s);
+
+	/* boot-12: a7:04 is acknowledged with 0x00 and the template stays, on every firmware model */
+	sim_reset();
+	store("GBOS-1c2ac773-u10-5cfb789b", 1);
+	open_dev(&s);
+	{
+		uint8_t old[GOODIX_MAX_UID + 72];
+		size_t old_len;
+		struct goodix_response response;
+
+		assert(goodix_list_templates(&s, listed, &count, &fail) == GOODIX_OK && count == 1);
+		assert(goodix_encode_finger_id(old, sizeof(old), &old_len, listed[0].tid, listed[0].uid) == 0);
+		assert(goodix_command(&s, GOODIX_CMD_DELETE, 0x04, old, old_len, false, &response) == 0);
+		assert(response.result == GOODIX_SUCCESS && sim.n == 1 && sim.deletes_04 == 1);
+	}
+	assert(goodix_delete(&s, "GBOS-1c2ac773-u10-5cfb789b", &fail) == GOODIX_OK && sim.n == 0);
+	assert(sim.deletes_04 == 1);
 	goodix_close(&s);
 
 	/* firmware that keeps its own bytes in the record and deletes only on an exact copy: the listed
@@ -667,20 +727,20 @@ static void test_delete_verified(void)
 	open_dev(&s);
 	assert(goodix_list_templates(&s, listed, &count, &fail) == GOODIX_OK && count == 1);
 	assert(goodix_encode_finger_id(fid, sizeof(fid), &fid_len, listed[0].tid, listed[0].uid) == 0);
-	assert(goodix_delete_record(&s, fid + 2, fid_len - 2) == GOODIX_NO_RECORD && sim.n == 1);
+	assert(goodix_delete_payload(&s, fid, fid_len) == GOODIX_NO_RECORD && sim.n == 1);
 	assert(goodix_delete(&s, "GBOS-cccccccc-u10-2ab7f1c0", &fail) == GOODIX_OK && sim.n == 0);
 	goodix_close(&s);
 
-	/* acknowledged but kept: reported as a failure, both record forms tried */
+	/* acknowledged but kept: reported as a failure, all three payloads tried */
 	sim_reset();
 	sim.account_id = true;
 	sim.delete_mode = DELETE_IGNORED;
 	store("GBOS-cccccccc-u10-2ab7f1c0", 1);
 	open_dev(&s);
 	assert(goodix_delete(&s, "GBOS-cccccccc-u10-2ab7f1c0", &fail) == GOODIX_FAILED);
-	assert(fail == GOODIX_FAILED && sim.n == 1 && sim.deletes == 2);
+	assert(fail == GOODIX_FAILED && sim.n == 1 && sim.deletes == 3 && sim.deletes_04 == 0);
 	assert(logged("delete GBOS-cccccccc-u10-2ab7f1c0: still listed after status 0x00"));
-	assert(logged("(re-encoded record"));
+	assert(logged("(a7:00, re-encoded record"));
 	/* and the session cleanup counts it as failed, so op_enroll tries again */
 	assert(fp_reconcile(&s, &p, &deleted, &failed, &fail) == GOODIX_OK && deleted == 0 && failed == 1);
 	assert(logged("sensor template GBOS-cccccccc-u10-2ab7f1c0: from an earlier live boot"));
@@ -692,7 +752,7 @@ static void test_delete_verified(void)
 	store("GBOS-cccccccc-u10-2ab7f1c0", 1);
 	open_dev(&s);
 	assert(goodix_delete(&s, "GBOS-cccccccc-u10-2ab7f1c0", &fail) == GOODIX_FAILED);
-	assert(fail == GOODIX_NO_RECORD && sim.n == 1 && sim.deletes == 1);
+	assert(fail == GOODIX_NO_RECORD && sim.n == 1 && sim.deletes == 2);	/* libfprint, listed (= re-encoded) */
 	goodix_close(&s);
 }
 

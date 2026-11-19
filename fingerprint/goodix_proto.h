@@ -40,7 +40,10 @@
 #define GOODIX_CMD_POWER_BUTTON_SHIELD 0xe0
 
 #define GOODIX_CMD_WRITE_CFG_TO_FLASH 0x01
-#define GOODIX_CMD_DELETE_ONE 0x04
+/* a7:00 deletes one template (libfprint gx_fp_template_delete: MOC_CMD1_DEFAULT). a7:04 (MOC_CMD1_DELETE_TEMPLATE,
+ * defined but never sent by libfprint) is acknowledged with 0x00 and deletes nothing on firmware 01010264
+ * (boot-12). a7:01 deletes every template on the sensor, Windows Hello's too: never sent, so not defined here. */
+#define GOODIX_CMD_DELETE_ONE 0x00
 #define GOODIX_CMD_FINGER_UP 0x02
 #define GOODIX_CMD_SHIELD_OFF 0x00
 #define GOODIX_CMD_SHIELD_ON 0x01
