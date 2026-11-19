@@ -118,6 +118,26 @@ gbos_tablet_switch_opts() {
   log "hwdetect: intel_hid enable_sw_tablet_mode=${TABLET_SWITCH:-2} (Latitude 7320 Detachable, chassis_type $(cat "$sys/class/dmi/id/chassis_type" 2>/dev/null))" >&2
 }
 
+# Latitude 7320 Detachable: the BIOS enables SoundWire link 2 and declares an RT1308 amp there that is not fitted (Windows
+# enumerates only RT711 link 0, RT1316 link 1, RT714 link 3; the mono topology does not use link 2). Started empty, link 2 logs
+# "Bus clash for control word" x11 and, 3 s later, "Clock stop failed -110" before the driver powers it down anyway.
+# sdw_link_skip_mask (gbOS soundwire_intel parameter, kernel/isa_emu_patch/sdw_link_skip.py) leaves it off from the start; the
+# link stays in the link mask, so the same machine driver and topology are selected. A soundwire-intel.ko without the parameter
+# ignores it ("unknown parameter"). MODOPTS="soundwire_intel.sdw_link_skip_mask=0" restores the upstream behaviour.
+# Prints the modprobe.d line (if any).
+gbos_sdw_link_opts() {
+  sys=${GBOS_SYSFS_ROOT:-/sys}
+  [ "$(cat "$sys/class/dmi/id/sys_vendor" 2>/dev/null)" = "Dell Inc." ] || return 0
+  [ "$(cat "$sys/class/dmi/id/product_name" 2>/dev/null)" = "Latitude 7320 Detachable" ] || return 0
+  case " $MODOPTS " in
+    *" soundwire_intel.sdw_link_skip_mask="*|*" soundwire-intel.sdw_link_skip_mask="*)
+      log "hwdetect: SoundWire link skip mask from MODOPTS" >&2
+      return 0 ;;
+  esac
+  echo "options soundwire_intel sdw_link_skip_mask=4"
+  log "hwdetect: soundwire_intel sdw_link_skip_mask=4 (Latitude 7320 Detachable: link 2 has no codec)" >&2
+}
+
 # MODOPTS="module.param=value ..." (gbos.cfg): configure module parameters generically via /etc/modprobe.d/
 # and /etc/modprobe.conf so that when modalias coldplug loads a driver for a detected device, the parameters
 # are applied naturally without hardcoding drivers or loading modules for hardware not present.
@@ -126,6 +146,7 @@ gbos_modopts() {
   : > /etc/modprobe.d/gbos.conf
   # Before MODOPTS, so a MODOPTS option for the same module comes later and wins.
   gbos_tablet_switch_opts >> /etc/modprobe.d/gbos.conf
+  gbos_sdw_link_opts >> /etc/modprobe.d/gbos.conf
 
   # Backward compatibility: map legacy XE_PARAMS to options xe ...
   if [ -n "$XE_PARAMS" ]; then
@@ -487,7 +508,8 @@ gbos_hw_report() {
     echo "== sound speaker nodes"
     for c in /proc/asound/card*/codec#*; do [ -f "$c" ] && { echo "--- $c"; awk '/^Node 0x(02|03|14|17|21) /{print; p=1; next} /^Node /{p=0} p' "$c" | head -n 80; }; done
     echo "== sound dmesg"; dmesg | grep -iE 'sof|snd_|hdaudio|hda_|hdac|dmic|tplg|topology|skl_hda|dspcfg|audio|tas2[0-9]+|TAS2XXX' | head -n 80
-    echo "== soundwire"; for d in /sys/bus/soundwire/devices/*; do [ -e $d ] && echo "${d##*/} modalias=$(cat $d/modalias 2>/dev/null) driver=$(readlink $d/driver 2>/dev/null | sed 's#.*/##')"; done
+    echo "== soundwire"; for d in /sys/bus/soundwire/devices/*; do [ -e $d ] && echo "${d##*/} modalias=$(cat $d/modalias 2>/dev/null) driver=$(readlink $d/driver 2>/dev/null | sed 's#.*/##') status=$(cat $d/status 2>/dev/null)"; done
+    echo "soundwire_intel sdw_link_skip_mask=$(cat /sys/module/soundwire_intel/parameters/sdw_link_skip_mask 2>/dev/null || echo '(no parameter)')"
     echo "== soundwire dmesg"; dmesg | grep -iE 'sdw|soundwire|rt1320|rt721|sdca|asoc|tplg' | grep -v find_sdca_function | tail -n 60
     echo "== rfkill"; for r in /sys/class/rfkill/*; do [ -e $r ] && echo "$(cat $r/name) $(cat $r/type) soft=$(cat $r/soft) hard=$(cat $r/hard)"; done
     echo "== missing firmware"; dmesg | grep -iE 'firmware.*(failed|not found|-2\))|Direct firmware load.*failed|failed to load.*(ucode|\.bin|\.sfi)' | sort -u
