@@ -1048,6 +1048,324 @@ static int test_autofocus(void)
 	return af_frame(&af, f, 192, 144, 192 * 2) == 0 && af.phase == 0 ? 0 : 6;
 }
 
+/*
+ * 2026-11-19 (boot-12): boot12_daylight infrared, clipped highlights, idle stop.
+ *
+ * Synthetic three-illuminant locus and matrices (test data only, not the stick's tables).
+ */
+static int load_test_locus(void)
+{
+	char path[] = "/tmp/daylocus.XXXXXX";
+	int fd = mkstemp(path);
+	FILE *f;
+
+	if (fd < 0 || !(f = fdopen(fd, "w")))
+		return -1;
+	fputs("1 0.90 0.45 0.44 0.41 1.8 -0.4 -0.4 -0.3 2.0 -0.7 -0.5 -0.8 2.3\n"
+	      "3 0.70 0.50 0.40 0.40 2.0 -1.0 0.0 -0.2 1.5 -0.3 -0.2 -1.0 2.2\n"
+	      "2 0.50 0.65 0.31 0.33 1.5 -0.5 0.0 -0.1 1.4 -0.3 0.0 -0.6 1.6\n", f);
+	fclose(f);
+	int n = load_ccm_table(path);
+	unlink(path);
+	return n == 3 ? 0 : -1;
+}
+
+/*
+ * A uniform RGB-IR frame from per-site levels above black (R, G, B, IR), optionally with a
+ * top band of other levels and Gaussian-ish noise; converted a few times so white balance
+ * settles. Reports mean U, V of the lower centre and of the top band, and their luma.
+ */
+struct rgbir_scene {
+	double level[4], top[4];
+	unsigned int top_rows, clip;	/* clip: raw code where the sensor saturates (0 = 1023) */
+	double sigma, gain;
+};
+struct scene_result { double y, u, v, top_y, top_u, top_v; };
+
+static int run_rgbir_scene(const struct rgbir_scene *s, struct scene_result *r)
+{
+	const unsigned int w = 1296, h = 972;
+	static unsigned char out[OUT_FRAME_BYTES];
+	uint16_t *f = malloc((size_t)w * h * sizeof(*f));
+	double saved_g = sensor_total_gain;
+	unsigned int clip = s->clip ? s->clip : 1023, state = 99;
+
+	if (!f)
+		return -1;
+	set_rgbir_pattern();
+	sensor_total_gain = s->gain > 0 ? s->gain : 1.0;
+	for (int k = 0; k < 4; k++) {
+		for (unsigned int y = 0; y < h; y++)
+			for (unsigned int x = 0; x < w; x++) {
+				int ch = channel_at(x, y);
+				double v = y < s->top_rows ? s->top[ch] : s->level[ch];
+				if (s->sigma > 0) {
+					double g = 0;
+					for (int i = 0; i < 4; i++) {
+						state = state * 1103515245u + 12345u;
+						g += ((state >> 8) & 0xffff) / 65536.0 - 0.5;
+					}
+					v += s->sigma * g * 1.732 * sqrt(v / 178.0 + 0.05);
+				}
+				v += BLACK_LEVEL;
+				if (v > clip) v = clip;
+				f[(size_t)y * w + x] = (uint16_t)(v < 0 ? 0 : v + 0.5);
+			}
+		tnr_reset();
+		if (convert_bayer_yuyv(f, w, h, w * 2, out, sizeof(out), NULL)) {
+			free(f);
+			return -1;
+		}
+	}
+	free(f);
+	sensor_total_gain = saved_g;
+	memset(r, 0, sizeof(*r));
+	double n = 0, tn = 0;
+	unsigned int top_out = (unsigned int)((uint64_t)s->top_rows * OUT_HEIGHT / h);
+	for (unsigned int oy = 0; oy < OUT_HEIGHT; oy++)
+		for (unsigned int ox = 0; ox < OUT_WIDTH; ox += 2) {
+			size_t at = ((size_t)oy * OUT_WIDTH + ox) * 2;
+			double Y = out[at], U = out[at + 1] - 128, V = out[at + 3] - 128;
+			if (oy > top_out + 16 && oy < OUT_HEIGHT - 16 && ox > OUT_WIDTH / 4 && ox < OUT_WIDTH * 3 / 4) {
+				r->y += Y; r->u += U; r->v += V; n++;
+			} else if (top_out > 32 && oy > 8 && oy + 16 < top_out && ox > 8 && ox + 8 < OUT_WIDTH) {
+				r->top_y += Y; r->top_u += U; r->top_v += V; tn++;
+			}
+		}
+	if (n) { r->y /= n; r->u /= n; r->v /= n; }
+	if (tn) { r->top_y /= tn; r->top_u /= tn; r->top_v /= tn; }
+	return 0;
+}
+
+/*
+ * Boot-12 frame 900 (cfa4x4 log), by a window at 11:0x, 1x gain: raw R 135.6, G 198.6,
+ * B 133.6, IR 68.9 above black. IR is 35% of green and raw R = raw B.
+ */
+static const struct rgbir_scene boot12_daylight = { { 135.6, 198.6, 133.6, 68.9 }, { 0 }, 0, 0, 0, 1.0 };
+
+static void restore_colour_defaults(int keep_b, double nir_band)
+{
+	nir_keep_q12[2] = keep_b;
+	wb_locus_nir_band = nir_band;
+	clip_detect = 1;
+	ccm_count = 0; ccm_active = 0;
+}
+
+/*
+ * A boot12_daylight grey with strong infrared is neutral. Negative control: the old full IR
+ * subtraction with the fixed 0.03 band (boot-12's bridge) pulls it to the locus: green.
+ */
+static int test_daylight_ir_grey(void)
+{
+	struct rgbir_scene sc = boot12_daylight;
+	struct scene_result r;
+	int keep = nir_keep_q12[2];
+	double band = wb_locus_nir_band;
+	int result = 0;
+
+	if (load_test_locus())
+		return 1;
+	if (run_rgbir_scene(&sc, &r) || fabs(r.u) > 2 || fabs(r.v) > 2)
+		result = 2;
+	else if (wb_nir_ratio < 0.35 || wb_nir_ratio > 0.5 || wb_locus_distance > wb_locus_band)
+		result = 3;	/* NIR ~0.43 of green; within the (widened) band */
+	/* Negative control: no blue NIR term, fixed band. */
+	nir_keep_q12[2] = 0;
+	wb_locus_nir_band = 0;
+	if (!result && (run_rgbir_scene(&sc, &r) || (fabs(r.u) <= 2 && fabs(r.v) <= 2)))
+		result = 4;
+	/* The NIR term alone already makes it neutral; the band alone does not. */
+	nir_keep_q12[2] = keep;
+	if (!result && (run_rgbir_scene(&sc, &r) || fabs(r.u) > 2 || fabs(r.v) > 2))
+		result = 5;
+	nir_keep_q12[2] = 0;
+	wb_locus_nir_band = band;
+	if (!result && (run_rgbir_scene(&sc, &r) || (fabs(r.u) <= 2 && fabs(r.v) <= 2)))
+		result = 6;
+	restore_colour_defaults(keep, band);
+	return result;
+}
+
+/*
+ * Without NIR (LED room, boot-11: IR 18.9, G 178.5 at 17.5x, noisy) nothing changes: neutral,
+ * and within 0.5 of the old full subtraction.
+ */
+static int test_lowlight_led_grey(void)
+{
+	struct rgbir_scene sc = { { 121.8, 178.5, 104.5, 18.9 }, { 0 }, 0, 0, 40.0, 17.5 };
+	struct scene_result r, old;
+	int keep = nir_keep_q12[2];
+	double band = wb_locus_nir_band;
+	int result = 0;
+
+	if (load_test_locus())
+		return 1;
+	if (run_rgbir_scene(&sc, &r) || fabs(r.u) > 1.5 || fabs(r.v) > 1.5)
+		result = 2;
+	else if (wb_nir_ratio > 0.05)
+		result = 3;
+	nir_keep_q12[2] = 0;
+	wb_locus_nir_band = 0;
+	if (!result && (run_rgbir_scene(&sc, &old) || fabs(old.u - r.u) > 0.5 || fabs(old.v - r.v) > 0.5))
+		result = 4;
+	restore_colour_defaults(keep, band);
+	return result;
+}
+
+/*
+ * Clipped highlights come out white, not pink. The daylit sky: green saturates (here at raw
+ * 920, below full scale, as a sensor can) while R and B, under white-balance gains of ~1.85,
+ * do not. Negative control: the fade keyed to full scale (clip detection off) leaves pink
+ * (U +5, V +4 here).
+ */
+static int test_clipped_sky(void)
+{
+	struct rgbir_scene sc = boot12_daylight;
+	struct scene_result r;
+	int result = 0;
+
+	/* Sky 2.5x brighter than green can hold: G clips, R/B/IR do not (little NIR in the sky). */
+	sc.top[1] = 2000; sc.top[3] = 120; sc.top[0] = 0.48 * 1100 + 120; sc.top[2] = 0.70 * 1100 + 120;
+	sc.top_rows = 972 / 3;
+	sc.clip = 920;
+	if (load_test_locus())
+		return 1;
+	if (run_rgbir_scene(&sc, &r) || r.top_y < 245 || fabs(r.top_u) > 2 || fabs(r.top_v) > 2)
+		result = 2;
+	else if (raw_clip != 920)
+		result = 3;
+	/* The clipped sky is left out of the white balance: the grey below stays neutral. */
+	else if (fabs(r.u) > 2 || fabs(r.v) > 2)
+		result = 4;
+	clip_detect = 0;
+	if (!result && (run_rgbir_scene(&sc, &r) || !(r.top_u > 2 && r.top_v > 2)))
+		result = 5;	/* negative control: magenta (U > 0 and V > 0) */
+	restore_colour_defaults(nir_keep_q12[2], wb_locus_nir_band);
+	return result;
+}
+
+/* Colours past the top keep luminance and hue order instead of clipping per channel. */
+static int test_soft_clip(void)
+{
+	int c[3] = { 6140, 2304, 8850 }, w[3] = { 3000, 2000, 1000 }, hot[3] = { 9000, 8000, 7000 };
+	int64_t y0 = (2126LL * 6140 + 7152LL * 2304 + 722LL * 8850) / 10000;
+
+	soft_clip_rgb(c);
+	if (c[2] != (int)LINEAR_MAX || !(c[0] < c[2] && c[1] < c[0]))
+		return 1;
+	int64_t y1 = (2126LL * c[0] + 7152LL * c[1] + 722LL * c[2]) / 10000;
+	if (llabs(y1 - y0) > y0 / 100)
+		return 2;
+	/* Per-channel clipping would give R = B (magenta): the soft clip keeps R well below B. */
+	if (c[2] - c[0] < 100)
+		return 3;
+	soft_clip_rgb(w);	/* in range: untouched */
+	if (w[0] != 3000 || w[1] != 2000 || w[2] != 1000)
+		return 4;
+	soft_clip_rgb(hot);	/* luminance past the top: white */
+	return hot[0] == (int)LINEAR_MAX && hot[1] == (int)LINEAR_MAX && hot[2] == (int)LINEAR_MAX ? 0 : 5;
+}
+
+/*
+ * Idle stop: no consumer for longer than the timeout stops the stream once; a consumer starts
+ * it again; short gaps (camera switch) and an unknown reader count (old module) never stop it.
+ * Negative control: timeout 0 (boot-12's behaviour) never stops, so suspend stays blocked.
+ */
+static int test_idle_stop(void)
+{
+	struct idle_state s;
+	int stops = 0, starts = 0;
+
+	idle_reset(&s);
+	/* Boot: no consumer from t = 0; frames every 0.27 s (idle frame). */
+	for (double t = 0; t < 14.9; t += 0.27)
+		if (idle_decide(&s, 0, t, 15.0) != IDLE_KEEP)
+			return 1;
+	if (idle_decide(&s, 0, 15.0, 15.0) != IDLE_STOP)
+		return 2;
+	s.stopped = 1;
+	/* Stopped: polls keep it stopped, no repeated stop. */
+	for (double t = 15.0; t < 300; t += 1.0)
+		if (idle_decide(&s, 0, t, 15.0) != IDLE_KEEP)
+			return 3;
+	/* A consumer streams: start once, then keep while it streams. */
+	if (idle_decide(&s, 1, 300.2, 15.0) != IDLE_START)
+		return 4;
+	s.stopped = 0;
+	for (double t = 300.3; t < 400; t += 0.033)
+		if (idle_decide(&s, 1, t, 15.0) != IDLE_KEEP)
+			return 5;
+	/* Camera switch or mode change: a 3 s gap does not stop the sensor. */
+	for (double t = 400; t < 403; t += 0.033)
+		if (idle_decide(&s, 0, t, 15.0) != IDLE_KEEP)
+			return 6;
+	if (idle_decide(&s, 1, 403.1, 15.0) != IDLE_KEEP)
+		return 7;
+	/* The app closes: stop 15 s later, not before. */
+	for (double t = 500; t < 514.9; t += 0.27)
+		if (idle_decide(&s, 0, t, 15.0) != IDLE_KEEP)
+			return 8;
+	if (idle_decide(&s, 0, 515.0, 15.0) != IDLE_STOP)
+		return 9;
+	/* No readers_active control (readers -1): never stops. */
+	idle_reset(&s);
+	for (double t = 0; t < 1000; t += 1.0)
+		if (idle_decide(&s, -1, t, 15.0) != IDLE_KEEP)
+			return 10;
+	/* Negative control: timeout 0 = stream forever (the old bridge). */
+	idle_reset(&s);
+	for (double t = 0; t < 1000; t += 1.0) {
+		int a = idle_decide(&s, 0, t, 0);
+		stops += a == IDLE_STOP;
+		starts += a == IDLE_START;
+	}
+	return stops == 0 && starts == 0 ? 0 : 11;
+}
+
+/* Restart: the idle (8x) frame is dropped before the stream starts, exposure is kept. */
+static int test_restart_exposure(void)
+{
+	struct ae_state ae;
+
+	ov5675_ae(&ae, 1);
+	ae_plan(&ae, 2016 * 3.0);	/* 3x gain at 30 fps, as the last scene needed */
+	int exposure = ae.exposure.value, again = ae.again.value;
+	ae_set_idle(&ae, 1);		/* consumer gone: idle frame, then the stop */
+	if (ae.applied_vblank != ae.idle_vblank)
+		return 1;
+	ae_set_log_reset();
+	ae_set_idle(&ae, 0);		/* consumer back: before STREAMON */
+	if (ae.applied_vblank != 76 || strcmp(ae_set_log, "EVAD") != 0)
+		return 2;
+	return ae.exposure.value == exposure && ae.again.value == again ? 0 : 3;
+}
+
+static int test_idle_args(void)
+{
+	struct bridge_options o;
+
+	if (parse(&o, 3, "/dev/media0", "/dev/video64") || o.idle_stop != IDLE_STOP_S_DEFAULT)
+		return 1;
+	if (parse(&o, 5, "--idle-stop", "0", "/dev/media0", "/dev/video64") || o.idle_stop != 0)
+		return 2;
+	if (parse(&o, 7, "--sensor", "ov8856", "--idle-stop", "30", "/dev/media0", "/dev/video65") ||
+	    o.idle_stop != 30 || strcmp(o.profile->entity, "ov8856"))
+		return 3;
+	if (!parse(&o, 5, "--idle-stop", "-1", "/dev/media0", "/dev/video64") ||
+	    !parse(&o, 5, "--idle-stop", "x", "/dev/media0", "/dev/video64") ||
+	    !parse(&o, 5, "--idle-stop", "5s", "/dev/media0", "/dev/video64") ||
+	    !parse(&o, 4, "--idle-stop", "/dev/media0", "/dev/video64"))
+		return 4;
+	/* gbos.cfg CAMERA_IDLE_STOP via the environment. */
+	double v = 15;
+	if (idle_stop_from_env("0", &v) || v != 0 || idle_stop_from_env("45", &v) || v != 45)
+		return 5;
+	if (!idle_stop_from_env(NULL, &v) || !idle_stop_from_env("", &v) ||
+	    !idle_stop_from_env("ten", &v) || !idle_stop_from_env("-3", &v) || v != 45)
+		return 6;
+	return 0;
+}
+
 int main(void)
 {
 	(void)capture_to_loopback;
@@ -1076,6 +1394,23 @@ int main(void)
 		return 240 + test_gain_denoise_steps();
 	if (test_autofocus())
 		return 250 + test_autofocus();
+	{
+		int r;
+		if ((r = test_daylight_ir_grey()))
+			return printf("test_daylight_ir_grey %d\n", r), 260 + r;
+		if ((r = test_lowlight_led_grey()))
+			return printf("test_lowlight_led_grey %d\n", r), 270 + r;
+		if ((r = test_clipped_sky()))
+			return printf("test_clipped_sky %d\n", r), 280 + r;
+		if ((r = test_soft_clip()))
+			return printf("test_soft_clip %d\n", r), 290 + r;
+		if ((r = test_idle_stop()))
+			return printf("test_idle_stop %d\n", r), 300 + r;
+		if ((r = test_restart_exposure()))
+			return printf("test_restart_exposure %d\n", r), 320 + r;
+		if ((r = test_idle_args()))
+			return printf("test_idle_args %d\n", r), 330 + r;
+	}
 	if (test_no_cfa_grid())
 		return 40 + test_no_cfa_grid();
 	if (test_cfa_phase_means())

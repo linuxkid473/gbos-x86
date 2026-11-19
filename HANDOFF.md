@@ -886,3 +886,88 @@ SHA-NI, 256-bit VAES/VPCLMULQDQ, AVX-IFMA and AVX-512; the lapis binaries use th
   - *Stable per install:* `DATA_DIR/instance` (`/data/vendor/crosfp/gbos_fp/instance`) lives on GBOS_DATA. It survives reboots and Updates, and changes only when /data is wiped (reinstall or factory reset). The install's own templates (`GBOS-<its id>-u<user>-<id>`) are kept while Android lists them.
   - *Tests:* new policy cases, a reconcile on the install, and `test_install_stale_template` (with `installed` the boot-11 template is deleted and the enrolment restarts and succeeds; without it, the finger stays blocked). Hook tests cover `--installed` on an NVMe boot and neither flag on a live boot with an install. A mutant with the rule off fails the tests.
   - *Built:* `usb/gbos_fp` SHA-256 `6374c55fe55a4ec3d0244d60b1c95f778e497c1f4a93aeb7fd6fc0de32650fe5`. Not deployed. For the install to get it, it must be on the stick before menu 2 runs, or arrive later with an Update (menu 1).
+- 2026-11-19 **Boot-12 (Latitude 7320, 11:04–11:30, live, kernel #62, bridge `d0baa664…`): front camera green in daylight, pink sky; s2idle blocked by the camera. Fixed in the bridge and launcher (host-tested, not deployed).** Logs are in `build/boot-logs/boot-12`.
+  - *Evidence, front camera:* all frames at 1.0x gain, by a window.
+    - `cfa4x4`: IR sites read 50.7–68.9 against G 177–203 (IR/G 0.29–0.35; boot-11's LED room: 0.10). Raw R equals raw B within 2% in every sample.
+    - Grey-world R/G is 0.487–0.521 and B/G 0.440–0.510, which puts it 0.072–0.149 from the locus. The 0.03 band clamped it every time.
+    - Frame 6300 (the 11:30 selfie) used 0.545/0.544: R under-gained by ~11% and B by ~19%, and the matrix roughly doubles that.
+    - Boot-8's morning frames show the same pattern (IR/G 0.24–0.27, distance 0.07–0.13).
+    - The rear OV8856 has no IR sites. In the same room at the same time it sat 0.02–0.04 from its own locus, near illuminants 13+4 (~6000 K), so the light was ordinary daylight. Rear AF worked (`af: focus at 395`).
+  - *Cause of the green (1), infrared:*
+    - The bridge subtracted the IR site from R, G and B with one coefficient. That is right for the IR site's visible leakage, about 0.10 of green in NIR-free light (boot-11: 0.103–0.106), and the calibrated white points assume it.
+    - Daylight adds real NIR, and the blue sites respond to it less than the IR site does. Blue was over-subtracted, grey-world fell off the locus on the low-blue side, and the locus clamp then turned every grey green.
+    - New model: NIR `n = max(0, IR·1.1 − 0.1·G)`, colour `= C − IR + (1 − k_c)·n`, with k_R = k_G = 1 and **k_B = 0.60**.
+    - k_B is fitted to the 25 daylight samples of boot-8 and boot-12, lens-shading-corrected. The median locus distance goes from 0.135 to 0.04 (boot-12: 0.001–0.022, boot-8: 0.03–0.08). Boot-11's LED frames stay at 0.005–0.017.
+    - This is our fit under the grey-world assumption. It is **not** taken from the tuning file. With n = 0 (LED, lamps) nothing changes.
+    - The locus band now widens with NIR (0.03 + 0.10·n/G, at most 0.08), because the calibration lights carry none.
+  - *Tuning file:*
+    - The OV5678 `.aiqb` has an LCMC record 27 that only RGB-IR sensors have (the OV8856 file lacks it). It holds the 4x4 CFA map (G, IR excluded, R, B). Then, for each calibration light (ids 1, 6, 4, 7, 19, 20, each with R/G, B/G, x, y), it holds three 15x9 u16 grids (G, R, B; radial, higher at the edges) and one float.
+    - The floats are the IR/G ratios of those lights: ~0.79 for illuminant A (tungsten) and 0.096–0.105 for the others. The 0.10 leakage comes from there.
+    - The grids look like per-channel IR weights, but their scale is not confirmed. Under the most plausible reading (64 = 1.0) the three channels differ by under 10% in daylight-like lights, which cannot explain boot-12, so the bridge doesn't use them.
+    - LCMC record 15 holds the AWB locus: 8 white points in three rows (nominal and two bounds).
+    - LAIQ has DFLT and IRVI variants, which suggests Intel switches AWB tuning when IR is present. Not decoded.
+  - *Cause of the green (2), shading:*
+    - Grey-world was measured on the raw, vignetted frame. On the front, blue falls off less than green towards the corners, so the frame's B/G read ~5% above the picture's. The centre of a grey wall came out yellow-green (U ≈ −4), in LED light too.
+    - Front white-balance tiles now take the lens-shading gains of their position.
+    - The rear keeps the old statistics: its grey-world sat on its locus and the user reports good colour. The same simulation suggests its centre greys are slightly warm (its red falls off most). Left for a rear-specific test.
+  - *Cause of the pink sky:*
+    - Green clips first. White balance (R and B ×~1.85) and the matrix then turn a clipped area magenta.
+    - The fade to white was keyed to raw full scale, so if the sensor saturates below code 1023 it stops short. After the matrix, channels past the top were also clipped one by one.
+    - Simulated sky with the old bridge: a sensor clip of 900 gives U +2.9, V +3.8 (pink). At 1023 it is white.
+    - Fixes:
+      - The white-balance sampling detects a flat top in the green histogram (≥ 0.1% of samples within 2 codes of the maximum, above code 768). The fade runs from 80% to 97% of that level.
+      - Colours past the top are desaturated towards their own luminance (Rec. 709) instead of clipped per channel.
+      - Tiles with a site above 95% of the clip level are left out of grey-world.
+    - Whether the OV5678 really saturates below 1023 is not measured. The new `ir:` line logs `clip at raw N` (1023 when there is no flat top).
+  - *Simulated:* 2592x1944 frames built from the logged per-site levels, with the real vignetting and the stick's tables (local only). Centre grey U/V, old → new:
+    - boot-12 idle (frame 900): −12.8/−3.0 → +0.4/−0.2;
+    - boot-12 selfie (frame 6300): −19.0/−6.1 → −1.6/−2.2 (the scene's own grey-world is still 0.08 off and clamped to the wider band);
+    - boot-8 at 50x: −12.0/−5.6 → −1.7/−1.1;
+    - boot-11 at 17.5x, σ 40 DN: −4.2/−0.2 → −0.1/+1.2.
+    - The blue NIR term does most of the work: the wider band alone leaves boot-12 idle at −6.0/−3.2. Rear scenes come out byte-identical.
+    - Converter cost on this i7-1180G7: 24.4 → 26.0 ms/frame at 1x, 27.2 → 28.8 ms at 17.5x.
+  - *Suspend:*
+    - kmsg shows 24 of 25 s2idle attempts at 459–490 s failing with `isys_suspend [intel_ipu6_isys] returns -16`.
+    - `isys_suspend` returns -EBUSY while `isys->stream_opened` is non-zero, and both bridges kept streaming with no consumer.
+    - In the #62 source, `close_streaming_firmware()` drops `stream_opened` even when the firmware's close times out, so STREAMOFF is enough.
+    - When the last stream stops, `ipu6_isys_fw_close()` closes the firmware. ISYS can then runtime-suspend, which clears `need_reset`, and the next start re-initialises the firmware.
+  - *Idle stop:*
+    - **When:** after **15 s** without a consumer. 15 s is longer than an app's camera switch or mode change (well under 2 s), so those don't cycle the sensor. It is also Android's shortest screen timeout, so the sensors are off by about when the system first tries to sleep.
+    - **Stop:** the bridge stops its stream (STREAMOFF, buffers released) and closes the lens subdev, so the sensor and VCM power down.
+    - **What stays open:** the capture node, the loopback output and the sensor controls. Android still lists the camera, and exposure and gain are kept: the drivers cache control writes while powered off and apply them at stream start.
+    - **Restart:** when a consumer appears, the bridge
+      - writes one black frame at once;
+      - restores the planned frame, not the 8x idle frame;
+      - streams on the still-open node (no reopen, so no `isys power cycle required`);
+      - re-opens the lens. The rear runs its AF scan, as on every consumer start.
+    - **Wake-up:** v4l2loopback's client-usage event, polled at most 1 s apart (250 ms without the event), plus `readers_active`. That control comes from the capture stream token, which the consumer takes at STREAMON and releases at STREAMOFF, REQBUFS(0) or close (a crash closes it too), so it is reliable. With a module that lacks the control (readers −1) the bridge never stops.
+    - **Settings:** `--idle-stop N`, or `CAMERA_IDLE_STOP=N` in gbos.cfg (the launcher passes it as `IPU6_IDLE_STOP`). 0 streams forever, as before.
+    - With fewer streams running at once, the boot-9 FIFO overflow is also less likely.
+  - *Supervisor:*
+    - An idle stop never exits the bridge, so it never counts as a failure.
+    - A restart that fails exits with status 3, as does 10 s without a good frame (as before); the launcher then restarts the process.
+    - A bridge that ran for 300 s or more before exiting gets its 3 restarts back, so occasional failures over days of stop/start cycles can't use up the budget.
+  - *Tests:*
+    - `test_ipu6_loopback.c`:
+      - a daylight RGB-IR grey (boot-12 levels, synthetic locus) comes out neutral within 2. Negative controls: the old full subtraction with the fixed band gives green, and the wider band alone is still green;
+      - LED low light (boot-11, 17.5x, noisy) is neutral within 1.5, and within 0.5 of the old subtraction;
+      - a clipped sky (green saturating at 920) comes out white, with the grey below neutral. With clip detection off it is pink (U +5, V +4);
+      - the soft clip keeps luminance and hue order;
+      - the idle state machine stops at 15 s, does not stop on a 3 s gap, starts on a consumer, and never stops with readers −1 or with timeout 0 (the old behaviour);
+      - a restart restores the planned frame in E-V-A-D order and keeps the exposure;
+      - `--idle-stop` and `IPU6_IDLE_STOP` parsing.
+    - `test_ipu6_camera_bridge.sh`: the idle-stop config and the restart-budget refill (mutations are caught).
+    - These suites pass: host, ASan/UBSan in `gbos-kbuild`, `test_ipu6_loopback.sh`, `test_ipu6_camera_bridge.sh`, `test_hook_camera_service.sh`, camera capture, media-graph, fw-trace, kernel-config, module-load, and payload-guard (with the gitignored firmware copied in for the run).
+    - Not run: `test_camera_fw_trace_kernel.sh` needs a privileged container, and `test_camera_7320_patch.py` needs a kernel source argument. Neither touches the bridge.
+  - *Built:* `usb/installer/bin/ipu6-loopback` SHA-256 `f42fc06d363b128b584a022185b20687747d7e29dee8788dfdf7938fde894278`, launcher `29f86135118ada126c9b908ff6fe46f523e699f93c2647fee55c0899b85cee0a`. Not deployed: the stick needs `gbos/installer/bin/ipu6-loopback` and `gbos/installer/bin/ipu6-camera-bridge.sh`.
+  - *Unverified on hardware:*
+    - **Above all: whether an IPU6 stream restarts cleanly after a stop.** S2 (2026-11-17) saw flush/close firmware timeouts on every stop, and nobody has tried a restart in the same process. If it fails, the bridge exits and the launcher relaunches it; if that fails too, set `CAMERA_IDLE_STOP=0`.
+    - k_B = 0.60 in other daylight and other scenes. It is one coefficient for every NIR spectrum, and tungsten, with far more NIR than daylight, was never logged with the RGB-IR bridge.
+    - Whether the OV5678 saturates below code 1023.
+    - The first-frame latency after a restart, and whether Android's USB HAL tolerates it.
+  - *Next boot:* deploy both files, run Update, then:
+    1. Point the front camera at a white wall, by the window and indoors. The `ccm:` lines should show a locus distance under the band; the `ir:` line should show NIR ~0.3–0.45 in daylight and ~0.03 under LED light.
+    2. The sky should be white or pale blue. Check `clip at raw N`.
+    3. Close the camera app and wait more than 15 s. Both runtime logs should show `bridge: no consumer for 15 s; stopping the sensor stream` and `sensor stream stopped in X s`. Then open the camera: expect `restarting the sensor stream (start N)`, `first sensor frame X s after the consumer appeared`, a live picture, and `af: focus at` on the rear. Switch between front and rear a few times.
+    4. Let the screen sleep. kmsg should show `PM: suspend entry (s2idle)` without `isys_suspend ... returns -16`.
+    - Also check kmsg for `stream stop time out`, `stream close time out`, `failed to close fw isys`, `clearing old context` and `isys power cycle required`, and `camera-bridge-setup.txt` for bridge exits.
