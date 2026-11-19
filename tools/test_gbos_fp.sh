@@ -60,26 +60,27 @@ printf '%s\n' "$RC" | grep -q 'service gbos_fp /postinstall/gbos/gbos_fp' &&
 [ -z "$(run_service 0)" ] && ok "FINGERPRINT=0 opt-out" || bad "fingerprint opt-out"
 
 RC=$(run_service default)
-printf '%s\n' "$RC" | grep -q '^service gbos_fp_log /system/bin/logcat -b main -v threadtime -s gbos_fp -f /postinstall/gbos/logs/boot-7/fingerprint.txt$' &&
-  printf '%s\n' "$RC" | grep -q ' start gbos_fp_log$' \
-  && ok "gbos_fp lines kept in their own log (fingerprint.txt)" || bad "fingerprint log service"
+printf '%s\n' "$RC" | grep -q '^service gbos_fp /postinstall/gbos/gbos_fp.* --log /postinstall/gbos/logs/boot-7/fingerprint.txt$' &&
+  ! printf '%s\n' "$RC" | grep -q 'gbos_fp_log' &&
+  grep -q '"--log"' "$ROOT/fingerprint/gbos_fp.c" && grep -q 'O_APPEND' "$ROOT/fingerprint/gbos_fp.c" \
+  && ok "gbos_fp appends its own lines to fingerprint.txt (no logcat -f)" || bad "fingerprint log"
 
 # --no-gbos-install only when neither stage0 ($SYS) nor findfs sees a GBOSSYS install
 RC=$(unset SYS FAKE_GBOSSYS; run_service default)
-printf '%s\n' "$RC" | grep -q '^service gbos_fp /postinstall/gbos/gbos_fp --no-gbos-install$' \
+printf '%s\n' "$RC" | grep -q '^service gbos_fp /postinstall/gbos/gbos_fp --no-gbos-install --log /postinstall/gbos/logs/boot-7/fingerprint.txt$' \
   && ok "no install anywhere: HAL may clean up earlier live boots' templates" || bad "no-install flag missing"
 RC=$(SYS=/dev/nvme0n1p2; FAKE_GBOSSYS=; export SYS FAKE_GBOSSYS; run_service default)
-printf '%s\n' "$RC" | grep -q '^service gbos_fp /postinstall/gbos/gbos_fp$' \
+printf '%s\n' "$RC" | grep -q '^service gbos_fp /postinstall/gbos/gbos_fp --log /postinstall/gbos/logs/boot-7/fingerprint.txt$' \
   && ok "install seen by stage0: no --no-gbos-install" || bad "no-install flag despite stage0 install"
 RC=$(unset SYS; FAKE_GBOSSYS=/dev/nvme0n1p2; export FAKE_GBOSSYS; run_service default)
-printf '%s\n' "$RC" | grep -q '^service gbos_fp /postinstall/gbos/gbos_fp$' \
+printf '%s\n' "$RC" | grep -q '^service gbos_fp /postinstall/gbos/gbos_fp --log /postinstall/gbos/logs/boot-7/fingerprint.txt$' \
   && ok "install appearing after stage0: no --no-gbos-install" || bad "no-install flag despite late install"
 # --installed only when stage0 booted the NVMe install (FROM=nvme)
 RC=$(SYS=/dev/nvme0n1p2; FROM=nvme; FAKE_GBOSSYS=/dev/nvme0n1p2; export SYS FROM FAKE_GBOSSYS; run_service default)
-printf '%s\n' "$RC" | grep -q '^service gbos_fp /postinstall/gbos/gbos_fp --installed$' \
+printf '%s\n' "$RC" | grep -q '^service gbos_fp /postinstall/gbos/gbos_fp --installed --log /postinstall/gbos/logs/boot-7/fingerprint.txt$' \
   && ok "NVMe boot: HAL told it is the install" || bad "--installed missing on an NVMe boot"
 RC=$(SYS=/dev/nvme0n1p2; FROM=stick; FAKE_GBOSSYS=/dev/nvme0n1p2; export SYS FROM FAKE_GBOSSYS; run_service default)
-printf '%s\n' "$RC" | grep -q '^service gbos_fp /postinstall/gbos/gbos_fp$' \
+printf '%s\n' "$RC" | grep -q '^service gbos_fp /postinstall/gbos/gbos_fp --log /postinstall/gbos/logs/boot-7/fingerprint.txt$' \
   && ok "live boot with an install: neither flag" || bad "flags on a live boot with an install"
 grep -q '"--no-gbos-install"' "$ROOT/fingerprint/gbos_fp.c" &&
   grep -q '"--installed"' "$ROOT/fingerprint/gbos_fp.c" \
