@@ -8,7 +8,7 @@
 #   ./build.sh --dualboot --target /dev/sda -> install directly to disk alongside existing Windows/Linux
 #   ./build.sh -y                  don't ask before downloading (uses standard if not specified)
 #   ./build.sh --dry-run           show what would be downloaded and built, change nothing
-#   GBOS_SENSOR_BUILD_INPUTS=... GBOS_SENSOR_BUILD_CLANG=... ./build.sh
+#   GBOS_SENSOR_BUILD_INPUTS=... GBOS_SENSOR_BUILD_CLANG=... ./build.sh  (default: build/sensor-hal-inputs/INPUTS if present)
 #                                  also build the experimental Latitude 7320 Sensors sub-HAL
 #
 # What it does (each step is skipped when its result already exists, so re-running is cheap and resumable):
@@ -219,13 +219,24 @@ have_ksu || NEED="$NEED\n  - $KSU_APK + $KSUD (19 MB, from the KernelSU release 
 if [ -z "$NEED" ]; then say "everything is already downloaded"; else
   printf 'This will download:%b\n' "$NEED"
 fi
+# Latitude 7320 sensor sub-HAL (accelerometer, gyroscope, light sensor: auto-rotation and adaptive brightness).
+# Its prepared inputs (NDK sysroot, VNDK/multi-HAL headers, vendor libs; HANDOFF 2026-11-17) stay in the ignored
+# build/sensor-hal-inputs/; they are used by default when present. GBOS_SENSOR_BUILD_INPUTS= (empty) skips it.
+if [ -z "${GBOS_SENSOR_BUILD_INPUTS+set}" ] && [ -d build/sensor-hal-inputs/INPUTS/ndk ]; then
+  GBOS_SENSOR_BUILD_INPUTS=$PWD/build/sensor-hal-inputs/INPUTS
+fi
 if [ -n "${GBOS_SENSOR_BUILD_INPUTS:-}" ]; then
-  [ "$BUILD_TYPE" != dualboot ] || die "experimental sensor payload is not supported by the dualboot installer"
   echo "Experimental Sensors sub-HAL: will build; boot hook selects it only on the exact Latitude 7320 DMI."
 else
   echo "Experimental Sensors sub-HAL: not included (set GBOS_SENSOR_BUILD_INPUTS to the prepared compact build inputs)."
 fi
 echo "Goodix fingerprint HAL: will build from the local Android image and be enabled only for USB 27c6:6384 (set FINGERPRINT=0 to opt out at boot)."
+# Latitude 7320 cameras (IPU6 bridge, DMI-gated, so other laptops are unaffected): on in images built here.
+# usb/gbos.cfg keeps CAMERA_BRIDGE=0; GBOS_IPU6_CAMERA_BRIDGE=0 ./build.sh builds without it.
+GBOS_IPU6_CAMERA_BRIDGE=${GBOS_IPU6_CAMERA_BRIDGE:-1}
+if [ "$GBOS_IPU6_CAMERA_BRIDGE" = 1 ]; then
+  echo "Latitude 7320 cameras: on (GBOS_IPU6_CAMERA_BRIDGE=0 to leave them off); calibration $( [ -d usb/camera ] && echo "from usb/camera/" || echo "missing (generic colour; copy gbos/camera/ from a working stick into usb/camera/)")."
+else echo "Latitude 7320 cameras: off (GBOS_IPU6_CAMERA_BRIDGE=0)."; fi
 
 FREE_KB=$(df -k . | awk 'NR==2{print $4}'); [ "$FREE_KB" -gt 36000000 ] || printf '\nWARNING: only %d GB free here; about 35 GB are needed.\n' $((FREE_KB / 1000000))
 [ $DRY = 1 ] && { echo "(dry run: nothing changed)"; exit 0; }
@@ -291,12 +302,12 @@ if [ "$BUILD_TYPE" = "dualboot" ]; then
   [ $DRY -eq 1 ] && EXTRA_FLAGS="$EXTRA_FLAGS --dry-run"
   [ "$AUTO_TAILOR" = 1 ] && EXTRA_FLAGS="$EXTRA_FLAGS --auto"
   [ "$(uname -s)" = Linux ] || die "--dualboot partitions a disk with Linux tools (sgdisk, lsblk): run it from Linux"
-  sudo sh tools/install_dualboot.sh --target "$TARGET_DISK" --data-size "${DATA_GB}G" $EXTRA_FLAGS
+  sudo env GBOS_IPU6_CAMERA_BRIDGE="$GBOS_IPU6_CAMERA_BRIDGE" GBOS_SENSOR_PAYLOAD="$SENSOR_PAYLOAD" sh tools/install_dualboot.sh --target "$TARGET_DISK" --data-size "${DATA_GB}G" $EXTRA_FLAGS
 else
   say "4/4 building the image ($BUILD_TYPE)"
   MAKE_FLAGS="--type $BUILD_TYPE --data-size $DATA_GB"
   [ "$AUTO_TAILOR" = 1 ] && MAKE_FLAGS="$MAKE_FLAGS --auto"
-  GBOS_SENSOR_PAYLOAD="$SENSOR_PAYLOAD" sh tools/make_gbos86_image.sh $MAKE_FLAGS
+  GBOS_IPU6_CAMERA_BRIDGE="$GBOS_IPU6_CAMERA_BRIDGE" GBOS_SENSOR_PAYLOAD="$SENSOR_PAYLOAD" sh tools/make_gbos86_image.sh $MAKE_FLAGS
   echo
   echo "Done. Flash the .img in dist/ to a USB stick or target drive (balenaEtcher, Rufus, or dd), then boot it."
 fi
