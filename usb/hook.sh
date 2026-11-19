@@ -764,7 +764,7 @@ fi
           FPARGS=" --no-gbos-install"
         fi
         FPRC="# Experimental Goodix MOC HAL for the exact USB sensor $FPDEV.
-service gbos_fp /postinstall/gbos/gbos_fp$FPARGS
+service gbos_fp /postinstall/gbos/gbos_fp$FPARGS --log /postinstall/gbos/logs/boot-$N/fingerprint.txt
     class hal
     user system
     group system usb
@@ -772,17 +772,9 @@ service gbos_fp /postinstall/gbos/gbos_fp$FPARGS
     interface aidl android.hardware.biometrics.fingerprint.IFingerprint/default
     disabled
     oneshot
-# gbos_fp's own lines only, from its start: the full logcat rotates its startup and session cleanup away
-# within minutes (boot-11). A few KB, so it is always on, like crash.txt.
-service gbos_fp_log /system/bin/logcat -b main -v threadtime -s gbos_fp -f /postinstall/gbos/logs/boot-$N/fingerprint.txt
-    user root
-    group root log
-    seclabel u:r:shell:s0
-    disabled
 on post-fs-data
     mkdir /data/vendor/crosfp 0770 system system
     mkdir /data/vendor/crosfp/gbos_fp 0770 system system
-    start gbos_fp_log
     start gbos_fp"
         log "hook: fingerprint: starting Goodix HAL for $FPDEV${FPARGS:+ ($FPARGS)}"
       else

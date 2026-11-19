@@ -27,3 +27,5 @@ $HOSTCC -std=c11 -O2 -Wall -Wextra -Werror -o "$TMP/goodix_test" goodix_test.c
 "$TMP/goodix_test"
 $HOSTCC -std=c11 -O2 -Wall -Wextra -Werror -o "$TMP/goodix_sim_test" goodix_sim_test.c
 "$TMP/goodix_sim_test"
+$HOSTCC -std=c11 -O2 -Wall -Wextra -Werror -o "$TMP/fp_log_test" fp_log_test.c
+"$TMP/fp_log_test"
