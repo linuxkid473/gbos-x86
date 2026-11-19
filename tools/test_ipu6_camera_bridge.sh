@@ -93,13 +93,14 @@ if ran_long $((now - 20)); then
     exit 1
 fi
 
-# The idle-stop setting: digits are exported, anything else falls back to the default.
-idle_block=$(awk '/^IDLE_STOP=\$\(cfg CAMERA_IDLE_STOP\)/ { on = 1 } on { print } on && /^esac/ { exit }' "$BRIDGE")
+# The idle-stop setting: digits are exported; empty or anything else means 0 (off), because the first idle
+# stop on boot-13 left the bridge unable to restart.
+idle_block=$(awk '/^IDLE_STOP=\$\(cfg CAMERA_IDLE_STOP\)/ { on = 1 } on { print } on && /^export IPU6_IDLE_STOP=/ { exit }' "$BRIDGE")
 for value in 0 30 '' 1x; do
     out=$(cfg() { printf '%s' "$value"; }; unset IPU6_IDLE_STOP; eval "$idle_block"; echo "[${IPU6_IDLE_STOP-unset}]")
     case "$value" in
         0|30) echo "$out" | grep -qx "\[$value\]" ;;
-        *) echo "$out" | grep -qx '\[unset\]' ;;
+        *) echo "$out" | grep -qx '\[0\]' ;;
     esac
 done
 

@@ -53,13 +53,17 @@ echo "rear camera: $([ "$REAR" = 1 ] && echo "on, rotation $REAR_ROTATION" || ec
 # Idle stop: each bridge stops its sensor stream after this many seconds without a consumer
 # (the ISYS refuses system suspend while a stream is open) and restarts it when an app streams.
 # The bridge stays running meanwhile, so the supervisor below never sees an idle stop.
-# CAMERA_IDLE_STOP=0 keeps both sensors streaming as before; empty = the bridge default (15 s).
+# CAMERA_IDLE_STOP=0 keeps both sensors streaming as before; CAMERA_IDLE_STOP=15 is the bridge's own default.
+# Off unless set: on boot-13 (2026-11-19) the first idle stop hit "stream stop/close time out" in the ISYS and
+# the bridge never streamed again, so no app could open a camera. Until a restart works on hardware, empty or
+# invalid values mean 0 (never stop; system suspend stays blocked while the cameras stream).
 IDLE_STOP=$(cfg CAMERA_IDLE_STOP)
 case "$IDLE_STOP" in
-    '') echo "camera idle stop: bridge default" ;;
-    *[!0-9]*) echo "WARNING: CAMERA_IDLE_STOP=$IDLE_STOP is not a number of seconds; using the default"; IDLE_STOP= ;;
-    *) export IPU6_IDLE_STOP="$IDLE_STOP"; echo "camera idle stop: $IDLE_STOP s (0 = never)" ;;
+    '') IDLE_STOP=0; echo "camera idle stop: off (set CAMERA_IDLE_STOP=15 in gbos.cfg to test it)" ;;
+    *[!0-9]*) echo "WARNING: CAMERA_IDLE_STOP=$IDLE_STOP is not a number of seconds; idle stop off"; IDLE_STOP=0 ;;
+    *) echo "camera idle stop: $IDLE_STOP s (0 = never)" ;;
 esac
+export IPU6_IDLE_STOP="$IDLE_STOP"
 
 if [ ! -e /dev/video64 ]; then
     # One module load creates both devices; the 640x480 bounds are module-wide.
