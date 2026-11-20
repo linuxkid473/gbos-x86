@@ -326,6 +326,8 @@ check "publish: the feed names the set, the assets and their hashes" "grep -qx '
 check "publish: the full tar has no super.img, and verifies once unpacked" "rm -rf '$T/un' && mkdir -p '$T/un' && tar -C '$T/un' -xf '$T/rel/300/'*-full.tar && ! find '$T/un' -name super.img | grep -q . && sh '$ROOT/tools/verify_system_update.sh' '$T/un/'gbos86-update-* --pub '$PUB' >/dev/null 2>&1"
 check "publish: a fake super.img (not make_super.py's) gives no Google lines" "! grep -qE '^google_(zip|part|super) ' '$F1'"
 check "publish: refuses a seq that is not newer than a published one" "cp '$T/rel/300/'*.manifest '$T/rel/bases/300.manifest' && ! PUBLISH --tree '$T/t1' --src '$T/s2/usb' --seq 299 >/dev/null 2>&1"
+cp -a "$T/t1" "$T/tbroken"; rm -f "$T/tbroken/super.layout"
+check "publish: stops when the set cannot be built, and leaves no release" "! PUBLISH --tree '$T/tbroken' --src '$T/s2/usb' --commit-id 2222222222222222222222222222222222222222 --seq 350 > '$T/pb.log' 2>&1 && grep -q 'building the set failed' '$T/pb.log' && [ ! -e '$T/rel/350' ]"
 # a real make_super.py image, so the feed can describe Google's partitions
 mk_tree "$T/t3" 16000001 v1; mkdir -p "$T/parts"
 { echo "ro.system.build.fingerprint=$(FP 16000001)"; head -c 30000 /dev/urandom | od -An -tx1; } > "$T/parts/system_a.img"; head -c 9000 /dev/urandom > "$T/parts/vendor_a.img"

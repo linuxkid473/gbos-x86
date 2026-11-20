@@ -1119,3 +1119,11 @@ SHA-NI, 256-bit VAES/VPCLMULQDQ, AVX-IFMA and AVX-512; the lapis binaries use th
   `system.manifest` (deploy_stick.sh deletes it), and a commit not on GitHub only got a line of text, so an update could replace local
   work without asking. Now any system that is not exactly a published set needs the confirmation (codes in `Updater.warningCodes`), and the
   accepted reasons go to `gbos/update/history.txt` through the request's new `accepted_warning` line.
+- 2026-11-20 **The laptop and the stick still run Google build R4 (16658739), although git says R5 (16693588).** Found while preparing the
+  updater lab test: every fingerprint in `build/boot-logs` (up to boot-15) is `CL3B.260622.276.R4/16658739`, the PC's `lapis/parts`
+  (Nov 6) are R4, and make_super.py of them gives exactly the stick's `super.layout` and size. `lapis/BUILD` and `usb/patched/MANIFEST`
+  say R5 since the 2026-11-13 port, but no R5 `super.img` was ever put on the stick. The patches still bind (the originals' hashes are the
+  same in R4 and R5). `make_system_update.sh` refuses such a set (super.img's fingerprint differs from the MANIFEST's), which is right; and
+  `publish_system_update.sh` used to carry on after that refusal (the build's exit status was lost in a pipe): it now stops and removes
+  the half-made release (test added).
+

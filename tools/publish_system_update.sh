@@ -119,9 +119,12 @@ REL=$OUT/$SEQ
 [ -e "$REL" ] && die "$REL exists (a release with this seq was already made here)"
 mkdir -p "$REL/full"
 # shellcheck disable=SC2086
-sh "$ROOT/tools/make_system_update.sh" build --key "$KEY" --tree "$TREE" $SRCARGS ${KERNEL:+--kernel "$KERNEL"} --seq "$SEQ" \
-  --out "$REL/full" --omit super.img $SUPERCHECK | sed 's/^/  /'
-B=$(ls -d "$REL/full"/gbos86-update-* | head -n 1); NAME=$(basename "$B")
+if ! sh "$ROOT/tools/make_system_update.sh" build --key "$KEY" --tree "$TREE" $SRCARGS ${KERNEL:+--kernel "$KERNEL"} --seq "$SEQ" \
+  --out "$REL/full" --omit super.img $SUPERCHECK > "$T/build.log"; then
+  sed 's/^/  /' "$T/build.log"; rm -rf "$REL"; die "building the set failed (see above); nothing was published"
+fi
+sed 's/^/  /' "$T/build.log"
+B=$(ls -d "$REL/full"/gbos86-update-* 2>/dev/null | head -n 1); [ -n "$B" ] || die "internal: no bundle in $REL/full"; NAME=$(basename "$B")
 SETID=$(sha "$B/manifest")
 GB=$(sed -n 's/^google_build //p' "$B/manifest")
 [ -n "$SRCDIR" ] || [ "$GB" = "$GBUILD" ] || die "the set is Google build $GB but lapis/BUILD of the commit says $GBUILD"
