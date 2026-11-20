@@ -392,6 +392,23 @@ menu **2**, then **3 (Only save its logs)** (or 1 to update too), and read `gbos
 `kmsg.log`, `stage0-dmesg.txt`, rotated `logcat.txt*`, `crash.txt`, `hw.txt`, `audio.txt`, and `pstore-prev/`.
 FAT has no journal: always shut down from Android's power menu, not the physical power button.
 
+### Play Store closes a second or two after opening
+If `logcat | grep com.android.vending` (rooted terminal) shows the Store being killed in a loop with
+
+```
+Killing <pid>:com.android.vending/...: depends on provider <pkg>/<provider> in dying proc <pkg>
+```
+
+then Android is killing the Store because an app it is bound to (a content-provider client) keeps dying. That is
+not a gbOS86 fault. The case seen so far (2026-11-20, Ice Lake, R5) was a user-installed **Zygisk module plus its
+companion app** ("Play Integrity Break": `it.eldavo.pib` / `icu.nullptr.playintegritybreak`, which logs
+`Integrity hooks installed in com.android.vending (Zygisk)`) whose provider process was dead each time, so every
+Store launch was killed about 2 s in. gbOS86 ships no Zygisk and no Play Integrity module (the Trusty-backed
+KeyMint/attestation services never answer on this hardware, so such modules are unsupported here). Uninstall or
+disable the module and its app, clear the Store's data, and reboot. If the Store still closes, post the
+unfiltered log of the crash (`logcat -b all -d > /sdcard/logcat.txt`, taken right after one failed launch) and the
+`logs/boot-N/` folder, not a `grep` of the package name, which hides the actual crash.
+
 ### Display size
 Density stays Google's stock 260. `RESOLUTION=2400x1350` in `gbos.cfg` makes Android render at a larger
 logical size that the display scales to the 1920x1080 panel: bigger = smaller UI (empty = native).
