@@ -242,15 +242,17 @@ EOF
 # plugins (installer/lib/libcamera-pipeline, tools/build_libcamera_gbos.sh) are added through a
 # copy of that directory (Google's own plugins included) bind-mounted over it, then the service
 # is restarted. Step 1 is gbos_test.so, an external test camera with moving colour bars.
-# CAMERA_LIBCAMERA=0 in gbos.cfg leaves the directory alone. The USB (loopback) cameras are a
-# separate service and are not affected either way.
+# Off unless gbos.cfg sets CAMERA_LIBCAMERA=1: on boot-16 (2026-11-20) gbos_test.so's EXTERNAL camera
+# reported PRESENT while the legacy wrapper was still in setCallbacks, the wrapper crashed
+# (HandleCameraDeviceStatusChange, null pointer) 23 times in 2 minutes, and no app could open the USB
+# cameras meanwhile. Until the plugin is fixed, the vendor directory is left alone by default.
 LIBCAMERA_PIPE=/vendor/lib64/libcamera/pipeline
 LIBCAMERA_PLUGINS=/postinstall/gbos/installer/lib/libcamera-pipeline
 LIBCAMERA_COPY=/data/local/tmp/gbos-libcamera-pipeline
 LIBCAMERA_SERVICE=vendor.camera-provider-2-7-legacy-wrapper
 add_libcamera_plugins() {
-    if [ "$(cfg CAMERA_LIBCAMERA)" = 0 ]; then
-        echo "libcamera plugins: off (CAMERA_LIBCAMERA=0)"
+    if [ "$(cfg CAMERA_LIBCAMERA)" != 1 ]; then
+        echo "libcamera plugins: off (CAMERA_LIBCAMERA=1 in gbos.cfg to test them)"
         return 0
     fi
     set -- "$LIBCAMERA_PLUGINS"/*.so

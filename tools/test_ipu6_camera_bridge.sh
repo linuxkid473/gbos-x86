@@ -195,7 +195,10 @@ run_plugins() {	# CAMERA_LIBCAMERA value -> calls made
         add_libcamera_plugins
     )
 }
+# Off by default since boot-16's crash loop: only CAMERA_LIBCAMERA=1 adds the plugins.
 calls=$(run_plugins '')
+! echo "$calls" | grep -q '^mount\|^stop\|^start'
+calls=$(run_plugins 1)
 echo "$calls" | grep -qx "mount -o bind $tmp/copy $tmp/pipe"
 echo "$calls" | grep -qx 'stop vendor.camera-provider-2-7-legacy-wrapper'
 echo "$calls" | grep -qx 'start vendor.camera-provider-2-7-legacy-wrapper'
@@ -203,7 +206,7 @@ echo "$calls" | grep -qx 'start vendor.camera-provider-2-7-legacy-wrapper'
 calls=$(run_plugins 0)
 ! echo "$calls" | grep -q '^mount\|^stop\|^start'
 rm -f "$tmp/plugins/gbos_test.so"
-calls=$(run_plugins '')
+calls=$(run_plugins 1)
 ! echo "$calls" | grep -q '^mount\|^stop\|^start'
 
 # Front uevent: byte-identical to the one the launcher wrote before the rear camera existed.
