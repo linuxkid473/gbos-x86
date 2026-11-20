@@ -3,7 +3,7 @@
 set -eu
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 W=$(mktemp -d "${TMPDIR:-/tmp}/gbosfp.XXXXXX")
-trap 'rm -rf "$W"' EXIT HUP INT TERM
+trap 'chmod -R u+w "$W" 2>/dev/null; rm -rf "$W"' EXIT HUP INT TERM
 fail=0
 ok() { echo "ok   $*"; }
 bad() { echo "FAIL $*"; fail=1; }
@@ -27,6 +27,8 @@ sh -n "$ROOT/usb/hook.sh" "$ROOT/usb/install.sh" "$ROOT/fingerprint/build.sh" \
 
 awk '/^gbos_goodix_fp\(\)/ { emit=1 } emit { print } emit && /^}/ { exit }' \
   "$ROOT/usb/hook.sh" > "$W/detect.sh"
+awk '/^gbos_system_log\(\)/ { emit=1 } emit { print } emit && /^}/ { exit }' \
+  "$ROOT/usb/hook.sh" >> "$W/detect.sh"
 awk '/^  FPRC=$/ { emit=1 } emit && /^  cat > \/tmp\/sysinit\/gbos.rc/ { exit } emit { sub(/^  /, ""); print }' \
   "$ROOT/usb/hook.sh" > "$W/service.sh"
 mkdir -p "$W/usb/1-1" "$W/gbos"
@@ -64,6 +66,19 @@ printf '%s\n' "$RC" | grep -q '^service gbos_fp /postinstall/gbos/gbos_fp.* --lo
   ! printf '%s\n' "$RC" | grep -q 'gbos_fp_log' &&
   grep -q '"--log"' "$ROOT/fingerprint/gbos_fp.c" && grep -q 'O_APPEND' "$ROOT/fingerprint/gbos_fp.c" \
   && ok "gbos_fp appends its own lines to fingerprint.txt (no logcat -f)" || bad "fingerprint log"
+
+# logs/boot-N root-only (tools/test_postinstall_ro.sh): the HAL (uid system) gets fingerprint.txt through /dev/gbos-system-log, a bind
+# of logs/boot-7/fingerprint.txt (real mounts: test_postinstall_ro.sh); if the bind fails it keeps the logs path (logcat only then)
+mkdir -p "$W/gbos/logs/boot-7" "$W/dev"
+RC=$(L="$W/gbos/logs/boot-7" GBOS_DEV="$W/dev" GBOS_LOGS_PRIVATE=1; export L GBOS_DEV GBOS_LOGS_PRIVATE
+  mount() { echo "mount $*" >> "$W/mounts"; }; chown() { :; }; run_service default)
+printf '%s\n' "$RC" | grep -q '^service gbos_fp /postinstall/gbos/gbos_fp.* --log /dev/gbos-system-log/fingerprint.txt$' &&
+  grep -qx "mount --bind $W/gbos/logs/boot-7/fingerprint.txt $W/dev/gbos-system-log/fingerprint.txt" "$W/mounts" &&
+  [ -f "$W/gbos/logs/boot-7/fingerprint.txt" ] \
+  && ok "root-only logs: --log /dev/gbos-system-log/fingerprint.txt, bound to logs/boot-7/fingerprint.txt" || bad "system log path: $RC"
+RC=$(L="$W/gbos/logs/boot-7" GBOS_DEV="$W/nodev/x" GBOS_LOGS_PRIVATE=1; export L GBOS_DEV GBOS_LOGS_PRIVATE
+  mount() { return 1; }; chown() { :; }; run_service default 2>/dev/null)
+printf '%s\n' "$RC" | grep -q -- '--log /postinstall/gbos/logs/boot-7/fingerprint.txt$' && ok "system log bind fails: logs path kept" || bad "bind failure: $RC"
 
 # --no-gbos-install only when neither stage0 ($SYS) nor findfs sees a GBOSSYS install
 RC=$(unset SYS FAKE_GBOSSYS; run_service default)

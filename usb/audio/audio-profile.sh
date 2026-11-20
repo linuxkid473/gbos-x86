@@ -12,6 +12,11 @@ L=/vendor/etc/audio/gbos-gen       # live config used by the audio HAL
 P=$S/dsp
 CUR=$S/speaker_profile
 want=${1:-apply}
+# /postinstall is read-only in Android (hook.sh gbos_postinstall_lockdown). This script writes the stick (speaker_profile, the dsp.ini
+# template), so it re-runs itself in a mount namespace of its own where /postinstall is writable; apps never see it writable.
+if [ "$want" != status ] && [ -z "$GBOS_STICK_RW" ] && grep -q '^[^ ]* /postinstall [^ ]* ro[, ]' /proc/mounts 2>/dev/null; then
+  exec env GBOS_STICK_RW=1 unshare -m /system/bin/sh -c 'mount -o remount,bind,rw /postinstall && exec /system/bin/sh "$0" "$@"' "$0" "$@"
+fi
 [ "$want" = status ] && { echo "profile: $(cat $CUR 2>/dev/null || echo bass)"; ls $L/dsp.ini 2>&1; exit 0; }
 [ "$want" = apply ] && want=$(cat $CUR 2>/dev/null || echo bass)
 case "$want" in flat|balanced|bass|vocal) ;; *) echo "unknown profile: $want"; exit 1;; esac
