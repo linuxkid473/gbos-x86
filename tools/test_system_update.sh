@@ -26,7 +26,7 @@ MK() { sh "$ROOT/tools/make_system_update.sh" "$@"; }
 
 # ------------------------------------------------------------------------------------------------ wiring and syntax
 for f in sysupdate.sh early_patch.sh hook.sh install.sh stage0_init.sh; do "$BB" sh -n "$ROOT/usb/$f" || bad "busybox sh -n usb/$f"; done
-for f in make_system_update.sh verify_system_update.sh test_system_update.sh; do sh -n "$ROOT/tools/$f" || bad "sh -n tools/$f"; done
+for f in make_system_update.sh verify_system_update.sh test_system_update.sh publish_system_update.sh; do sh -n "$ROOT/tools/$f" || bad "sh -n tools/$f"; done
 check "early_patch.sh calls the updater hook" "grep -qx 'gbos_sysupdate_stage0' '$ROOT/usb/early_patch.sh'"
 check "early_patch.sh runs the engine with a clean environment" "grep -q 'env -i PATH=/bin:/sbin sh \"\$1\" boot' '$ROOT/usb/early_patch.sh'"
 check "the hook only acts in stage0 (PID 1) on the installed system" "grep -q '\[ \"\$\$\" = 1 \] && \[ -z \"\$GBOS_SYSUPDATE_RAN\" \] && \[ \"\$FROM\" = nvme \]' '$ROOT/usb/early_patch.sh'"
@@ -156,7 +156,9 @@ X=$(cpb); echo tampered >> "$X/files/hook.sh"; refused "tampered file" "$X"
 X=$(cpb); echo junk > "$X/files/extra.bin"; refused "unlisted file" "$X"
 X=$(cpb); echo junk > "$X/README.txt"; refused "unlisted top-level file" "$X"
 X=$(cpb); ln -s /etc/passwd "$X/files/firmware/link.bin"; refused "symlink in the bundle" "$X"
-X=$(cpb); sed -i '1s/^rsa3072-sha256 ./rsa3072-sha256 0/' "$X/manifest.sig"; sed -i '1s/^rsa3072-sha256 00/rsa3072-sha256 01/' "$X/manifest.sig"; refused "bad signature (changed byte)" "$X"
+# flip one hex digit of a signature (the 40th), whatever it is
+flipsig() { awk 'NR == 1 { c = substr($2, 40, 1); $2 = substr($2, 1, 39) (c == "0" ? "1" : "0") substr($2, 41) } { print }' "$1" > "$1.n" && mv "$1.n" "$1"; }
+X=$(cpb); flipsig "$X/manifest.sig"; refused "bad signature (changed byte)" "$X"
 X=$(cpb); openssl dgst -sha256 -sign "$T/other.pem" -out "$T/s.bin" "$X/manifest"; printf 'rsa3072-sha256 %s\n' "$(od -An -tx1 -v "$T/s.bin" | tr -d ' \n')" > "$X/manifest.sig"; refused "signed with another key" "$X"
 resign() { openssl dgst -sha256 -sign "$KEY" -out "$T/s.bin" "$1/manifest"; printf 'rsa3072-sha256 %s\n' "$(od -An -tx1 -v "$T/s.bin" | tr -d ' \n')" > "$1/manifest.sig"; }
 X=$(cpb); sed -i 's# firmware/new/n.bin$# firmware/../n.bin#' "$X/manifest"; resign "$X"; refused "signed manifest with .. in a path" "$X"
@@ -246,7 +248,7 @@ check "stage of a full bundle skips files already installed" "SU stage '$T/media
 rm -rf "$G/update.inbox"; cp -r "$B2" "$T/media/ln"; X=$T/media/ln; rm "$X/files/hook.sh"; ln -s "$T/secret" "$X/files/hook.sh"; echo secret > "$T/secret"
 check "stage refuses a listed file that is a symlink, leaves no copy" "! SU stage '$X' --gbos '$G' >/dev/null 2>&1 && ! grep -rqs secret '$G/update.inbox'"
 rm -rf "$G/update.inbox"
-check "stage refuses a bad signature before copying" "cp -r '$B2' '$T/media/bs' && sed -i '1s/^rsa3072-sha256 0/rsa3072-sha256 1/;1s/^rsa3072-sha256 [1-9a-f]/rsa3072-sha256 0/' '$T/media/bs/manifest.sig' && ! SU stage '$T/media/bs' --gbos '$G' >/dev/null 2>&1 && [ -z \"\$(ls '$G/update.inbox' 2>/dev/null)\" ]"
+check "stage refuses a bad signature before copying" "cp -r '$B2' '$T/media/bs' && flipsig '$T/media/bs/manifest.sig' && ! SU stage '$T/media/bs' --gbos '$G' >/dev/null 2>&1 && [ -z \"\$(ls '$G/update.inbox' 2>/dev/null)\" ]"
 check "stage refuses when space is short, says how much" "_o=\$( (export SYSUPDATE_TEST_FREE_KB=100; SU stage '$SB' --gbos '$G') 2>&1); echo \"\$_o\" | grep -q 'not enough space'"
 mkdir -p "$G/logs/boot-1" "$G/logs/boot-2" "$G/logs/boot-3" "$G/logs/boot-4" "$G/logs/boot-5"
 check "stage --prune-logs deletes old logs but keeps the newest 3" "(export SYSUPDATE_TEST_FREE_KB=100; SU stage '$SB' --gbos '$G' --prune-logs) >/dev/null 2>&1; [ ! -e '$G/logs/boot-1' ] && [ -d '$G/logs/boot-5' ] && [ -d '$G/logs/boot-3' ]"
@@ -285,6 +287,58 @@ check "install.sh: downgrade needs the word DOWNGRADE" "grep -q '\[ \"\$REPLY\" 
 # ------------------------------------------------------------------------------------------------ unsigned stick manifest
 mkdir -p "$T/stk2"; cp -r "$B1/files/." "$T/stk2/"; mv "$T/stk2/EFI/BOOTX64.EFI" "$T/k.efi"; rmdir "$T/stk2/EFI"; cp "$T/s1/usb/install.sh" "$T/stk2/"
 check "manifest of a stick tree equals the signed set's file list" "MK manifest --tree '$T/stk2' --kernel '$T/k.efi' --seq 100 --out '$T/stickman' 2>/dev/null && [ \"\$(grep '^[fk] ' '$T/stickman')\" = \"\$(grep '^[fk] ' '$B1/manifest')\" ]"
+
+check "manifest of a tree that differs from git HEAD is recorded as -dirty" "grep -q '^commit [0-9a-f]\{40\}-dirty$' '$T/stickman'"
+
+# ------------------------------------------------------------------------------------------------ audit / info (the app's checks)
+install_set "$B1"
+AU() { SU audit "$G" "$@" 2>/dev/null; }
+check "audit: an untouched system is not modified" "AU | grep -qx 'modified=no' && AU | grep -qx 'source=git'"
+echo 'MODE=ask' >> "$G/gbos.cfg"; mkdir -p "$G/logs/boot-9"; echo x > "$G/logs/boot-9/kmsg.log"
+check "audit: gbos.cfg and logs are not modifications" "AU | grep -qx 'modified=no'"
+echo '# my change' >> "$G/hook.sh"; rm "$G/firmware/a.bin"; echo extra > "$G/firmware/intel/extra.bin"
+check "audit: a changed, a missing and an added file are reported" "AU | grep -qx 'modified=yes' && AU | grep -qx 'changed hook.sh' && AU | grep -qx 'missing firmware/a.bin' && AU | grep -qx 'added firmware/intel/extra.bin'"
+install_set "$B1"; truncate -s 70000000 "$G/super.img"
+sed -i "s/^f [0-9a-f]* [0-9]* super.img\$/f $(sha256sum "$G/super.img" | cut -c1-64) 70000000 super.img/" "$G/system.manifest"
+printf 'y' | dd of="$G/super.img" bs=1 seek=69000000 conv=notrunc 2>/dev/null
+check "audit: files over 64 MiB are compared by size, --deep hashes them" "AU | grep -qx 'modified=no' && AU --deep | grep -qx 'changed super.img'"
+install_set "$B1"; sed -i 's/^commit \(.*\)$/commit \1-dirty/' "$G/system.manifest"
+check "audit: a set built from modified sources says source=dirty" "AU | grep -qx 'source=dirty'"
+rm "$G/system.manifest"
+check "audit: no system.manifest (installed from a stick without one) is unknown" "AU | grep -qx 'manifest=none' && AU | grep -qx 'modified=unknown'"
+install_set "$B1"
+check "info: set, seq, key and free space for the app" "SU info '$G' > '$T/info' 2>/dev/null && grep -qx 'seq=100' '$T/info' && grep -q '^pub=[0-9A-F]\{768\}$' '$T/info' && grep -q '^free_kb=[0-9]' '$T/info' && grep -qx 'google_build=16000001' '$T/info' && grep -qx 'pending=none' '$T/info'"
+echo changed > "$G/firmware/a.bin"; cp -r "$B2" "$T/media/needs"
+check "stage: a delta for a laptop that lacks a file says NEEDS-FILES (exit 3), copies nothing" "SU stage '$T/media/needs' --gbos '$G' > '$T/o' 2>&1; [ \$? = 3 ] && grep -q NEEDS-FILES '$T/o' && [ -z \"\$(ls '$G/update.inbox' 2>/dev/null)\" ]"
+
+# ------------------------------------------------------------------------------------------------ --omit, publish_system_update.sh
+install_set "$B1"
+Bo=$(build vo "$T/s2" "$T/t1" 210 --omit super.img) || bad "build --omit"
+check "--omit super.img: listed in the manifest, not in files/" "grep -q ' super.img$' '$Bo/manifest' && [ ! -e '$Bo/files/super.img' ] && [ -f '$Bo/files/hook.sh' ]"
+check "a full bundle without super.img stages and boots on a laptop with that super.img" "SU stage '$Bo' --gbos '$G' >/dev/null 2>&1 && [ \$(boot) = 0 ] && [ \"\$(st seq)\" = 210 ]"
+PUBLISH() { sh "$ROOT/tools/publish_system_update.sh" --key "$KEY" --no-upload --no-super-check --out "$T/rel" --bases-dir "$T/rel/bases" --repo test/repo "$@"; }
+mkdir -p "$T/rel/bases"
+PUBLISH --tree "$T/t1" --src "$T/s1/usb" --commit-id 2222222222222222222222222222222222222222 --seq 300 > "$T/p1.log" 2>&1 || { cat "$T/p1.log"; bad "publish 1"; }
+F1=$T/rel/300/gbos86-update.feed
+feedverify() { head -n -1 "$1" > "$T/fb"; tail -n 1 "$1" | sed -n 's/^rsa3072-sha256 \([0-9a-f]\{768\}\)$/\1/p' | xxd -r -p > "$T/fs"; openssl rsa -in "$KEY" -pubout -out "$T/fk.pem" 2>/dev/null; openssl dgst -sha256 -verify "$T/fk.pem" -signature "$T/fs" "$T/fb" >/dev/null 2>&1; }
+check "publish: first update has a full bundle, no delta, a signed feed" "[ -f '$F1' ] && ls '$T/rel/300/'*-full.tar >/dev/null 2>&1 && ! ls '$T/rel/300/'*-delta.tar >/dev/null 2>&1 && feedverify '$F1'"
+check "publish: the feed names the set, the assets and their hashes" "grep -qx 'seq 300' '$F1' && grep -q '^set [0-9a-f]\{64\}$' '$F1' && grep -q '^url https://github.com/test/repo/releases/download/sysupdate-300/$' '$F1' && _a=\$(sed -n 's/^asset full \([^ ]*\) \([0-9]*\) \([0-9a-f]*\)$/\1 \3/p' '$F1') && [ \"\$(sha256sum '$T/rel/300/'\${_a% *} | cut -c1-64)\" = \"\${_a#* }\" ]"
+check "publish: the full tar has no super.img, and verifies once unpacked" "rm -rf '$T/un' && mkdir -p '$T/un' && tar -C '$T/un' -xf '$T/rel/300/'*-full.tar && ! find '$T/un' -name super.img | grep -q . && sh '$ROOT/tools/verify_system_update.sh' '$T/un/'gbos86-update-* --pub '$PUB' >/dev/null 2>&1"
+check "publish: a fake super.img (not make_super.py's) gives no Google lines" "! grep -qE '^google_(zip|part|super) ' '$F1'"
+check "publish: refuses a seq that is not newer than a published one" "cp '$T/rel/300/'*.manifest '$T/rel/bases/300.manifest' && ! PUBLISH --tree '$T/t1' --src '$T/s2/usb' --seq 299 >/dev/null 2>&1"
+# a real make_super.py image, so the feed can describe Google's partitions
+mk_tree "$T/t3" 16000001 v1; mkdir -p "$T/parts"
+{ echo "ro.system.build.fingerprint=$(FP 16000001)"; head -c 30000 /dev/urandom | od -An -tx1; } > "$T/parts/system_a.img"; head -c 9000 /dev/urandom > "$T/parts/vendor_a.img"
+python3 -I "$ROOT/usb/make_super.py" "$T/t3/super.img" "$T/t3/super.layout" system_a="$T/parts/system_a.img" vendor_a="$T/parts/vendor_a.img" >/dev/null
+echo "# v3" >> "$T/s2/usb/hook.sh"
+PUBLISH --tree "$T/t3" --src "$T/s2/usb" --commit-id 3333333333333333333333333333333333333333 --seq 400 --parts "$T/parts" \
+  --google-url https://dl.google.com/device/recovery/lapis-user/16000001/recovery.zip > "$T/p2.log" 2>&1 || { cat "$T/p2.log"; bad "publish 2"; }
+F2=$T/rel/400/gbos86-update.feed
+check "publish: the delta holds only what changed since the published set (super.img never)" "rm -rf '$T/un' && mkdir -p '$T/un' && tar -C '$T/un' -xf '$T/rel/400/'*-delta.tar && [ \"\$(cd '$T/un/'gbos86-update-*/files && find . -type f | sort | tr '\n' ' ')\" = './firmware/c.bin ./firmware/new/n.bin ./hook.sh ./super.layout ' ]"
+check "publish: the feed lists the base it covers" "grep -qx \"base \$(sha256sum '$T/rel/bases/300.manifest' | cut -c1-64)\" '$F2'"
+check "publish: Google's zip, each partition and super.img's hash are in the feed" "grep -qx 'google_zip https://dl.google.com/device/recovery/lapis-user/16000001/recovery.zip' '$F2' && [ \$(grep -c '^google_part ' '$F2') = 2 ] && grep -qx \"google_super \$(stat -c %s '$T/t3/super.img') \$(sha256sum '$T/t3/super.img' | cut -c1-64)\" '$F2' && feedverify '$F2'"
+echo tampered >> "$T/parts/vendor_a.img"
+check "super_parts.py refuses partitions that are not the ones in super.img" "! python3 -I '$ROOT/tools/super_parts.py' '$T/t3/super.img' '$T/t3/super.layout' --parts '$T/parts' >/dev/null 2>&1"
 
 [ $FAILS = 0 ] && { echo SYSTEM_UPDATE_TEST_PASS; exit 0; }
 echo "$FAILS FAILED"; exit 1

@@ -4,25 +4,31 @@ An installed gbOS86 (internal NVMe, eMMC or SATA disk) can move to a newer **sys
 Google build (`super.img`), our scripts and patches, firmware, modules and the kernel, all from one gbOS86 commit. Apps, accounts
 and settings (`/data`) are kept.
 
-The update arrives as a **bundle**: a plain folder named `gbos86-update-<number>-<id>`, signed by the project's key. Nothing in
+The update arrives as a **bundle**: a plain folder named `gbos86-update-<number>-<id>`, signed by the project's key. The maintainer
+publishes bundles on the project's GitHub releases with one command, and the **gbOS86 Updater** app on the laptop finds them (it checks
+after each start and tells you with a notification), downloads them and hands them over. No second computer is needed. Nothing in
 Android installs it. It is only copied onto the system partition (GBOSSYS), and the next start checks it again, before Android
 runs, and only then switches it in. If the new system does not finish starting three times, the previous one comes back by itself.
 
 Code: [`usb/sysupdate.sh`](../usb/sysupdate.sh) (the laptop side), [`tools/make_system_update.sh`](../tools/make_system_update.sh)
-(making bundles), [`tools/verify_system_update.sh`](../tools/verify_system_update.sh) (checking them on a PC), the app in
-[`updater-app/`](../updater-app). Tests: `sh tools/test_system_update.sh` must print `SYSTEM_UPDATE_TEST_PASS`.
+(making bundles), [`tools/publish_system_update.sh`](../tools/publish_system_update.sh) (publishing them on GitHub),
+[`tools/verify_system_update.sh`](../tools/verify_system_update.sh) (checking them on a PC), the app in [`updater-app/`](../updater-app).
+Tests: `sh tools/test_system_update.sh` must print `SYSTEM_UPDATE_TEST_PASS`, `sh tools/test_updater_core.sh` `UPDATER_CORE_TEST_PASS`.
 
 ## Updating a laptop
 
 You need a bundle folder made by the project (below) and an installed gbOS86 that has `gbos/sysupdate.sh` and the project's public key
 in `gbos/sysupdate.pub`. An install gets both from the stick (install or menu **1 Update**) once the stick has them.
 
-Copy the bundle in one of three ways. All of them only put files into `gbos/update.inbox/` on GBOSSYS:
+Get the bundle onto GBOSSYS in one of these ways. All of them only put files into `gbos/update.inbox/` on GBOSSYS:
 
-1. **The gbOS86 Updater app.** Choose update folder (for example in Downloads), Copy update to the system, Restart now. It shows the
-   installed set, what is waiting, and the result of the last update.
-2. **From Windows** (dual-boot): GBOSSYS has a drive letter. Copy the whole `gbos86-update-...` folder into `gbos\update.inbox\`.
-3. **From a root shell in gbOS86** (KernelSU):
+1. **The gbOS86 Updater app, from GitHub** (the usual way). After each start it looks for a published update and shows a
+   notification "gbOS86 update N available". Open the app, tap **Download and install**, then **Restart now** when it says the update
+   is ready. Details: [The app](#the-app).
+2. **The app, from a folder** you copied to the laptop yourself (for example to Downloads): Choose update folder, Copy this folder to
+   the system, Restart now.
+3. **From Windows** (dual-boot): GBOSSYS has a drive letter. Copy the whole `gbos86-update-...` folder into `gbos\update.inbox\`.
+4. **From a root shell in gbOS86** (KernelSU):
    `su -c "/postinstall/busybox sh /postinstall/gbos/sysupdate.sh stage /sdcard/Download/gbos86-update-..."`
    (`stage` also takes the bundle as one `.tar`; `cancel` removes waiting bundles; `status` shows the state).
 
@@ -85,6 +91,34 @@ tools/verify_system_update.sh build/system-updates/gbos86-update-...   # the dev
   the laptop when its build-tied hashes match the stick's files. `deploy_stick.sh` deletes a stick's `system.manifest` when it changes
   files, because the manifest would no longer describe the stick.
 
+## Publishing an update on GitHub (maintainer)
+
+```sh
+git push                                                   # the commit must be on GitHub (the app checks installed systems against it)
+tools/publish_system_update.sh --key /media/offline-stick/gbos86-key/sysupdate-private.pem --tree /path/to/stick/gbos
+```
+
+It builds the set from the commit (`--commit REV`, default `HEAD`; `git archive`, so uncommitted edits never slip in), checks it the
+way the laptop will, prints what it will upload and asks before uploading (`--yes` skips the question, `--no-upload` only makes the files,
+in `build/releases/<seq>/`). It needs `gh`, the GitHub CLI, logged in once with `gh auth login`. On the repository (the `origin` remote, or
+`--repo OWNER/NAME`) it creates the release `sysupdate-<seq>` with:
+
+* `<name>-full.tar`: every file of the set **except `super.img`**. GitHub refuses files over 2 GiB, and `super.img` is Google's system
+  image, which is not ours to hand out. A laptop that already has this Google build needs nothing else.
+* `<name>-delta.tar`: only the files that differ from at least one of the last `--bases` published updates (default 3), so a laptop on
+  any of them has everything else already. The app takes it when the laptop's set is one of those and unmodified.
+* `<name>.manifest`: the set's manifest, used as a base by the next publish (it fetches the earlier ones with `gh`).
+* `gbos86-update.feed`: what the app reads (below). The same file is then put on the release `sysupdate-feed`, which never moves, so
+  the app always reads `https://github.com/OWNER/NAME/releases/download/sysupdate-feed/gbos86-update.feed`. The feed moves only after
+  the new release is complete. Don't delete `sysupdate-feed`.
+
+**A new Google build** (after porting it as in [porting.md](../porting.md)): publish the same way. Laptops on the older Google build need
+the new `super.img`. They get it with the stick (menu 1), or, with the app's experimental setting, by rebuilding it from Google's own
+download. For that the feed names Google's `recovery.zip` (`URL` in the commit's `lapis/BUILD`) and the size and sha256 of each partition
+and of `super.img`. `tools/super_parts.py` first proves the published `super.img` can be rebuilt that way: it must be exactly
+`make_super.py`'s image of Google's partitions in `lapis/parts` (`--parts DIR`). If not, the feed leaves the Google lines out and the app
+asks for the stick.
+
 ## Building the app
 
 `updater-app/build.sh` (plain Java, no Gradle or libraries) needs a JDK 17+ (`sudo apt install openjdk-17-jdk-headless`, about
@@ -93,6 +127,51 @@ tools/verify_system_update.sh build/system-updates/gbos86-update-...   # the dev
 `updater-app/build.sh --test-key` signs with a throwaway key; a release build signs with `~/.config/gbos86/updater-app.p12`
 (made on the first build; back it up, and Android only updates the app with the same key). The result is `usb/gbos86-updater.apk`;
 on the stick it is in `install.sh`'s FILES, and `hook.sh` installs it with `pm` at boot when it changed. The APK is not committed.
+The app's default update source is this checkout's GitHub `origin` (or `REPO=OWNER/NAME updater-app/build.sh`); Settings can change it.
+
+## The app
+
+* **Checking.** After each start, the gbOS86 boot service (`sysupdate.sh install-app`) tells the app (broadcast `BOOT_CHECK`; it reaches
+  the app even if it was never opened). The app waits for a network, reads the feed, checks its signature against the laptop's own
+  `gbos/sysupdate.pub`, and shows a notification when an update newer than the installed one is published. It also checks once a day,
+  and when you open it. Checking never downloads the update.
+* **Installing.** **Download and install** downloads the delta or the full bundle from GitHub (resumed after a broken connection; the
+  sha256 must be the one in the signed feed), unpacks it in the app's own storage, and asks the root service to copy it into
+  `update.inbox`. If the laptop lacks a file the delta does not carry (the root service says `NEEDS-FILES`), the app takes the full
+  bundle by itself. The download runs as a foreground service with a notification, so it continues with the window closed; Stop
+  stops it, and the next try resumes. When the update is staged, **Restart now** restarts the laptop.
+* **The modification check.** The app asks the root service for `sysupdate.sh audit`: every file of the installed set against
+  `gbos/system.manifest` (changed, missing, and files added to the set's folders; `gbos.cfg` and logs never count; files over 64 MiB,
+  i.e. `super.img`, by size unless you tap **Full check**). It also looks at the set's commit: `-dirty` means it was built from changed
+  sources, and a clean commit is looked up on GitHub (`api.github.com/repos/OWNER/NAME/commits/<sha>`) to tell the project's published
+  sources from a local or forked build. **When there are modifications** (local changes, or a set built from changed sources) the app
+  shows a warning, and asks again before installing: an update replaces changed files, deletes files added to its folders, and was not
+  tested with your changes, so it could break things. A laptop with no `system.manifest` (installed from a stick without one) cannot be
+  checked; the first update from the app installs every file and writes one.
+* **Settings**, on two tabs. **General:** check when the laptop starts (on), check once a day (on), delete old boot logs when GBOSSYS is
+  short of space (off), the update source. **Experimental features:** "Download new Google builds directly from Google" (off).
+* **Permissions:** internet, network state (the check waits for a network), notifications (granted by the boot service when it first
+  installs the app; "Don't allow" is kept), start at boot, and a foreground service for the download.
+
+### Experimental: new Google builds straight from Google
+
+With the setting on, an update that brings a new Google build is installed without the stick. The app reads the directory of Google's
+`recovery.zip` with two small range requests, then inflates the raw disk image inside it as one stream: the GPT and the `super` partition's
+liblp metadata come from its first megabytes, the bytes of the six partitions go straight to their place in `super.img` (a Java port of
+`make_super.py`, so the result is byte for byte the published one), and reading stops after the last of them. The zip is never stored. Then
+every partition and the whole `super.img` must have the feed's sha256, and the root service copies it into the bundle on GBOSSYS, where
+the next start checks it again like any other file.
+
+* **Cost:** Google's file is read from the start up to the last partition: several GB (the whole zip is about 7.7 GB). It needs about
+  4 GB free on the data partition while it works, and about 3.8 GB on GBOSSYS; the app checks GBOSSYS's space first.
+* **Interruptions:** a broken connection is resumed in place (the same inflater carries on from the byte where it stopped, with
+  `If-Range` so a changed file is noticed). If the app is closed or the laptop sleeps, Google's part starts over. Android 15 stops a
+  download service after 6 hours a day.
+* **Why it is safe to try:** nothing from Google is trusted. Only data with the hashes the maintainer signed is used, and the boot check
+  is the same as for the stick's files.
+* **Not tried yet on hardware or with Google's real file.** `tools/test_updater_core.sh` runs it against a small Google-like zip
+  (zip64, a split partition placed out of order, a zero extent, a dropped connection). Once, by hand, the real partitions of build
+  16693588 in a 3.2 GB zip64 test zip gave exactly the published `super.img` (sha256 `e94590cf...`, 29 s on the PC).
 
 ## How it works
 
@@ -123,6 +202,32 @@ ending in a dot (FAT drops it), Windows device names, or two names that differ o
 first part may never be `gbos.cfg`, `logs`, `update*`, `.stamps`, `metadata.img`, `busybox`, `system.manifest` or `EFI`. Every file's
 folder must be declared. The set must contain `super.img`, `super.layout`, `hook.sh`, `early_patch.sh`, `sysupdate.sh` and `sysupdate.pub`.
 A bundle may hold nothing but `manifest`, `manifest.sig` and listed files under `files/`. A link, special file or unlisted file rejects it.
+
+### The update feed
+
+```
+gbos86-update-feed 1
+seq 202611201230
+set <sha256 of the manifest>
+name gbos86-update-000202611201230-<first 12 of set>
+commit <40 hex>
+google_build 16693588
+created 2026-11-20T12:30:00Z
+base <set id>                                   one per published set the delta covers
+url https://github.com/OWNER/NAME/releases/download/sysupdate-202611201230/
+asset full <file> <size> <sha256>
+asset delta <file> <size> <sha256>              (optional)
+asset manifest <file> <size> <sha256>
+google_zip https://dl.google.com/device/recovery/lapis-user/16693588/recovery.zip      (optional, with the next lines)
+google_part system_a <bytes, 4 KiB aligned> <sha256>                                    one per partition, in super.img's order
+google_super <bytes> <sha256>
+note <one line of what changed>                 (up to 20)
+end <number of lines before this one>
+rsa3072-sha256 <signature of everything above>
+```
+
+The app refuses a feed with a wrong signature, an unknown or malformed line, or a non-https address (Google's only on `dl.google.com`).
+A replayed old feed can only hide a newer update; it cannot make the laptop take an older set (the boot check refuses a lower `seq`).
 
 ### The signature check, in busybox
 
@@ -192,12 +297,15 @@ update's state, backups and kernel copy, and copies the stick's `system.manifest
   in. It is built so that it stays sound when that is fixed: the trust decision happens in stage0, with no Android process running.
   Making `/postinstall` writable only by root, and removing `gbos_sync`'s `run.sh` hook (which runs a file from GBOSSYS as root
   every 5 s), are separate tasks.
-* **The app is not trusted with anything.** It asks for no permissions and never installs. It writes a request into its own
+* **GitHub and Google are not trusted.** The app installs nothing that is not covered by the signature: the feed is signed, each
+  download must have the feed's sha256, a rebuilt `super.img` the feed's hashes, and the laptop checks the signed manifest and every file
+  again at boot. Someone who controls the GitHub account, the network or Google's server can at most stop updates.
+* **The app is not trusted with anything.** It never installs. It writes a request into its own
   private folder (`/data/user/<user>/org.gbos86.updater/files/request.txt`, writable only by the app and root) and sets
   `sys.gbos86.sysupdate=<user>.<number>`. That property starts `gbos_sysupdate_req` (init, `seclabel u:r:shell:s0`, root), which reads
   the request (only if the app's own uid owns it), deletes it and answers in `response.txt`. Another app that sets the property finds
-  no request to run. The service copies only from that user's shared storage (`/data/media/<user>/`), only the files a signed manifest
-  lists, and checks the signature before copying anything. Each source file is opened once and must be the file at that path (no link
+  no request to run. The service copies only from that user's shared storage (`/data/media/<user>/`) or the app's own `files/`
+  folder (its downloads), only the files a signed manifest lists, and checks the signature before copying anything. Each source file is opened once and must be the file at that path (no link
   on the way, one hard link), and is hashed after the copy. So it cannot be used to copy someone else's private files onto GBOSSYS. A
   `.tar` is unpacked onto FAT, which cannot hold links.
 * **With SELinux enforcing** (not today), this would need: a `gbos_sysupdate` domain for the service instead of `shell`, allowed to read
@@ -234,8 +342,10 @@ update's state, backups and kernel copy, and copies the stick's `system.manifest
 * Rolling back a new Google build after Android has run it needs a way to undo `/data` (Android's userdata checkpoint with dm-bow),
   which gbOS86 does not have.
 * A top-level folder that a new set no longer mentions is left on GBOSSYS (that is what keeps `camera/`). To really remove one, use menu 1.
-* Not yet tried on the laptop: every case above runs in `tools/test_system_update.sh` (96 checks) against a fake GBOSSYS and EFI
-  folder with the stick's busybox. The loop mounts, the EFI partition lookup and the restart only run on hardware.
+* Not yet tried on the laptop: every case above runs in `tools/test_system_update.sh` (116 checks) against a fake GBOSSYS and EFI
+  folder with the stick's busybox, and the app's core in `tools/test_updater_core.sh`. The loop mounts, the EFI partition lookup, the
+  restart, the app's screens and services, GitHub's redirects and Google's real `recovery.zip` only run on hardware.
+* The automatic check needs the gbOS86 boot service (`gbos86-updater.apk` on GBOSSYS) or the app opened once since it was installed.
 
 ## Changes from the first design, and why
 
@@ -252,5 +362,10 @@ update's state, backups and kernel copy, and copies the stick's `system.manifest
   nothing while SELinux is permissive and the app is not trusted anyway, and overlaying Google's read-only `priv-app` folders is fragile.
 * **The root service copies through checked file descriptors and checks the signature first**, so it cannot be turned into a way to
   copy private files to the world-readable GBOSSYS.
+* **Updates come from GitHub releases, without `super.img`** (2026-11-20). The app downloads them itself, so no second computer is
+  needed. `super.img` cannot go on GitHub (2 GiB per file, and it is Google's), so a new Google build comes from the stick or, as an
+  experimental setting, is rebuilt from Google's own download and checked against the signed hashes.
+* **The feed carries its signature as its last line**, so replacing it on GitHub is one upload and a reader never pairs a new feed with
+  an old signature.
 * **Logs are deleted only when the user asks** (`--prune-logs`, the app's tick box), answering the open question about space.
 * **`camera/` is not part of a set by default**, and a set never removes a top-level folder it does not mention.

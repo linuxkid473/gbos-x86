@@ -1098,3 +1098,19 @@ SHA-NI, 256-bit VAES/VPCLMULQDQ, AVX-IFMA and AVX-512; the lapis binaries use th
   - *First hardware test:* commit the real public key, deploy, menu 1 once (puts `sysupdate.sh` and the key on the laptop), boot the
     laptop, copy a small delta bundle into `update.inbox` from Windows, restart. Read `gbos/update/status.txt` and `kmsg.log`'s
     `gbos-sysupdate:` lines (menu 1's `nvme-logs`). Then try one that changes the kernel.
+- 2026-11-20 **Updates from GitHub in the gbOS86 Updater app, no second PC (built and tested on the PC, not on hardware; not deployed).**
+  - *Publish:* `tools/publish_system_update.sh --key KEY --tree <stick's gbos/>` builds the set from a pushed commit, makes a full and a
+    delta bundle **without `super.img`** (GitHub's 2 GiB limit; Google's image is not ours to redistribute), signs a feed and, after asking,
+    creates release `sysupdate-<seq>` and replaces `gbos86-update.feed` on release `sysupdate-feed` with `gh`. Nothing was uploaded.
+  - *App (v2):* checks after each start (the boot service broadcasts `BOOT_CHECK`) and daily, notifies, downloads (resume, sha256 from the
+    signed feed), stages from its own storage (`where app`), falls back from the delta to the full bundle on `NEEDS-FILES`. Settings tabs
+    General / Experimental features. New permissions: internet, network state, notifications, boot, foreground service.
+  - *Modification check:* `sysupdate.sh audit` (files vs `system.manifest`; added files in the set's folders; `gbos.cfg`/logs ignored;
+    big files by size unless deep) + the set's commit (`-dirty`; clean ones looked up on GitHub). A modified system gets a warning and a
+    second confirmation before installing. `make_system_update.sh manifest` now records `-dirty` when the tree differs from HEAD.
+  - *Experimental, off by default:* rebuild `super.img` from Google's `recovery.zip` (range-read zip directory, one inflate stream, GPT +
+    liblp, Java port of `make_super.py`; resumes a broken connection with the same inflater). `tools/super_parts.py` proves a published
+    `super.img` is make_super.py's image of Google's partitions: true for 16693588 with `lapis/parts` (`google_super 3688890368 e94590cf...`).
+  - *Tests:* `test_system_update.sh` 116 checks; `test_updater_core.sh` (feed, RSA vs openssl, resume, tar, Java vs make_super.py, Google-like
+    zip64 with split/out-of-order/zero extents and a dropped connection). By hand: the real 16693588 partitions in a 3.2 GB zip64 test zip
+    -> the Java code rebuilt the identical 3.7 GB `super.img` in 29 s. Never run: GitHub redirects, Google's real zip, the app on Android.

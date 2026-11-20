@@ -14,8 +14,10 @@
 #       --pub FILE       the sysupdate.pub the new set carries (key rotation); default: the source's, or KEY's public key
 #       --with-dir NAME  include an optional folder that is left out by default (camera: per-laptop calibration)
 #       --commit-id ID   commit recorded with --src (default 40 zeros);  --no-super-check  skip the docker dump.erofs check
+#       --omit PATH      listed in the manifest but left out of files/ (repeatable; publish_system_update.sh: --omit super.img)
 #   make_system_update.sh manifest --tree GBOSDIR --kernel FILE [--seq N] [--out FILE]
-#       an unsigned manifest of exactly what is in GBOSDIR (e.g. the stick, for gbos/system.manifest; menu 1 copies it to the laptop)
+#       an unsigned manifest of exactly what is in GBOSDIR (e.g. the stick, for gbos/system.manifest; menu 1 copies it to the laptop).
+#       Its commit is this checkout's HEAD, with "-dirty" when a file of the tree that git tracks (usb/...) differs from HEAD.
 #
 # The set is install.sh's FILES and DIRS (read from the source's own install.sh), tracked files from git and the rest from --tree.
 # The Google build comes from patched/MANIFEST's "# build" line; it must match lapis/BUILD and (with docker) super.img's build.prop.
@@ -72,7 +74,7 @@ compose() {
             (cd "$SRC" && find . -type f | sed 's#^\./##') > "$T/tracked"
             COMMIT=${COMMIT_ID:-0000000000000000000000000000000000000000};;
     tree)   SRC=$TREE; BUILDFILE=
-            COMMIT=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo 0000000000000000000000000000000000000000);;
+            COMMIT=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo 0000000000000000000000000000000000000000);;   # tree_dirty adds -dirty
   esac
   [ -f "$SRC/install.sh" ] || die "no install.sh in $SRC"
   # install.sh's FILES/DIRS lines, evaluated against the tree and the source (optional entries present in either count)
@@ -121,6 +123,19 @@ compose() {
   fi
 }
 
+# tree_dirty: in tree mode, does any listed file (or the kernel) that git tracks under usb/ differ from HEAD's copy? Then the commit
+# is recorded as "<HEAD>-dirty", so the laptop (and the updater app) know the set is not exactly a commit's sources.
+tree_dirty() {
+  git -C "$ROOT" rev-parse -q --verify HEAD >/dev/null 2>&1 || return 1
+  git -C "$ROOT" ls-tree -r HEAD -- usb | awk -F '\t' '{ split($1, a, " "); print substr($2, 5) "\t" a[3] }' | sort > "$T/headblobs"
+  { cat "$T/list"; printf 'out/BOOTX64.EFI\t%s\n' "$KSRC"; } | sort -t "$(printf '\t')" -k1,1 \
+    | join -t "$(printf '\t')" - "$T/headblobs" > "$T/tracked.cmp"
+  [ -s "$T/tracked.cmp" ] || return 1
+  cut -f2 "$T/tracked.cmp" | git -C "$ROOT" hash-object --stdin-paths > "$T/tracked.now"
+  cut -f3 "$T/tracked.cmp" | cmp -s - "$T/tracked.now" && return 1
+  return 0
+}
+
 super_check() { # the set's super.img must be that Google build (dump.erofs in the gbos-erofs image)
   [ "$SUPER_CHECK" = 1 ] || { echo "note: super.img build not checked (--no-super-check); the laptop checks it anyway" >&2; return 0; }
   if ! docker image inspect gbos-erofs >/dev/null 2>&1; then
@@ -159,12 +174,14 @@ busybox_path() {
 
 cmd_build() {
   MODE=worktree; REV=; SRCDIR=; TREE=; KERNEL=; KEY=; BASE=; SEQ=; OUT=$ROOT/build/system-updates; TAR=0; PUB_FILE=; WITH_DIRS=; COMMIT_ID=; SUPER_CHECK=1
+  OMIT=
   while [ $# -gt 0 ]; do
     case "$1" in
       --worktree) MODE=worktree; shift;; --commit) MODE=commit; REV=$2; shift 2;; --src) MODE=src; SRCDIR=$(cd "$2" && pwd); shift 2;;
       --tree) TREE=$(cd "$2" && pwd); shift 2;; --kernel) KERNEL=$2; shift 2;; --key) KEY=$2; shift 2;; --base) BASE=$2; shift 2;;
       --seq) SEQ=$2; shift 2;; --out) OUT=$2; shift 2;; --tar) TAR=1; shift;; --pub) PUB_FILE=$2; shift 2;;
       --with-dir) WITH_DIRS="$WITH_DIRS $2"; shift 2;; --commit-id) COMMIT_ID=$2; shift 2;; --no-super-check) SUPER_CHECK=0; shift;;
+      --omit) OMIT="$OMIT $2"; shift 2;;
       *) die "build: unknown option $1";;
     esac
   done
@@ -194,8 +211,10 @@ cmd_build() {
   : > "$T/base.f"; _bk=
   if [ -n "$BASE" ]; then awk '$1 == "f" { print $2, $3, $4 }' "$BASE" > "$T/base.f"; _bk=$(awk '$1 == "k" { print $2 }' "$BASE"); fi
   _n=0; _bytes=0
+  for _o in $OMIT; do grep -q "^f [0-9a-f]* [0-9]* $_o\$" "$B/manifest" || die "--omit $_o: not a file of the set"; done
   awk '$1 == "f" { print $2, $3, $4 }' "$B/manifest" | while read -r _h _s _p; do
     grep -qxF "$_h $_s $_p" "$T/base.f" && continue
+    case " $OMIT " in *" $_p "*) continue;; esac
     _src=$(awk -F '\t' -v p="$_p" '$1 == p { print $2 }' "$T/list")
     mkdir -p "$B/files/$(dirname "$_p")"; cp "$_src" "$B/files/$_p"
   done
@@ -204,7 +223,7 @@ cmd_build() {
   _n=$(find "$B/files" -type f | wc -l); _bytes=$(du -sk "$B/files" | cut -f1)
   echo "bundle: $B"
   echo "  set $ID, seq $SEQ, Google build $GB, commit $COMMIT"
-  echo "  $(grep -c '^f ' "$B/manifest") files in the set, $_n in the bundle ($((_bytes / 1024)) MB)$([ -n "$BASE" ] && echo ", delta from seq $_bs")"
+  echo "  $(grep -c '^f ' "$B/manifest") files in the set, $_n in the bundle ($((_bytes / 1024)) MB)$([ -n "$BASE" ] && echo ", delta from seq $_bs")$([ -n "$OMIT" ] && echo ", left out:$OMIT")"
   # check it the way the laptop will, and the signature again with openssl
   _pub=$T/check.pub
   awk -F '\t' '$1 == "sysupdate.pub" { print $2 }' "$T/list" | xargs cat > "$T/set.pub"
@@ -227,6 +246,7 @@ cmd_manifest() {
   [ -n "$TREE" ] && [ -n "$KERNEL" ] || die "usage: manifest --tree GBOSDIR --kernel BOOTX64.EFI [--seq N] [--out FILE]"
   [ -n "$SEQ" ] || SEQ=$(date -u +%Y%m%d%H%M)
   compose
+  case "$COMMIT" in 0000000000000000000000000000000000000000) ;; *) if tree_dirty; then COMMIT=$COMMIT-dirty; echo "note: the tree differs from HEAD's tracked files: commit recorded as $COMMIT" >&2; fi;; esac
   write_manifest "$T/manifest"
   if [ -n "$OUTF" ]; then cp "$T/manifest" "$OUTF"; echo "wrote $OUTF (set $(sha "$T/manifest"))" >&2; else cat "$T/manifest"; fi
 }
@@ -237,5 +257,5 @@ case "$cmd" in
   pubkey) [ -n "${1:-}" ] || die "usage: pubkey KEY.pem"; pub_of_key "$1";;
   build) cmd_build "$@";;
   manifest) cmd_manifest "$@";;
-  *) sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 2;;
+  *) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; exit 2;;
 esac

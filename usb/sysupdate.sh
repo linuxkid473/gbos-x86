@@ -15,7 +15,10 @@
 #   status [--gbos G]                      installed set, pending update, last result
 #   request                                init service for the app: one request from the app's private folder (docs/system-update.md)
 #   boot-ok [G]                            init service at boot_completed while an update is being tried: marks the boot good
-#   install-app [G] [BOOTN]                init service at boot_completed: install gbos86-updater.apk with pm when it changed
+#   install-app [G] [BOOTN]                init service at boot_completed: install gbos86-updater.apk with pm when it changed, then
+#                                          tell the app the laptop started (its update check)
+#   audit [G] [--deep]                     does the installed system match its system.manifest? (the app's modification check)
+#   info [G]                               machine-readable set/key/space facts for the app
 #   setinfo DIR                            id/seq/google_build/commit of the set in a gbos folder (install.sh)
 #   menu1-check STICKG NVMEG / menu1-finish STICKG NVMEG    the stick's menu 1 (install.sh)
 #
@@ -683,12 +686,21 @@ cmd_stage() {
   _seq=$(su_mval "$P" seq); _name=gbos86-update-$(printf '%012d' "$_seq")-$(echo "$SU_ID" | cut -c1-12)
   # which listed files to copy: present in the bundle, and not already installed with the same hash
   su_progress "comparing the bundle with the installed files (up to a minute)"
-  : > "$W/copy"
+  : > "$W/copy"; : > "$W/lack"
   while read -r _h _s _p; do
-    [ -e "$_src/files/$_p" ] || continue
+    if [ ! -e "$_src/files/$_p" ]; then   # not in the bundle: the installed copy must already be the set's (as the boot check demands)
+      [ "$(su_size "$G/$_p")" = "$_s" ] && [ "$(su_sha "$G/$_p")" = "$_h" ] || echo "$_p" >> "$W/lack"
+      continue
+    fi
     if [ "$(su_size "$G/$_p")" = "$_s" ] && [ "$(su_sha "$G/$_p")" = "$_h" ]; then continue; fi
     echo "$_h $_s $_p" >> "$W/copy"
   done < "$P/f"
+  if [ -s "$W/lack" ]; then
+    # exit 3: the app then takes the full bundle (or, for super.img, rebuilds it from Google's download)
+    su_say "NEEDS-FILES: this installed system lacks $(wc -l < "$W/lack") file(s) of the set that the bundle does not include: $(head -n 5 "$W/lack" | tr '\n' ' ')"
+    su_say "use a full bundle (or the stick's menu 1)"
+    exit 3
+  fi
   _k=
   if [ -e "$_src/files/EFI/BOOTX64.EFI" ]; then _k=1; fi
   _need=$(awk '{ s += $2 } END { print int(s / 1024) + 1 }' "$W/copy")
@@ -739,6 +751,67 @@ cmd_cancel() {
   echo "removed $_n waiting bundle(s); an update that is already installed is not touched"
 }
 
+# audit [G] [--deep]: is the installed system exactly the set its system.manifest names? The app's "modifications" check.
+# Prints key=value lines, then up to 60 "changed|missing|added PATH" lines. Files over 64 MiB (super.img) are compared by size
+# unless --deep. gbos.cfg, logs and update folders are never part of a set, so editing gbos.cfg is not a modification. "added" files sit
+# in the set's own folders: an update deletes them. The kernel on the EFI partition is not checked from Android.
+cmd_audit() {
+  _ag=; _deep=0
+  while [ $# -gt 0 ]; do case "$1" in --deep) _deep=1; shift;; -*) su_die "audit: unknown option $1";; *) _ag=$1; shift;; esac; done
+  su_gbos "$_ag"; su_tmp
+  _m=$G/system.manifest
+  if [ ! -f "$_m" ]; then
+    echo "manifest=none"; echo "source=unknown"; echo "modified=unknown"; return 0
+  fi
+  if ! su_parse_manifest "$_m" "$W/a"; then
+    echo "manifest=bad"; echo "reason=$(echo "$SU_ERR" | head -n 1)"; echo "source=unknown"; echo "modified=unknown"; return 0
+  fi
+  _c=$(su_mval "$W/a" commit)
+  case "$_c" in 0000000000000000000000000000000000000000) _src=unknown;; *-dirty) _src=dirty;; *) _src=git;; esac
+  echo "manifest=ok"; echo "set=$(su_sha "$_m")"; echo "seq=$(su_mval "$W/a" seq)"; echo "commit=$_c"; echo "source=$_src"
+  echo "google_build=$(su_mval "$W/a" google_build)"
+  : > "$W/a/chk"; : > "$W/a/res"
+  while read -r _h _s _p; do
+    if [ ! -f "$G/$_p" ]; then echo "missing $_p" >> "$W/a/res"; continue; fi
+    [ "$(su_size "$G/$_p")" = "$_s" ] || { echo "changed $_p" >> "$W/a/res"; continue; }
+    [ $_deep = 0 ] && [ "$_s" -gt 67108864 ] && continue
+    echo "$_h  $_p" >> "$W/a/chk"
+  done < "$W/a/f"
+  [ -s "$W/a/chk" ] && (cd "$G" && sha256sum -c "$W/a/chk" 2>/dev/null) | sed -n 's/^\(.*\): FAILED$/changed \1/p' >> "$W/a/res"
+  while read -r _t; do [ -d "$G/$_t" ] && (cd "$G" && find "$_t" -type f); done < "$W/a/top" \
+    | awk 'FILENAME == ARGV[1] { split($0, a, " "); w[a[3]] = 1; next } !($0 in w) { print "added " $0 }' "$W/a/f" - >> "$W/a/res"
+  _ch=$(grep -c '^changed ' "$W/a/res"); _mi=$(grep -c '^missing ' "$W/a/res"); _ad=$(grep -c '^added ' "$W/a/res")
+  echo "checked=$(wc -l < "$W/a/f")"; echo "changed=$_ch"; echo "missing=$_mi"; echo "added=$_ad"; echo "deep=$_deep"
+  if [ $((_ch + _mi + _ad)) = 0 ]; then echo "modified=no"; else echo "modified=yes"; fi
+  sort "$W/a/res" | head -n 60
+  return 0
+}
+
+# info [G]: machine-readable facts for the app (the set, the public key it checks the update feed with, free space, pending update).
+cmd_info() {
+  su_gbos "${1:-}"
+  echo "gbos86-sysupdate-info 1"
+  if [ -f "$G/system.manifest" ]; then
+    echo "set=$(su_sha "$G/system.manifest")"; echo "seq=$(su_manifest_field "$G/system.manifest" seq)"
+    echo "commit=$(su_manifest_field "$G/system.manifest" commit)"
+    echo "super=$(awk '$1 == "f" && $4 == "super.img" { print $2; exit }' "$G/system.manifest")"
+    _ib=$(su_manifest_field "$G/system.manifest" google_build)
+  else
+    echo "set=none"; echo "seq=0"; echo "commit=unknown"; echo "super="; _ib=
+  fi
+  [ -n "$_ib" ] || _ib=$(su_fp_build "$(getprop ro.system.build.fingerprint 2>/dev/null)")
+  [ -n "$_ib" ] || _ib=$(su_fp_build "$(sed -n 's/^# build //p' "$G/patched/MANIFEST" 2>/dev/null | head -n 1)")
+  echo "google_build=${_ib:-0}"
+  _k=$(su_pub_modulus "$G/sysupdate.pub" 2>/dev/null) && echo "pub=$_k" || echo "pub=none"
+  echo "free_kb=$(su_free_kb "$G")"
+  echo "logs_kb=$(du -sk "$G/logs" 2>/dev/null | cut -f1)"
+  if [ -f "$U/state" ]; then echo "pending=$(su_st phase)"; echo "pending_seq=$(su_st seq)"; else echo "pending=none"; fi
+  echo "inbox=$(ls "$INBOX" 2>/dev/null | grep '^gbos86-update-' | grep -v '\.part$' | tr '\n' ' ')"
+  grep -q '^\[ -f /gbos/gbos/early_patch.sh \] && \. /gbos/gbos/early_patch.sh' "$G/gbos.cfg" 2>/dev/null && echo "hook=ok" || echo "hook=missing"
+  [ -f "$U/status.txt" ] && echo "last=$(tail -n 1 "$U/status.txt" | tr -cd '\40-\176')"
+  return 0
+}
+
 cmd_status() {
   su_gbos "${1:-}"
   echo "installed set: $(cmd_setinfo "$G" | tr '\n' ' ')"
@@ -772,18 +845,24 @@ cmd_request() {
   _act=$(sed -n 's/^action \([a-z-]*\)$/\1/p' "$W/req" | head -n 1)
   _rel=$(sed -n 's/^path \([A-Za-z0-9._+,@=~/ -]*\)$/\1/p' "$W/req" | head -n 1)
   _pr=$(sed -n 's/^prune_logs \([01]\)$/\1/p' "$W/req" | head -n 1)
+  _wh=$(sed -En 's/^where (app|shared)$/\1/p' "$W/req" | head -n 1)
+  _dp=$(sed -n 's/^deep \([01]\)$/\1/p' "$W/req" | head -n 1)
   SU_STATUSF=$W/progress
   respond() { { echo "gbos86-sysupdate-response 1"; echo "id $_id"; echo "state $1"; shift; cat; } > "$_rs.part"; chown "$_uid:$_uid" "$_rs.part"; chmod 600 "$_rs.part"; mv -f "$_rs.part" "$_rs"; }
   echo "working" | respond running
   case "$_act" in
     status) cmd_status 2>&1 | respond done;;
+    info) cmd_info 2>&1 | respond done;;
+    audit) ( set -- audit; [ "$_dp" = 1 ] && set -- "$@" --deep; if [ -n "${SU_BB:-}" ]; then "$SU_BB" sh "$0" "$@"; else sh "$0" "$@"; fi ) 2>&1 | respond done;;
     cancel) cmd_cancel 2>&1 | respond done;;
     reboot) echo "restarting" | respond done; sync; setprop sys.powerctl reboot,gbos-sysupdate;;
     stage)
       case "/$_rel/" in */../*|*/./*|//) echo "bad path" | respond failed; exit 1;; esac
-      _src=/data/media/$_u/$_rel
-      _real=$(realpath "$_src" 2>/dev/null)
-      case "$_real" in /data/media/$_u/*) ;; *) echo "the bundle must be in this user's shared storage" | respond failed; exit 1;; esac
+      # where: shared = this user's shared storage (a folder picked in the app); app = the app's own files/ (its downloads)
+      if [ "$_wh" = app ]; then _base=$(realpath "$_ad/files" 2>/dev/null); else _base=/data/media/$_u; fi
+      _real=$(realpath "$_base/$_rel" 2>/dev/null)
+      [ -n "$_base" ] || _real=
+      case "$_real" in "$_base"/?*) ;; *) echo "the bundle must be in this user's shared storage or the app's own folder" | respond failed; exit 1;; esac
       ( while sleep 1; do [ -f "$W/progress" ] && respond running < "$W/progress"; done ) & _pp=$!
       _o=$( ( set -- stage "$_real" --status "$W/progress"; [ "$_pr" = 1 ] && set -- "$@" --prune-logs; if [ -n "${SU_BB:-}" ]; then "$SU_BB" sh "$0" "$@"; else sh "$0" "$@"; fi ) 2>&1); _r=$?
       kill "$_pp" 2>/dev/null; wait "$_pp" 2>/dev/null
@@ -799,12 +878,23 @@ cmd_install_app() {
   _apk=$G/gbos86-updater.apk; _log=$G/logs/boot-$_n/updater-app.txt; _stamp=/data/local/tmp/.gbos86-updater.sha256
   [ -f "$_apk" ] || exit 0
   _h=$(su_sha "$_apk")
-  if pm path "$SU_PKG" >/dev/null 2>&1 && [ "$(cat "$_stamp" 2>/dev/null)" = "$_h" ]; then echo "updater app $_h already installed" >> "$_log"; exit 0; fi
-  cp "$_apk" /data/local/tmp/gbos86-updater.apk || exit 1
-  _o=$(pm install -r /data/local/tmp/gbos86-updater.apk 2>&1)
-  echo "pm install gbos86-updater.apk ($_h): $_o" >> "$_log"
-  rm -f /data/local/tmp/gbos86-updater.apk
-  case "$_o" in *Success*) echo "$_h" > "$_stamp";; esac
+  if pm path "$SU_PKG" >/dev/null 2>&1 && [ "$(cat "$_stamp" 2>/dev/null)" = "$_h" ]; then echo "updater app $_h already installed" >> "$_log"
+  else
+    cp "$_apk" /data/local/tmp/gbos86-updater.apk || exit 1
+    _new=1; pm path "$SU_PKG" >/dev/null 2>&1 && _new=0
+    _o=$(pm install -r /data/local/tmp/gbos86-updater.apk 2>&1)
+    echo "pm install gbos86-updater.apk ($_h): $_o" >> "$_log"
+    rm -f /data/local/tmp/gbos86-updater.apk
+    case "$_o" in *Success*)
+      echo "$_h" > "$_stamp"
+      # first install only (a later "don't allow" stays): let it show the "update available" notification
+      [ $_new = 1 ] && pm grant "$SU_PKG" android.permission.POST_NOTIFICATIONS >> "$_log" 2>&1;;
+    esac
+  fi
+  # the app's update check at startup (its own BOOT_COMPLETED receiver does not run until the app was opened once). The app decides
+  # (Settings: "Check when the laptop starts") and waits for the network itself.
+  am broadcast -a org.gbos86.updater.BOOT_CHECK -n "$SU_PKG/.BootReceiver" -f 0x20 >> "$_log" 2>&1
+  return 0
 }
 
 # init, at boot_completed, only while an update is being tried (hook.sh adds the service then): wait a minute so a crash loop right
@@ -876,6 +966,8 @@ case "$_cmd" in
   request) cmd_request "$@";;
   boot-ok) cmd_boot_ok "$@";;
   install-app) su_tmp; cmd_install_app "$@";;
+  audit) cmd_audit "$@";;
+  info) su_tmp; cmd_info "$@";;
   setinfo) su_tmp; cmd_setinfo "$@";;
   menu1-check) su_tmp; cmd_menu1_check "$@";;
   menu1-finish) su_tmp; cmd_menu1_finish "$@";;
