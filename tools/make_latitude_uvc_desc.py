@@ -172,8 +172,11 @@ def main() -> None:
     parser.add_argument("source", type=Path)
     parser.add_argument("output", type=Path)
     parser.add_argument("--usb-id", help="VVVV:PPPP to put in the device descriptor")
+    parser.add_argument("--size", default="%dx%d" % OUTPUT_SIZE,
+                        help="WxH of the single frame (the bridge's output size)")
     args = parser.parse_args()
-    result = generate(args.source.read_bytes())
+    width, _, height = args.size.partition("x")
+    result = generate(args.source.read_bytes(), (int(width), int(height)))
     if args.usb_id:
         result = set_usb_id(result, args.usb_id)
     args.output.write_bytes(result)

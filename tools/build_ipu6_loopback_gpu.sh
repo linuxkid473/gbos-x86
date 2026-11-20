@@ -11,12 +11,20 @@ API=30
 OUT=$ROOT/usb/installer/bin/vulkan/ipu6-loopback
 mkdir -p "$(dirname "$OUT")"
 cd "$ROOT"	# relative source path: no local paths in the binary
-"$BIN/x86_64-linux-android$API-clang" -O2 -pthread -Wall -Wextra -Werror -DIPU6_GPU \
-	-ffile-prefix-map="$ROOT/=" -ffile-prefix-map="$NDK/=ndk/" \
-	-o "$OUT" kernel/ipu6-loopback.c -lm -ldl
-"$BIN/llvm-strip" "$OUT"
-if strings -n 6 "$OUT" | grep -q -e "$HOME" -e /home/; then
-	echo "$OUT embeds a local path" >&2
-	exit 1
-fi
+# The default size, and the CAMERA_SIZE=640x480 fallback (installer/bin/640x480/vulkan/).
+OUT640=$ROOT/usb/installer/bin/640x480/vulkan/ipu6-loopback
+mkdir -p "$(dirname "$OUT640")"
+for target in "$OUT:" "$OUT640:-DOUT_WIDTH=640 -DOUT_HEIGHT=480"; do
+	out=${target%%:*} size=${target#*:}
+	# shellcheck disable=SC2086
+	"$BIN/x86_64-linux-android$API-clang" -O2 -pthread -Wall -Wextra -Werror -DIPU6_GPU $size \
+		-ffile-prefix-map="$ROOT/=" -ffile-prefix-map="$NDK/=ndk/" \
+		-o "$out" kernel/ipu6-loopback.c -lm -ldl
+	"$BIN/llvm-strip" "$out"
+	if strings -n 6 "$out" | grep -q -e "$HOME" -e /home/; then
+		echo "$out embeds a local path" >&2
+		exit 1
+	fi
+done
+file "$OUT640"
 file "$OUT"

@@ -91,9 +91,17 @@ public:
 		properties_.set(properties::PixelArraySize, max);
 		properties_.set(properties::PixelArrayActiveAreas, { Rectangle(max) });
 
+		/*
+		 * Google's HAL claims FULL level for every libcamera camera (camera_capabilities.cpp:
+		 * "force switch to full mode"), so it also claims MANUAL_SENSOR. Boot-17: the camera app
+		 * stalled before opening any camera; without ExposureTime the HAL leaves out
+		 * SENSOR_INFO_EXPOSURE_TIME_RANGE, which a FULL camera must have. AnalogueGain stays out:
+		 * the HAL then reports a valid default sensitivity range (32..2400).
+		 */
 		ControlInfoMap::Map controls;
 		controls[&controls::FrameDurationLimits] =
 			ControlInfo(kFrameDurationUs, kFrameDurationUs, kFrameDurationUs);
+		controls[&controls::ExposureTime] = ControlInfo(100, 66666, 33333);
 		controlInfo_ = ControlInfoMap(std::move(controls), controls::controls);
 	}
 

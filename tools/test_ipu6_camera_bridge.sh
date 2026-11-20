@@ -68,8 +68,19 @@ if sed -n "${rear_start},${hal_restart}p" "$BRIDGE" | grep -q 'exit'; then
     exit 1
 fi
 grep -Fq '[ "$(cfg CAMERA_REAR)" = 0 ] && REAR=0' "$BRIDGE"
+# With the libcamera plugins on, the USB rear stays off (its public ID 1 clashed on boot-17).
+rear_block=$(awk '/^REAR=1$/ { on = 1 } on { print } on && /^fi$/ { exit }' "$BRIDGE")
+rear_with() {	# CAMERA_REAR, CAMERA_LIBCAMERA -> REAR
+    (
+        cfg() { case "$1" in CAMERA_REAR) printf '%s' "$c_rear" ;; CAMERA_LIBCAMERA) printf '%s' "$c_lc" ;; esac; }
+        c_rear=$1 c_lc=$2
+        eval "$rear_block" >/dev/null
+        echo "$REAR"
+    )
+}
+[ "$(rear_with '' '')" = 1 ] && [ "$(rear_with '' 1)" = 0 ] && [ "$(rear_with 0 '')" = 0 ] && [ "$(rear_with '' 0)" = 1 ]
 # The front keeps its USB identity (Google lists 0408:4052 as FACING_FRONT).
-grep -Fq 'expose_uvc 64 /postinstall/gbos/surface/latitude_fake_uvc_desc.bin "$FAKE_DIR" 0408 4052' "$BRIDGE"
+grep -Fq 'expose_uvc 64 "$FRONT_DESC" "$FAKE_DIR" 0408 4052' "$BRIDGE"
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
@@ -233,6 +244,30 @@ calls=$(run_plugins 0)
 rm -f "$tmp/plugins/gbos_test.so"
 calls=$(run_plugins 1)
 ! echo "$calls" | grep -q '^mount\|^stop\|^start'
+
+# Output size: CAMERA_SIZE picks bridge builds, loopback bounds and descriptors together; the
+# files it names exist in usb/.
+size_block=$(awk '/^# --- output size/ { on = 1; next } /^# --- end of output size/ { exit } on { print }' "$BRIDGE")
+size_of() {	# CAMERA_SIZE value -> "W H SIZE_DIR FRONT_DESC REAR_DESC"
+    (
+        cfg() { [ "$1" = CAMERA_SIZE ] && printf '%s' "$cfg_size"; }
+        cfg_size=$1
+        eval "$size_block" >/dev/null
+        echo "$OUT_W $OUT_H $SIZE_DIR $FRONT_DESC $REAR_DESC"
+    )
+}
+S=/postinstall/gbos/surface
+[ "$(size_of '')" = "1280 960  $S/latitude_fake_uvc_desc.bin $S/latitude_rear_fake_uvc_desc.bin" ]
+[ "$(size_of 1280x960)" = "$(size_of '')" ]
+[ "$(size_of 640x480)" = "640 480 /640x480 $S/latitude_fake_uvc_desc-640x480.bin $S/latitude_rear_fake_uvc_desc-640x480.bin" ]
+[ "$(size_of 800x600)" = "$(size_of '')" ]
+grep -Fq 'BRIDGE_CPU=/postinstall/gbos/installer/bin$SIZE_DIR/ipu6-loopback' "$BRIDGE"
+grep -Fq 'BRIDGE_GPU=/postinstall/gbos/installer/bin$SIZE_DIR/vulkan/ipu6-loopback' "$BRIDGE"
+for f in installer/bin/640x480/ipu6-loopback installer/bin/640x480/vulkan/ipu6-loopback \
+	 surface/latitude_fake_uvc_desc-640x480.bin surface/latitude_rear_fake_uvc_desc-640x480.bin; do
+    [ -s "$ROOT/usb/$f" ]
+done
+[ -x "$ROOT/usb/installer/bin/640x480/ipu6-loopback" ] && [ -x "$ROOT/usb/installer/bin/640x480/vulkan/ipu6-loopback" ]
 
 # Front uevent: byte-identical to the one the launcher wrote before the rear camera existed.
 cat > "$tmp/front.expected" <<'EOF'

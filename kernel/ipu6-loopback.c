@@ -17,8 +17,10 @@
  * takes its brightness detail from the green sites (half of all sites, a checkerboard on both
  * sensors) at full output resolution. See convert_bayer_yuyv.
  */
+#ifndef OUT_WIDTH	/* -DOUT_WIDTH=640 -DOUT_HEIGHT=480: the CAMERA_SIZE=640x480 fallback build */
 #define OUT_WIDTH 1280
 #define OUT_HEIGHT 960
+#endif
 #define COL_WIDTH (OUT_WIDTH / 2)
 #define COL_HEIGHT (OUT_HEIGHT / 2)
 #define OUT_FOURCC V4L2_PIX_FMT_YUYV

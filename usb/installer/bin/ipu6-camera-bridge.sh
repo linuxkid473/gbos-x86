@@ -20,7 +20,6 @@ REAR_LABEL=GBOS_IPU6_Rear_Camera
 # which Google's internal_usb_camera_info.txtpb lists as FACING_FRONT; the rear entry is added below.
 REAR_USB_VID=1209
 REAR_USB_PID=0001
-REAR_DESC=/postinstall/gbos/surface/latitude_rear_fake_uvc_desc.bin
 CAMERA_INFO=/vendor/etc/camera/internal_usb_camera_info.txtpb
 echo "=== Latitude 7320 IPU6 camera bridge $(date) ==="
 
@@ -28,17 +27,41 @@ if ! grep -qx 'Latitude 7320 Detachable' /sys/class/dmi/id/product_name 2>/dev/n
     echo "Not Latitude 7320 Detachable; refusing to start"
     exit 0
 fi
-if [ ! -s /postinstall/gbos/surface/latitude_fake_uvc_desc.bin ]; then
-    echo "ERROR: missing UVC descriptors"
-    exit 1
-fi
 
 # gbos.cfg is read for a few keys only (sourcing it would let its names clash with this script's).
 cfg() {
     sed -n "s/^$1=//p" /postinstall/gbos/gbos.cfg 2>/dev/null | tail -n 1 | tr -d '\r'
 }
+
+# Output size. 1280x960 since 2026-11-20; CAMERA_SIZE=640x480 in gbos.cfg selects the previous size
+# (bridge builds in installer/bin/640x480/, the 640x480 descriptors, matching loopback bounds) in case
+# an app cannot use 1280x960. Bridge, loopback bounds and descriptors must agree: the HAL takes the
+# size v4l2loopback lists.
+# --- output size (tools/test_ipu6_camera_bridge.sh runs this block) ---
+SURFACE=/postinstall/gbos/surface
+case "$(cfg CAMERA_SIZE)" in
+    640x480) OUT_W=640 OUT_H=480 SIZE_DIR=/640x480 DESC_SUFFIX=-640x480 ;;
+    ''|1280x960) OUT_W=1280 OUT_H=960 SIZE_DIR= DESC_SUFFIX= ;;
+    *) echo "WARNING: CAMERA_SIZE=$(cfg CAMERA_SIZE) is not 1280x960 or 640x480; using 1280x960"
+       OUT_W=1280 OUT_H=960 SIZE_DIR= DESC_SUFFIX= ;;
+esac
+FRONT_DESC=$SURFACE/latitude_fake_uvc_desc$DESC_SUFFIX.bin
+REAR_DESC=$SURFACE/latitude_rear_fake_uvc_desc$DESC_SUFFIX.bin
+# --- end of output size ---
+echo "camera output: ${OUT_W}x${OUT_H}"
+if [ ! -s "$FRONT_DESC" ]; then
+    echo "ERROR: missing UVC descriptor $FRONT_DESC"
+    exit 1
+fi
 REAR=1
 [ "$(cfg CAMERA_REAR)" = 0 ] && REAR=0
+# With the libcamera plugins on, the USB rear is not exposed: Google's adapter publishes the
+# libcamera camera as public ID 1 (device@1.0/legacy/1), and CameraService then rejected the USB
+# rear (device@1.0/usb/1, "ID 1 is already in use") on boot-17.
+if [ "$(cfg CAMERA_LIBCAMERA)" = 1 ] && [ "$REAR" = 1 ]; then
+    REAR=0
+    echo "rear USB camera: off while CAMERA_LIBCAMERA=1 (its ID would clash with the libcamera camera)"
+fi
 REAR_ROTATION=$(cfg CAMERA_REAR_ROTATION)
 case "$REAR_ROTATION" in
     ''|0) REAR_ROTATION=0 ;;
@@ -66,7 +89,7 @@ esac
 export IPU6_IDLE_STOP="$IDLE_STOP"
 
 if [ ! -e /dev/video64 ]; then
-    # One module load creates both devices; the bounds are module-wide. Min = max = 1280x960 (the
+    # One module load creates both devices; the bounds are module-wide. Min = max = OUT_W x OUT_H (the
     # bridge's OUT_WIDTH x OUT_HEIGHT): the HAL takes the largest size v4l2loopback lists, so it
     # must list only the one the bridge produces (the module's list has 1280x960 since 2026-11-20;
     # with an older module nothing would match).
@@ -76,13 +99,13 @@ if [ ! -e /dev/video64 ]; then
         set -- video_nr=64 "card_label=$LOOPBACK_LABEL" exclusive_caps=1
     fi
     insmod /postinstall/gbos/kmod/v4l2loopback.ko "$@" \
-        min_width=1280 max_width=1280 min_height=960 max_height=960 || {
+        min_width=$OUT_W max_width=$OUT_W min_height=$OUT_H max_height=$OUT_H || {
         status=$?
         echo "ERROR: v4l2loopback insmod failed (status $status)"
         exit "$status"
     }
 fi
-for setting in min_width:1280 max_width:1280 min_height:960 max_height:960; do
+for setting in min_width:$OUT_W max_width:$OUT_W min_height:$OUT_H max_height:$OUT_H; do
     parameter=${setting%:*}
     expected=${setting#*:}
     actual=$(cat "/sys/module/v4l2loopback/parameters/$parameter" 2>/dev/null) || {
@@ -332,7 +355,7 @@ wait_active() {
 
 prepare_node 64
 FAKE_DIR=/data/local/tmp/ipu6-camera-fake
-expose_uvc 64 /postinstall/gbos/surface/latitude_fake_uvc_desc.bin "$FAKE_DIR" 0408 4052
+expose_uvc 64 "$FRONT_DESC" "$FAKE_DIR" 0408 4052
 [ "$?" = 2 ] && exit 1
 
 # OV5678_WINDOWS_ISP=1 in gbos.cfg: the front sensor gets the Windows driver's
@@ -351,8 +374,8 @@ elif [ -e "$WINISP" ]; then
     echo "OV5678 Windows ISP values: off"
 fi
 
-BRIDGE_CPU=/postinstall/gbos/installer/bin/ipu6-loopback
-BRIDGE_GPU=/postinstall/gbos/installer/bin/vulkan/ipu6-loopback
+BRIDGE_CPU=/postinstall/gbos/installer/bin$SIZE_DIR/ipu6-loopback
+BRIDGE_GPU=/postinstall/gbos/installer/bin$SIZE_DIR/vulkan/ipu6-loopback
 if [ ! -x "$BRIDGE_CPU" ]; then
     echo "ERROR: missing IPU6 loopback bridge binary"
     exit 1

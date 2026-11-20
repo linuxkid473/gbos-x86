@@ -2,12 +2,13 @@
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 docker run --rm --network none -v "$ROOT:/repo" -w /repo gbos-kbuild \
-	sh -c 'gcc -O2 -Wall -Wextra -Werror -pthread -o /tmp/test-ipulb tools/test_ipu6_loopback.c -lm && /tmp/test-ipulb && gcc -O2 -Wall -Wextra -Werror -o /tmp/test-sizes tools/test_v4l2loopback_framesizes.c && /tmp/test-sizes'
+	sh -c 'gcc -O2 -Wall -Wextra -Werror -pthread -o /tmp/test-ipulb tools/test_ipu6_loopback.c -lm && /tmp/test-ipulb &&
+	       gcc -O2 -Wall -Wextra -Werror -pthread -DOUT_WIDTH=640 -DOUT_HEIGHT=480 -o /tmp/test-ipulb-640 tools/test_ipu6_loopback.c -lm && /tmp/test-ipulb-640 && gcc -O2 -Wall -Wextra -Werror -o /tmp/test-sizes tools/test_v4l2loopback_framesizes.c && /tmp/test-sizes'
 sh -n "$ROOT/usb/installer/bin/ipu6-camera-bridge.sh" \
 	"$ROOT/usb/surface/surface-camera.sh" "$ROOT/tools/build_ipu6_loopback.sh"
 grep -q 'CAMERA_BRIDGE=0' "$ROOT/usb/gbos.cfg"
 grep -q 'video_nr=64' "$ROOT/usb/installer/bin/ipu6-camera-bridge.sh"
-grep -q 'min_width=1280 max_width=1280 min_height=960 max_height=960' "$ROOT/usb/installer/bin/ipu6-camera-bridge.sh"
+grep -Fq 'min_width=$OUT_W max_width=$OUT_W min_height=$OUT_H max_height=$OUT_H' "$ROOT/usb/installer/bin/ipu6-camera-bridge.sh"
 # The bridge's output size is what the launcher's bounds and the descriptors say.
 grep -q '^#define OUT_WIDTH 1280$' "$ROOT/kernel/ipu6-loopback.c"
 grep -q '^#define OUT_HEIGHT 960$' "$ROOT/kernel/ipu6-loopback.c"
@@ -15,7 +16,7 @@ grep -q '"$BRIDGE" /dev/media0 /dev/video64' "$ROOT/usb/installer/bin/ipu6-camer
 grep -q 'wait "$BRIDGE_PID"' "$ROOT/usb/installer/bin/ipu6-camera-bridge.sh"
 grep -q '/sys/module/ov5675/parameters/gbos_windows_isp' "$ROOT/usb/installer/bin/ipu6-camera-bridge.sh"
 grep -q '^OV5678_WINDOWS_ISP=0' "$ROOT/usb/gbos.cfg"
-grep -q 'latitude_fake_uvc_desc.bin' "$ROOT/usb/installer/bin/ipu6-camera-bridge.sh"
+grep -Fq 'latitude_fake_uvc_desc$DESC_SUFFIX.bin' "$ROOT/usb/installer/bin/ipu6-camera-bridge.sh"
 if grep -q 'nohup.*ipu6-loopback' "$ROOT/usb/installer/bin/ipu6-camera-bridge.sh"; then
 	echo "IPU6 bridge must stay in the init service process group" >&2
 	exit 1
@@ -31,6 +32,12 @@ cmp -s "$tmp_desc" "$ROOT/usb/surface/latitude_fake_uvc_desc.bin"
 python3 "$ROOT/tools/make_latitude_uvc_desc.py" --usb-id 1209:0001 \
 	"$ROOT/usb/surface/fake_uvc_desc.bin" "$tmp_desc"
 cmp -s "$tmp_desc" "$ROOT/usb/surface/latitude_rear_fake_uvc_desc.bin"
+# CAMERA_SIZE=640x480 fallback: the same descriptors with a single 640x480 frame.
+python3 "$ROOT/tools/make_latitude_uvc_desc.py" --size 640x480 "$ROOT/usb/surface/fake_uvc_desc.bin" "$tmp_desc"
+cmp -s "$tmp_desc" "$ROOT/usb/surface/latitude_fake_uvc_desc-640x480.bin"
+python3 "$ROOT/tools/make_latitude_uvc_desc.py" --size 640x480 --usb-id 1209:0001 \
+	"$ROOT/usb/surface/fake_uvc_desc.bin" "$tmp_desc"
+cmp -s "$tmp_desc" "$ROOT/usb/surface/latitude_rear_fake_uvc_desc-640x480.bin"
 grep -q 'latitude_rear_fake_uvc_desc.bin' "$ROOT/tools/make_gbos86_image.sh"
 grep -q '^REAR_USB_VID=1209$' "$ROOT/usb/installer/bin/ipu6-camera-bridge.sh"
 grep -q '^REAR_USB_PID=0001$' "$ROOT/usb/installer/bin/ipu6-camera-bridge.sh"
