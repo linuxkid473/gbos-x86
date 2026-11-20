@@ -1,9 +1,17 @@
 #!/usr/bin/env python3
-"""Create a Latitude 7320 UVC descriptor matching the fixed loopback mode."""
+"""Create a Latitude 7320 UVC descriptor matching the fixed loopback mode.
+
+The shared descriptor's 640x480 YUY2 frame is kept as the only frame and resized to the
+bridge's output (1280x960 since 2026-11-20: OUT_WIDTH/OUT_HEIGHT in kernel/ipu6-loopback.c),
+with its bit rates and frame buffer size recomputed for 30 fps.
+"""
 
 import argparse
 import struct
 from pathlib import Path
+
+OUTPUT_SIZE = (1280, 960)
+FPS = 30
 
 
 def descriptors(data: bytes, start: int, end: int):
@@ -19,7 +27,7 @@ def descriptors(data: bytes, start: int, end: int):
         offset += length
 
 
-def generate(data: bytes) -> bytes:
+def generate(data: bytes, size=OUTPUT_SIZE) -> bytes:
     config_offset = 18
     if len(data) < config_offset + 9 or data[config_offset + 1] != 0x02:
         raise ValueError("missing USB configuration descriptor")
@@ -76,6 +84,11 @@ def generate(data: bytes) -> bytes:
             continue
         if offset == target_offset:
             desc[3] = 1
+            width, height = size
+            frame_bytes = width * height * 2  # YUY2
+            # wWidth, wHeight, dwMinBitRate, dwMaxBitRate, dwMaxVideoFrameBufferSize
+            struct.pack_into("<HHIII", desc, 5, width, height, frame_bytes * 8 * FPS,
+                             frame_bytes * 8 * FPS, frame_bytes)
         if offset == format_offset:
             desc[4] = 1
         if offset == header_offset:
@@ -117,8 +130,8 @@ def generate(data: bytes) -> bytes:
         for offset, desc in result_descs
         if desc[1] == 0x24 and len(desc) == 14 and desc[2] == 0x01
     ]
-    if len(result_frames) != 1 or struct.unpack_from("<HH", result_frames[0], 5) != (640, 480):
-        raise ValueError("generated descriptor does not expose only 640x480")
+    if len(result_frames) != 1 or struct.unpack_from("<HH", result_frames[0], 5) != tuple(size):
+        raise ValueError(f"generated descriptor does not expose only {size[0]}x{size[1]}")
     if len(result_formats) != 1 or len(result_headers) != 1:
         raise ValueError("generated format/header descriptors are inconsistent")
     if result_frames[0][3] != 1 or result_formats[0][4] != 1:

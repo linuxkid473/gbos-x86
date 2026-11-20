@@ -188,6 +188,7 @@ static int uniform_frame_worst_chroma(int rgbir, unsigned int ir, int *luma)
 		for (unsigned int x = 0; x < width; x++)
 			frame[(size_t)y * width + x] =
 				(uint16_t[]){ uniform_levels[0], uniform_levels[1], uniform_levels[2], (uint16_t)ir }[channel_at(x, y)];
+	tnr_reset();	/* no blending with an earlier test's picture */
 	if (convert_bayer_yuyv(frame, width, height, width * 2, out, sizeof(out), NULL)) {
 		free(frame);
 		return 999;
@@ -234,6 +235,7 @@ static int test_ir_subtraction(void)
 				frame[y * width + x] = channel_at(x, y) == CFA_IR ?
 					(uint16_t)(BLACK_LEVEL + (ir ? 300 : 0)) :
 					(uint16_t)(BLACK_LEVEL + 400 + (ir ? 300 : 0));
+		tnr_reset();	/* compare the two frames, not a blend */
 		if (convert_bayer_yuyv(frame, width, height, width * 2, out, sizeof(out), NULL))
 			return 2;
 		for (size_t i = 0; i < OUT_FRAME_BYTES; i += 2)
@@ -317,7 +319,7 @@ static int test_saturation(void)
 		tnr_reset();
 		if (convert_bayer_yuyv(frame, 64, 64, 128, out, sizeof(out), NULL))
 			return 1;
-		v[i] = out[(240 * OUT_WIDTH + 100) * 2 + 3] - 128;	/* warm half: V > 0 */
+		v[i] = out[((OUT_HEIGHT / 2) * OUT_WIDTH + OUT_WIDTH / 8) * 2 + 3] - 128;	/* warm half: V > 0 */
 	}
 	saturation_q12 = saved_s; chroma_radius = saved_r;
 	return v[0] > 0 && v[1] > v[0] + 2 ? 0 : 2;
@@ -372,7 +374,7 @@ static int luma_after(unsigned int first, unsigned int second, int filtered)
 	}
 	grey_level = second; fill_bayer(frame, 64, 64, flat_grey);
 	convert_bayer_yuyv(frame, 64, 64, 128, out, sizeof(out), NULL);
-	return out[(240 * OUT_WIDTH + 320) * 2];
+	return out[((OUT_HEIGHT / 2) * OUT_WIDTH + OUT_WIDTH / 2) * 2];
 }
 
 static int test_temporal_filter(void)
@@ -481,7 +483,7 @@ static int test_lens_shading(void)
 	update_lsc(0.9, 0.45, w, h);
 	if (!lsc_active || lsc_pick[0] != 1 || lsc_strength != 1.0)
 		return 3;
-	double centre = lsc_map[1][OUT_HEIGHT / 2][OUT_WIDTH / 2] / 4096.0;
+	double centre = lsc_map[1][COL_HEIGHT / 2][COL_WIDTH / 2] / 4096.0;
 	double corner = lsc_map[0][0][0] / 4096.0;
 	if (centre < 0.98 || centre > 1.03 || corner < 3.7 || corner > 4.05)
 		return 4;
@@ -538,7 +540,7 @@ static int clipped_frame(unsigned int r, unsigned int g, unsigned int b, unsigne
 	tnr_reset();
 	if (convert_bayer_yuyv(frame, 64, 64, 128, out, sizeof(out), NULL))
 		return -1;
-	size_t at = (240 * OUT_WIDTH + 320) * 2;
+	size_t at = ((OUT_HEIGHT / 2) * OUT_WIDTH + OUT_WIDTH / 2) * 2;
 	*luma = out[at]; *u = out[at + 1] - 128; *v = out[at + 3] - 128;
 	return 0;
 }
@@ -950,7 +952,7 @@ static void rgbir_test_chroma(int mode, int radius, double gain, double *a, doub
 			int v = out[((size_t)y * OUT_WIDTH + x) * 2 + 3] - 128;
 			if (mode == 0) {
 				su += u; sv += v; n++;
-			} else if (x >= 310 && x <= 330) {
+			} else if (x >= OUT_WIDTH / 2 - 20 && x <= OUT_WIDTH / 2 + 20) {
 				if (abs(u) > mx) mx = abs(u);
 				if (abs(v) > mx) mx = abs(v);
 			}
@@ -973,8 +975,12 @@ static int test_noise_colour_bias(void)
 	rgbir_test_chroma(0, 2, 17.5, &u, &v);
 	if (fabs(u) > 1.0 || fabs(v) > 1.0)
 		return 1;
-	rgbir_test_chroma(0, 0, 17.5, &u, &v);	/* negative control */
-	if (u > -2.0 || v > -1.0)
+	/*
+	 * Negative control. Since the 1280x960 output each output pixel interpolates the colour
+	 * grid in linear light, which already halves this bias (was U -2.5 at 640x480).
+	 */
+	rgbir_test_chroma(0, 0, 17.5, &u, &v);
+	if (u > -0.8 || v > -0.8)
 		return 2;
 	return 0;
 }
@@ -985,7 +991,9 @@ static int test_edge_colour(void)
 	double hi, lo, unused;
 
 	rgbir_test_chroma(1, 2, 17.5, &lo, &unused);
+	chroma_guard = 0;	/* the window guard (boot-15) also fades this fringe */
 	rgbir_test_chroma(1, 0, 17.5, &hi, &unused);
+	chroma_guard = 1;
 	return lo <= 2 && hi >= lo + 3 ? 0 : 1;
 }
 
@@ -1277,6 +1285,193 @@ static int test_green_scene_not_light(void)
 	else if (!result && fabs(hypot(wb_white_rg - 0.30, wb_white_bg - 0.25)) < 0.1)
 		result = 7;	/* pulled to the locus band, not trusted */
 	restore_colour_defaults(nir_keep_q12[2], wb_locus_nir_band);
+	return result;
+}
+
+/*
+ * 2026-11-20 (boot-15): output 1280x960 with brightness detail from the green sites; colour
+ * guard for NIR-dominated windows and for stripes; k_B 0.75.
+ */
+
+/* Grey vertical stripes (front RGB-IR levels), bright 1.7x and dark 0.3x, `period` sensor pixels. */
+static void stripe_frame(uint16_t *f, unsigned int w, unsigned int h, unsigned int period)
+{
+	static const double grey[4] = { 110, 170, 90, 17 };
+
+	for (unsigned int y = 0; y < h; y++)
+		for (unsigned int x = 0; x < w; x++)
+			f[(size_t)y * w + x] = (uint16_t)(BLACK_LEVEL +
+				grey[channel_at(x, y)] * (((x / (period / 2)) & 1) ? 1.7 : 0.3));
+}
+
+/* Centre half of the output: luma standard deviation and mean chroma magnitude. */
+static void centre_stats(const unsigned char *o, double *luma_sd, double *chroma)
+{
+	double s = 0, q = 0, n = 0, c = 0, cn = 0;
+
+	for (int y = OUT_HEIGHT / 4; y < OUT_HEIGHT * 3 / 4; y++)
+		for (int x = OUT_WIDTH / 4; x < OUT_WIDTH * 3 / 4; x += 2) {
+			size_t at = ((size_t)y * OUT_WIDTH + x) * 2;
+			for (int k = 0; k < 2; k++) {
+				double v = o[at + 2 * k];
+				s += v; q += v * v; n++;
+			}
+			c += hypot(o[at + 1] - 128, o[at + 3] - 128);
+			cn++;
+		}
+	*luma_sd = sqrt(q / n - (s / n) * (s / n));
+	*chroma = c / cn;
+}
+
+static int convert_stripes(unsigned int period, double *luma_sd, double *chroma)
+{
+	const unsigned int w = 2592, h = 1944;
+	static unsigned char out[OUT_FRAME_BYTES];
+	uint16_t *f = malloc((size_t)w * h * sizeof(*f));
+
+	if (!f)
+		return -1;
+	set_rgbir_pattern();
+	stripe_frame(f, w, h, period);
+	for (int k = 0; k < 3; k++) {
+		tnr_reset();
+		convert_bayer_yuyv(f, w, h, w * 2, out, sizeof(out), NULL);
+	}
+	free(f);
+	centre_stats(out, luma_sd, chroma);
+	return 0;
+}
+
+/*
+ * Resolution: stripes 4 sensor pixels apart (2 output pixels at 1280 wide) show in the output.
+ * Negative control: colour-grid brightness only (each output pixel from a 4x4 window, as the
+ * 640x480 output was) averages them away completely.
+ */
+static int test_detail_stripes(void)
+{
+	double sd, c, sd_off;
+	int result = 0;
+
+	if (load_test_locus() || convert_stripes(4, &sd, &c))
+		return 1;
+	detail_enabled = 0;
+	if (convert_stripes(4, &sd_off, &c))
+		result = 2;
+	detail_enabled = 1;
+	if (!result && !(sd > 15 && sd_off < 3))
+		result = 3;
+	restore_colour_defaults(nir_keep_q12[2], wb_locus_nir_band);
+	return result;
+}
+
+/*
+ * Window blinds: grey stripes 6 sensor pixels apart put green and magenta fringes into every
+ * 4x4 window (its 2 R and 2 B sites see other stripes than its greens). The stripe guard
+ * fades them; negative control without it.
+ */
+static int test_stripe_fringes(void)
+{
+	double sd, c, c_off;
+	int result = 0;
+
+	if (load_test_locus() || convert_stripes(6, &sd, &c))
+		return 1;
+	chroma_guard = 0;
+	if (convert_stripes(6, &sd, &c_off))
+		result = 2;
+	chroma_guard = 1;
+	if (!result && !(c < 9 && c_off > 18))
+		result = 3;
+	restore_colour_defaults(nir_keep_q12[2], wb_locus_nir_band);
+	return result;
+}
+
+/*
+ * The detail touches brightness only: on 12 colour patches (front RGB-IR, test locus) each
+ * patch's mean U and V are the same with and without it.
+ */
+static int test_detail_keeps_colour(void)
+{
+	const unsigned int w = 1296, h = 972;
+	static unsigned char out[2][OUT_FRAME_BYTES];
+	static const double patch[12][3] = {
+		{ 160, 60, 40 }, { 60, 160, 50 }, { 50, 70, 160 }, { 150, 150, 40 },
+		{ 40, 150, 150 }, { 150, 50, 150 }, { 120, 120, 120 }, { 60, 60, 60 },
+		{ 200, 130, 90 }, { 90, 130, 60 }, { 70, 90, 130 }, { 180, 180, 180 },
+	};
+	uint16_t *f = malloc((size_t)w * h * sizeof(*f));
+	unsigned int state = 3;
+	int result = 0;
+
+	if (!f || load_test_locus()) {
+		free(f);
+		return 1;
+	}
+	set_rgbir_pattern();
+	for (unsigned int y = 0; y < h; y++)
+		for (unsigned int x = 0; x < w; x++) {
+			const double *p = patch[(y * 3 / h) * 4 + x * 4 / w];
+			int ch = channel_at(x, y);
+			state = state * 1103515245u + 12345u;
+			double v = (ch == CFA_IR ? 0 : p[ch] * 0.9) + 0.1 * p[1] + ((state >> 16) % 9) - 4.0;
+			f[(size_t)y * w + x] = (uint16_t)(BLACK_LEVEL + v);
+		}
+	for (int pass = 0; pass < 2; pass++) {
+		detail_enabled = !pass;
+		for (int k = 0; k < 3; k++) {
+			tnr_reset();
+			convert_bayer_yuyv(f, w, h, w * 2, out[pass], OUT_FRAME_BYTES, NULL);
+		}
+	}
+	detail_enabled = 1;
+	free(f);
+	for (int b = 0; b < 12 && !result; b++) {
+		double du = 0, dv = 0, n = 0;
+		unsigned int bx = (unsigned int)(b % 4) * OUT_WIDTH / 4, by = (unsigned int)(b / 4) * OUT_HEIGHT / 3;
+		for (unsigned int y = by + 24; y < by + OUT_HEIGHT / 3 - 24; y++)
+			for (unsigned int x = bx + 24; x < bx + OUT_WIDTH / 4 - 24; x += 2) {
+				size_t at = ((size_t)y * OUT_WIDTH + x) * 2;
+				du += out[0][at + 1] - out[1][at + 1];
+				dv += out[0][at + 3] - out[1][at + 3];
+				n++;
+			}
+		if (fabs(du / n) > 0.6 || fabs(dv / n) > 0.6)
+			result = 2;
+	}
+	restore_colour_defaults(nir_keep_q12[2], wb_locus_nir_band);
+	return result;
+}
+
+/*
+ * Boot-15: a dark green T-shirt came out teal by the sunny window. Model: a dark green patch
+ * (visible R/G 0.3, B/G 0.35) that reflects 3x more NIR than visible green, over a daylight
+ * grey with NIR 0.4 of green; the sensor's blue NIR response is 0.75. With k_B 0.75 the patch
+ * stays green (U and V well below 0). Negative control: the old k_B 0.60 turns it teal (U > 0).
+ */
+static void nir_sites(double *o, double r, double g, double b, double n, double kb)
+{
+	o[0] = r + 0.1 * g + n;
+	o[1] = g + 0.1 * g + n;
+	o[2] = b + 0.1 * g + kb * n;
+	o[3] = 0.1 * g + n;
+}
+
+static int test_nir_dark_green(void)
+{
+	struct rgbir_scene sc = { { 0 }, { 0 }, 972 / 3, 0, 8.0, 2.0 };
+	struct scene_result r;
+	int keep = nir_keep_q12[2], result = 0;
+
+	nir_sites(sc.level, 75, 150, 97.5, 60, 0.75);
+	nir_sites(sc.top, 12, 40, 14, 120, 0.75);
+	if (load_test_locus() || run_rgbir_scene(&sc, &r))
+		return 1;
+	if (!(r.top_u < -8 && r.top_v < -6) || fabs(r.u) > 1.5 || fabs(r.v) > 1.5)
+		result = 2;
+	nir_keep_q12[2] = 1638;		/* k_B 0.60 */
+	if (!result && (run_rgbir_scene(&sc, &r) || !(r.top_u > 0)))
+		result = 3;
+	restore_colour_defaults(keep, wb_locus_nir_band);
 	return result;
 }
 
@@ -1730,6 +1925,14 @@ int main(void)
 			return printf("test_green_side_light %d\n", r), 1;
 		if ((r = test_green_scene_not_light()))
 			return printf("test_green_scene_not_light %d\n", r), 1;
+		if ((r = test_detail_stripes()))
+			return printf("test_detail_stripes %d\n", r), 1;
+		if ((r = test_stripe_fringes()))
+			return printf("test_stripe_fringes %d\n", r), 1;
+		if ((r = test_detail_keeps_colour()))
+			return printf("test_detail_keeps_colour %d\n", r), 1;
+		if ((r = test_nir_dark_green()))
+			return printf("test_nir_dark_green %d\n", r), 1;
 		if ((r = test_clipped_sky()))
 			return printf("test_clipped_sky %d\n", r), 280 + r;
 		if ((r = test_soft_clip()))

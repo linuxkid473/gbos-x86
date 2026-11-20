@@ -2,12 +2,15 @@
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 docker run --rm --network none -v "$ROOT:/repo" -w /repo gbos-kbuild \
-	sh -c 'gcc -O2 -Wall -Wextra -Werror -o /tmp/test-ipulb tools/test_ipu6_loopback.c -lm && /tmp/test-ipulb && gcc -O2 -Wall -Wextra -Werror -o /tmp/test-sizes tools/test_v4l2loopback_framesizes.c && /tmp/test-sizes'
+	sh -c 'gcc -O2 -Wall -Wextra -Werror -pthread -o /tmp/test-ipulb tools/test_ipu6_loopback.c -lm && /tmp/test-ipulb && gcc -O2 -Wall -Wextra -Werror -o /tmp/test-sizes tools/test_v4l2loopback_framesizes.c && /tmp/test-sizes'
 sh -n "$ROOT/usb/installer/bin/ipu6-camera-bridge.sh" \
 	"$ROOT/usb/surface/surface-camera.sh" "$ROOT/tools/build_ipu6_loopback.sh"
 grep -q 'CAMERA_BRIDGE=0' "$ROOT/usb/gbos.cfg"
 grep -q 'video_nr=64' "$ROOT/usb/installer/bin/ipu6-camera-bridge.sh"
-grep -q 'min_width=640 max_width=640 min_height=480 max_height=480' "$ROOT/usb/installer/bin/ipu6-camera-bridge.sh"
+grep -q 'min_width=1280 max_width=1280 min_height=960 max_height=960' "$ROOT/usb/installer/bin/ipu6-camera-bridge.sh"
+# The bridge's output size is what the launcher's bounds and the descriptors say.
+grep -q '^#define OUT_WIDTH 1280$' "$ROOT/kernel/ipu6-loopback.c"
+grep -q '^#define OUT_HEIGHT 960$' "$ROOT/kernel/ipu6-loopback.c"
 grep -q '"$BRIDGE" /dev/media0 /dev/video64' "$ROOT/usb/installer/bin/ipu6-camera-bridge.sh"
 grep -q 'wait "$BRIDGE_PID"' "$ROOT/usb/installer/bin/ipu6-camera-bridge.sh"
 grep -q '/sys/module/ov5675/parameters/gbos_windows_isp' "$ROOT/usb/installer/bin/ipu6-camera-bridge.sh"
@@ -24,7 +27,7 @@ trap 'rm -f "$tmp_desc"' EXIT HUP INT TERM
 python3 "$ROOT/tools/make_latitude_uvc_desc.py" \
 	"$ROOT/usb/surface/fake_uvc_desc.bin" "$tmp_desc"
 cmp -s "$tmp_desc" "$ROOT/usb/surface/latitude_fake_uvc_desc.bin"
-# Rear camera: same 640x480 descriptor, its own USB id (the launcher's REAR_USB_VID/PID).
+# Rear camera: same 1280x960 descriptor, its own USB id (the launcher's REAR_USB_VID/PID).
 python3 "$ROOT/tools/make_latitude_uvc_desc.py" --usb-id 1209:0001 \
 	"$ROOT/usb/surface/fake_uvc_desc.bin" "$tmp_desc"
 cmp -s "$tmp_desc" "$ROOT/usb/surface/latitude_rear_fake_uvc_desc.bin"

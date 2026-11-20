@@ -1078,3 +1078,36 @@ SHA-NI, 256-bit VAES/VPCLMULQDQ, AVX-IFMA and AVX-512; the lapis binaries use th
     - `test_green_scene_not_light`: foliage regions are left out; the zone off tints the grey; foliage alone never opens the green side.
     - The daylight test's old-bridge controls now also switch the zone off.
   - Unverified on hardware: other lights, and pale green walls, which any grey-world AWB will neutralise.
+- 2026-11-20 **Boot-15 front colour in strong NIR, and 1280×960 output for both cameras (host-tested only, not deployed).** Bridge `dc9c4595…`, launcher `03bf261c…`, `usb/kmod/v4l2loopback.ko` `8a2cb95e…`, descriptors front `b974b2d0…` / rear `6dc902c0…`.
+  - *Colour, cause:* the frame's white balance was close (white ceiling near neutral), but things that reflect much NIR were too blue: a dark green T-shirt came out teal, a dark teal wall navy, skin pinkish.
+    - Dark dyes and paints reflect little visible light but a lot of NIR, so in those windows NIR is several times the visible green, and any error in the blue NIR term is multiplied.
+    - k_B = 0.60 was fitted assuming daylight sits on the locus. Boot-14 showed real lights 0.10–0.14 off it on the green side.
+    - Host simulation: a sensor with k_B 0.75 under the 0.60 model gives exactly the teal shirt.
+    - Refit: with k_B = 0.75, boot-12's daylight frames sit on the locus (0.00–0.03; at 0.60 they were 0.04 on the magenta side), and boot-8's sit 0.07 on the green side, inside the green-side zone.
+    - k_R stays 1: boot-15's frames that wanted less were mostly the green shirt.
+  - *Colour, fix (front only):*
+    - k_B = 0.75.
+    - A colour guard per 4x4 window fades colour where NIR is more than 1.5 above the frame's own ratio (half kept at +3). That is a safety net: a correctly measured NIR-rich green keeps about 75%.
+    - The same guard fades colour where the window's 8 greens disagree strongly (contrast > 0.25, down to 15% at 0.75): stripes and sharp edges, where the 2 R and 2 B sites see other parts of the pattern. These were the blinds' green and magenta fringes. Stripes 6 px apart: mean chroma 25 → 7.
+  - *Resolution:*
+    - The bridge's 640×480 output came from one 4x4 window per pixel (about every 4 sensor pixels), so real detail was about 650×490 whatever the output size, and fine stripes aliased.
+    - The output is now 1280×960 (4:3). Colour still comes from the same windows on a 640×480 grid. Each output pixel takes that grid's Y′U′V′ (bilinear) and scales Y′ by (its own green / the window's green)^(1/2.4), its green being the 2 green sites of its 2x2 block. Green is a checkerboard on both sensors.
+    - Detail is full up to 8x gain, falling to 0.4 at 32x (2 sites are noisier than 8).
+    - Colour vs the 640×480 converter, 2x2-averaged, on six scenes front and rear: bias ≤ 0.1 (≤ 0.4 on stripes). Stripes 4 px apart are lost without detail (luma sd 0) and resolved with it (sd 25).
+  - *Cost (this machine is the laptop, i7-1180G7):*
+    - The old converter at 640×480 took 27 ms per frame on one core.
+    - The new one at 1280×960 takes 27 ms (front) / 24 ms (rear) with 2 row-band threads per bridge. Both converting at once: 31 ms, inside the 33 ms of 30 fps. Normally only one camera has a consumer; the other runs statistics only.
+    - Changes: raw→linear lookup table, masked register sums per window, colour grid / colour mix / output pass in 2 bands, detail + temporal filter + YUYV packing fused into one pass.
+  - *HAL/size plumbing:*
+    - The USB HAL picks the largest size v4l2loopback enumerates, so the launcher pins min = max.
+    - The module's fixed list had no 4:3 size above 640×480, so `{1280, 960}` is appended (the generic six keep their order).
+    - v4l2loopback.ko was rebuilt in `gbos-ksrc` (bzImage = the stick's #62), stripped and signed with key 2F:5D…; vermagic and all symbol CRCs match the deployed #61/#62 module.
+    - Launcher bounds are now 1280×960. The front/rear fake UVC descriptors now hold one 1280×960 YUY2 frame (`tools/make_latitude_uvc_desc.py` resizes the 640×480 frame and recomputes bit rates).
+    - **Deploy bridge, launcher, module and both descriptors together:** with any old piece the HAL finds no matching size.
+  - Tests: detail resolves 4 px stripes (control without detail: none); stripe fringes (control without guard); colour unchanged by detail on 12 patches; NIR-rich dark green stays green with k_B 0.75 (control 0.60: teal); frame-size list with Latitude bounds; launcher bounds = bridge size. Host, ASan/UBSan, TSan, docker suites pass.
+  - Unverified on hardware:
+    - that the HAL takes 1280×960 YUYV and what extra CPU it spends;
+    - the real per-object NIR response;
+    - fringes on the real blinds;
+    - frame rate with both cameras;
+    - the higher memory (bridge planes ~16 MB, loopback 2.4 MB per buffer).

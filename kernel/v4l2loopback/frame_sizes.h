@@ -10,6 +10,8 @@ struct v4l2l_frame_size {
 static const struct v4l2l_frame_size v4l2l_frame_sizes[] = {
 	{ 1920, 1080 }, { 1280, 720 }, { 960, 540 },
 	{ 640, 480 }, { 640, 360 }, { 320, 240 },
+	/* Latitude 7320 cameras (4:3), last so the generic list keeps its order. */
+	{ 1280, 960 },
 };
 
 static int v4l2l_frame_size_at(unsigned int index, unsigned int min_width,

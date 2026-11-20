@@ -1,7 +1,7 @@
 #!/system/bin/sh
 # Latitude 7320 Detachable IPU6 camera bridges: front OV5678 (ov5675 driver) on /dev/video64 and
 # rear OV8856 on /dev/video65. Each sensor has its own ipu6-loopback process that converts raw
-# frames to 640x480 YUYV on a v4l2loopback device, exposed to Android's USB camera HAL through a
+# frames to 1280x960 YUYV on a v4l2loopback device, exposed to Android's USB camera HAL through a
 # fake UVC sysfs identity. The front is required; the rear is optional (CAMERA_REAR=0 in gbos.cfg
 # turns it off) and starts only once the front streams, so a rear failure never costs the front.
 set -u
@@ -66,20 +66,23 @@ esac
 export IPU6_IDLE_STOP="$IDLE_STOP"
 
 if [ ! -e /dev/video64 ]; then
-    # One module load creates both devices; the 640x480 bounds are module-wide.
+    # One module load creates both devices; the bounds are module-wide. Min = max = 1280x960 (the
+    # bridge's OUT_WIDTH x OUT_HEIGHT): the HAL takes the largest size v4l2loopback lists, so it
+    # must list only the one the bridge produces (the module's list has 1280x960 since 2026-11-20;
+    # with an older module nothing would match).
     if [ "$REAR" = 1 ]; then
         set -- video_nr=64,65 "card_label=$LOOPBACK_LABEL,$REAR_LABEL" exclusive_caps=1,1
     else
         set -- video_nr=64 "card_label=$LOOPBACK_LABEL" exclusive_caps=1
     fi
     insmod /postinstall/gbos/kmod/v4l2loopback.ko "$@" \
-        min_width=640 max_width=640 min_height=480 max_height=480 || {
+        min_width=1280 max_width=1280 min_height=960 max_height=960 || {
         status=$?
         echo "ERROR: v4l2loopback insmod failed (status $status)"
         exit "$status"
     }
 fi
-for setting in min_width:640 max_width:640 min_height:480 max_height:480; do
+for setting in min_width:1280 max_width:1280 min_height:960 max_height:960; do
     parameter=${setting%:*}
     expected=${setting#*:}
     actual=$(cat "/sys/module/v4l2loopback/parameters/$parameter" 2>/dev/null) || {

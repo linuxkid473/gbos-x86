@@ -3,6 +3,7 @@
 #include "../tools/camera_capture_probe.c"
 
 #include <math.h>
+#include <pthread.h>
 #include <signal.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
@@ -10,8 +11,16 @@
 #include <time.h>
 #include <unistd.h>
 
-#define OUT_WIDTH 640
-#define OUT_HEIGHT 480
+/*
+ * Output 1280x960 YUYV (4:3, the sensors' aspect). Colour is computed on a COL_WIDTH x
+ * COL_HEIGHT grid (one 4x4 mosaic window per point, as the 640x480 output was); the output
+ * takes its brightness detail from the green sites (half of all sites, a checkerboard on both
+ * sensors) at full output resolution. See convert_bayer_yuyv.
+ */
+#define OUT_WIDTH 1280
+#define OUT_HEIGHT 960
+#define COL_WIDTH (OUT_WIDTH / 2)
+#define COL_HEIGHT (OUT_HEIGHT / 2)
 #define OUT_FOURCC V4L2_PIX_FMT_YUYV
 #define OUT_FRAME_BYTES ((size_t)OUT_WIDTH * OUT_HEIGHT * 2)
 #define BLACK_LEVEL 64
@@ -81,9 +90,25 @@ static const unsigned char ov5675_rgbir[4][4] = {
 	{ 2, 1, 0, 1 },
 };
 
+/* Per-site channel masks and the per-channel site count of any 4x4 window (rgb_linear_at). */
+static uint32_t cfa_mask[4][4][4];
+static unsigned int cfa_count[4];
+
+static void cfa_changed(void)
+{
+	memset(cfa_count, 0, sizeof(cfa_count));
+	for (int y = 0; y < 4; y++)
+		for (int x = 0; x < 4; x++) {
+			for (int c = 0; c < 4; c++)
+				cfa_mask[y][x][c] = cfa[y][x] == c ? ~0u : 0;
+			cfa_count[cfa[y][x]]++;
+		}
+}
+
 static void set_rgbir_pattern(void)
 {
 	memcpy(cfa, ov5675_rgbir, sizeof(cfa));
+	cfa_changed();
 }
 
 /* Plain 2x2 Bayer from the media bus code, expanded to the 4x4 table. */
@@ -101,6 +126,7 @@ static int set_bayer_pattern(__u32 code)
 			for (int y = 0; y < 4; y++)
 				for (int x = 0; x < 4; x++)
 					cfa[y][x] = patterns[i].cfa[y & 1][x & 1];
+			cfa_changed();
 			return 0;
 		}
 	return -1;
@@ -172,6 +198,22 @@ static int cfa_has_ir_sites(void)
 	return 0;
 }
 
+/* Raw code (10 bits, with black level) to linear 0..LINEAR_MAX. */
+static uint16_t raw_lin_lut[1024];
+
+static void init_raw_lut(void)
+{
+	static int ready;
+
+	if (ready)
+		return;
+	for (unsigned int code = 0; code < 1024; code++) {
+		unsigned int value = code > BLACK_LEVEL ? code - BLACK_LEVEL : 0;
+		raw_lin_lut[code] = (uint16_t)((value * LINEAR_MAX + RAW_RANGE / 2) / RAW_RANGE);
+	}
+	ready = 1;
+}
+
 static unsigned int raw_at(const uint16_t *raw, unsigned int width,
 			   unsigned int height, unsigned int stride,
 			   int x, int y)
@@ -180,9 +222,8 @@ static unsigned int raw_at(const uint16_t *raw, unsigned int width,
 	if (y < 0) y = 0;
 	if ((unsigned int)x >= width) x = (int)width - 1;
 	if ((unsigned int)y >= height) y = (int)height - 1;
-	unsigned int value = raw[(size_t)y * (stride / 2) + (unsigned int)x] & 1023;
-	value = value > BLACK_LEVEL ? value - BLACK_LEVEL : 0;
-	return (value * LINEAR_MAX + RAW_RANGE / 2) / RAW_RANGE;
+	init_raw_lut();
+	return raw_lin_lut[raw[(size_t)y * (stride / 2) + (unsigned int)x] & 1023];
 }
 
 /*
@@ -211,7 +252,15 @@ static unsigned int raw_at(const uint16_t *raw, unsigned int width,
  * Plain Bayer has no IR sites: IR = 0, n = 0.
  */
 static int ir_visible_q12 = 410;		/* 0.10 */
-static int nir_keep_q12[3] = { 0, 0, 1638 };	/* R, G: k = 1; B: k = 0.60 */
+/*
+ * 2026-11-20 (boot-15): k_B = 0.75, not 0.60. The 0.60 fit assumed daylight sits on the locus.
+ * Boot-14 showed real lights 0.10-0.14 off it on the green side, and at 0.60 the objects that
+ * reflect much NIR came out too blue in boot-15's window light: a dark green T-shirt teal, a
+ * dark teal wall navy (host simulation: a true k_B of 0.75 under the 0.60 model gives exactly
+ * that teal). At 0.75 boot-12's daylight frames sit on the locus (0.00-0.03; at 0.60 they were
+ * 0.04 on the magenta side), boot-8's 0.07 on the green side, within the green-side zone.
+ */
+static int nir_keep_q12[3] = { 0, 0, 1024 };	/* R, G: k = 1; B: k = 0.75 */
 
 static int nir_estimate(int ir, int green)
 {
@@ -489,7 +538,7 @@ struct lsc_entry {
 static struct lsc_entry lsc_table[LSC_MAX_ILL];
 static int lsc_count, lsc_active, lsc_pick[2] = { -1, -1 };
 static double lsc_weight, lsc_strength = 1.0, sensor_total_gain = 1.0;
-static uint16_t lsc_map[3][OUT_HEIGHT][OUT_WIDTH];
+static uint16_t lsc_map[3][COL_HEIGHT][COL_WIDTH];	/* per colour-grid point */
 static struct { int pick[2]; double weight, strength; unsigned int w, h; } lsc_built = { { -2, -2 }, 0, 0, 0, 0 };
 
 static int load_lsc_table(const char *path)
@@ -571,11 +620,11 @@ static void update_lsc(double rg, double bg, unsigned int width, unsigned int he
 	    fabs(lsc_built.strength - lsc_strength) < 0.05 && lsc_built.w == width && lsc_built.h == height)
 		return;
 	const struct lsc_entry *ea = &lsc_table[a], *eb = &lsc_table[b];
-	for (int oy = 0; oy < OUT_HEIGHT; oy++) {
-		double sy = ((oy * (double)height) / OUT_HEIGHT + 1.0) / height;	/* window centre, 0..1 */
+	for (int oy = 0; oy < COL_HEIGHT; oy++) {
+		double sy = ((oy * (double)height) / COL_HEIGHT + 1.0) / height;	/* window centre, 0..1 */
 		double gy = sy * (ea->gh - 1);
-		for (int ox = 0; ox < OUT_WIDTH; ox++) {
-			double sx = ((ox * (double)width) / OUT_WIDTH + 1.0) / width;
+		for (int ox = 0; ox < COL_WIDTH; ox++) {
+			double sx = ((ox * (double)width) / COL_WIDTH + 1.0) / width;
 			double gx = sx * (ea->gw - 1);
 			for (int c = 0; c < 3; c++) {
 				double g = wa * lsc_grid_at(ea, c, gx, gy) + (1 - wa) * lsc_grid_at(eb, c, gx, gy);
@@ -655,8 +704,8 @@ static void calculate_white_balance(const uint16_t *raw, unsigned int width,
 				continue;
 			double shade[4] = { 1, 1, 1, 1 };
 			if (shaded) {
-				unsigned int ox = (unsigned int)(((uint64_t)x * OUT_WIDTH) / width);
-				unsigned int oy = (unsigned int)(((uint64_t)y * OUT_HEIGHT) / height);
+				unsigned int ox = (unsigned int)(((uint64_t)x * COL_WIDTH) / width);
+				unsigned int oy = (unsigned int)(((uint64_t)y * COL_HEIGHT) / height);
 				shade[0] = lsc_map[0][oy][ox] / 4096.0;
 				shade[1] = shade[CFA_IR] = lsc_map[1][oy][ox] / 4096.0;
 				shade[2] = lsc_map[2][oy][ox] / 4096.0;
@@ -881,11 +930,18 @@ static void soft_clip_rgb(int c[3])
  */
 static int output_rotate180;
 
-static int16_t plane_y[OUT_HEIGHT][OUT_WIDTH], plane_u[OUT_HEIGHT][OUT_WIDTH],
-	plane_v[OUT_HEIGHT][OUT_WIDTH], plane_tmp[OUT_HEIGHT][OUT_WIDTH];
-/* Linear (pre-gamma) R, G, B per output pixel, and their neighbourhood averages. */
-static int16_t lin_plane[3][OUT_HEIGHT][OUT_WIDTH], lin_avg[3][OUT_HEIGHT][OUT_WIDTH];
+/* Output luma (full resolution, unrotated). */
+static int16_t plane_y[OUT_HEIGHT][OUT_WIDTH];
 static unsigned char tnr_previous[OUT_HEIGHT][OUT_WIDTH];
+/*
+ * Colour grid: linear (pre-gamma) R, G, B per point, their neighbourhood averages (then the
+ * final colour), and the window's raw green (linear, no lens shading) for the detail pass.
+ */
+static int16_t plane_tmp[COL_HEIGHT][COL_WIDTH];
+static int16_t lin_plane[3][COL_HEIGHT][COL_WIDTH], lin_avg[3][COL_HEIGHT][COL_WIDTH];
+static uint16_t col_green[COL_HEIGHT][COL_WIDTH];
+/* Colour grid in Y', U, V (gamma-encoded, BT.601 full range): the 640x480 picture as before. */
+static int16_t col_y[COL_HEIGHT][COL_WIDTH], col_u[COL_HEIGHT][COL_WIDTH], col_v[COL_HEIGHT][COL_WIDTH];
 static int tnr_have_previous;
 
 /* Forget the previous frame (start, or resuming after idle): no blending with stale content. */
@@ -894,38 +950,77 @@ static void tnr_reset(void)
 	tnr_have_previous = 0;
 }
 
-static void box_filter_plane(int16_t plane[OUT_HEIGHT][OUT_WIDTH], int r)
+static void box_filter_plane(int16_t plane[COL_HEIGHT][COL_WIDTH], int r)
 {
 	/* Separable running-sum box filter, edges clamped. */
-	for (int y = 0; y < OUT_HEIGHT; y++) {
+	for (int y = 0; y < COL_HEIGHT; y++) {
 		int sum = 0;
 		for (int k = -r; k <= r; k++)
-			sum += plane[y][k < 0 ? 0 : (k >= OUT_WIDTH ? OUT_WIDTH - 1 : k)];
-		for (int x = 0; x < OUT_WIDTH; x++) {
+			sum += plane[y][k < 0 ? 0 : (k >= COL_WIDTH ? COL_WIDTH - 1 : k)];
+		for (int x = 0; x < COL_WIDTH; x++) {
 			plane_tmp[y][x] = (int16_t)(sum / (2 * r + 1));
 			int out_x = x - r, in_x = x + r + 1;
 			sum -= plane[y][out_x < 0 ? 0 : out_x];
-			sum += plane[y][in_x >= OUT_WIDTH ? OUT_WIDTH - 1 : in_x];
+			sum += plane[y][in_x >= COL_WIDTH ? COL_WIDTH - 1 : in_x];
 		}
 	}
-	for (int x = 0; x < OUT_WIDTH; x++) {
+	for (int x = 0; x < COL_WIDTH; x++) {
 		int sum = 0;
 		for (int k = -r; k <= r; k++)
-			sum += plane_tmp[k < 0 ? 0 : (k >= OUT_HEIGHT ? OUT_HEIGHT - 1 : k)][x];
-		for (int y = 0; y < OUT_HEIGHT; y++) {
+			sum += plane_tmp[k < 0 ? 0 : (k >= COL_HEIGHT ? COL_HEIGHT - 1 : k)][x];
+		for (int y = 0; y < COL_HEIGHT; y++) {
 			plane[y][x] = (int16_t)(sum / (2 * r + 1));
 			int out_y = y - r, in_y = y + r + 1;
 			sum -= plane_tmp[out_y < 0 ? 0 : out_y][x];
-			sum += plane_tmp[in_y >= OUT_HEIGHT ? OUT_HEIGHT - 1 : in_y][x];
+			sum += plane_tmp[in_y >= COL_HEIGHT ? COL_HEIGHT - 1 : in_y][x];
 		}
 	}
+}
+
+/*
+ * Front (RGB-IR) colour reliability. Boot-15 (2026-11-20, selfie by a sunny window, NIR 0.7-0.9
+ * of green over the frame): a dark green T-shirt came out teal, a dark teal wall navy, skin
+ * pinkish, while the white ceiling was nearly neutral. Dyed fabric and paint reflect little
+ * visible light but much NIR, so in their windows NIR is several times the visible green, and
+ * any error in a channel's NIR response (the blue term is our fit, +/-0.1) is multiplied by
+ * that ratio. White balance absorbs the error at the frame's own NIR level, so what is left
+ * grows with the window's NIR ratio minus the frame's (wb_nir_ratio). The blue term is now refit
+ * (k_B above); as a safety net, past NIR_CHROMA_FREE above the frame's ratio the window's colour
+ * is faded towards its luminance: half kept at NIR_CHROMA_HALF more.
+ *
+ * And where the window's 8 green sites disagree strongly (stripes, sharp edges: the window
+ * blinds), its 2 R and 2 B sites see other parts of the pattern than the greens: green and
+ * magenta fringes at any gain. Past HF_CHROMA_START (green contrast (max-min)/(max+min)), colour
+ * fades, to HF_CHROMA_MIN at HF_CHROMA_FULL.
+ */
+#define NIR_CHROMA_FREE 1.5
+#define NIR_CHROMA_HALF 3.0
+#define HF_CHROMA_START 0.25
+#define HF_CHROMA_FULL 0.75
+#define HF_CHROMA_MIN 0.15
+static int chroma_guard = 1;	/* 0: off (host-test negative control) */
+
+/* Colour kept (0..1) for a window: NIR ratio rho (NIR / visible green), green contrast hf. */
+static double chroma_keep_for(double rho, double hf)
+{
+	double keep = 1.0, d = rho - wb_nir_ratio - NIR_CHROMA_FREE;
+
+	if (d > 0)
+		keep = 1.0 / (1.0 + d / NIR_CHROMA_HALF);
+	if (hf > HF_CHROMA_START) {
+		double t = (hf - HF_CHROMA_START) / (HF_CHROMA_FULL - HF_CHROMA_START);
+		double k = 1.0 - (1.0 - HF_CHROMA_MIN) * (t > 1 ? 1 : t);
+		if (k < keep)
+			keep = k;
+	}
+	return keep;
 }
 
 /* Linear-light R, G, B (0..LINEAR_MAX) of the 4x4 window at x, y. */
 static void rgb_linear_at(const uint16_t *raw, unsigned int width, unsigned int height,
 			  unsigned int stride, const unsigned int gain_q12[3],
 			  unsigned int x, unsigned int y, const unsigned int *shading_q12,
-			  int rgb[3])
+			  int rgb[3], unsigned int *green_out)
 {
 	/*
 	 * A 4x4 window holds every site of the 4x4 mosaic exactly once (2 R, 2 B, 8 G,
@@ -933,21 +1028,33 @@ static void rgb_linear_at(const uint16_t *raw, unsigned int width, unsigned int 
 	 * red or blue read as zero in drifting patches: the cyan/yellow grid.
 	 * The window is shifted inward at the frame edges so it is always complete.
 	 */
-	unsigned int sum[4] = { 0 }, n[4] = { 0 };
+	unsigned int sum[4], n[4];
 	unsigned int x0 = x > 0 ? x - 1 : 0, y0 = y > 0 ? y - 1 : 0;
 
 	if (x0 > width - 4) x0 = width - 4;
 	if (y0 > height - 4) y0 = height - 4;
-	unsigned int peak = 0;
-	for (unsigned int sy = y0; sy < y0 + 4; sy++)
+	unsigned int peak = 0, gmin = ~0u, gmax = 0, s0 = 0, s1 = 0, s2 = 0, s3 = 0;
+	init_raw_lut();
+	/*
+	 * Masked sums in registers: any 4x4 window holds each site of the mosaic once, so the
+	 * per-channel counts are fixed (cfa_count); the channel of each site comes from its phase.
+	 */
+	for (unsigned int sy = y0; sy < y0 + 4; sy++) {
+		const uint16_t *row = raw + (size_t)sy * (stride / 2);	/* the window is inside the frame */
 		for (unsigned int sx = x0; sx < x0 + 4; sx++) {
-			int channel = channel_at(sx, sy);
-			unsigned int v = raw_at(raw, width, height, stride, (int)sx, (int)sy);
-			sum[channel] += v;
-			n[channel]++;
-			if (v > peak)
-				peak = v;
+			const uint32_t *m = cfa_mask[sy & 3][sx & 3];
+			unsigned int v = raw_lin_lut[row[sx] & 1023];
+			s0 += v & m[0]; s1 += v & m[1]; s2 += v & m[2]; s3 += v & m[3];
+			peak = v > peak ? v : peak;
+			unsigned int lo = v | ~m[1], hi = v & m[1];
+			gmin = lo < gmin ? lo : gmin;
+			gmax = hi > gmax ? hi : gmax;
 		}
+	}
+	sum[0] = s0; sum[1] = s1; sum[2] = s2; sum[3] = s3;
+	memcpy(n, cfa_count, sizeof(n));
+	if (green_out)
+		*green_out = n[1] ? sum[1] / n[1] : 0;
 	/*
 	 * Lens shading (shading_q12: R, G, B gains for this position; NULL = none). The IR
 	 * sites see the same optics, so they take the green gain. Then remove the infrared
@@ -959,9 +1066,13 @@ static void rgb_linear_at(const uint16_t *raw, unsigned int width, unsigned int 
 		shade[2] = shading_q12[2]; shade[CFA_IR] = shading_q12[1];
 	}
 	int mean[4];
-	for (int channel = 0; channel < 4; channel++)
-		mean[channel] = n[channel] ?
-			(int)(((uint64_t)sum[channel] * shade[channel] / n[channel] + 2048) / 4096) : 0;
+	for (int channel = 0; channel < 4; channel++) {
+		/* Site counts are 2, 4 or 8 on both mosaics: a shift instead of a division. */
+		unsigned int c = n[channel];
+		uint64_t v = (uint64_t)sum[channel] * shade[channel];
+		mean[channel] = !c ? 0 : (c & (c - 1)) ? (int)((v / c + 2048) >> 12) :
+			(int)((v + ((uint64_t)c << 11)) >> (12 + __builtin_ctz(c)));
+	}
 	int ir = mean[CFA_IR];
 	int nir = n[CFA_IR] ? nir_estimate(ir, mean[1]) : 0;
 	int lin[3];
@@ -970,6 +1081,18 @@ static void rgb_linear_at(const uint16_t *raw, unsigned int width, unsigned int 
 			mean[channel] - ir + ((nir * nir_keep_q12[channel] + 2048) >> 12) : 0;
 		if (lin[channel] < 0)
 			lin[channel] = 0;
+	}
+	/* Front only (see chroma_keep_for); the rear's colour is reported good as it is. */
+	double keep = 1.0;
+	if (chroma_guard && n[CFA_IR]) {
+		int g16 = lin[1] > 16 ? lin[1] : 16;
+		/* Cheap integer pre-checks; the exact fade only where one of them can apply. */
+		if ((gmax - gmin) * 4 > gmax + gmin + 64 ||
+		    nir > (wb_nir_ratio + NIR_CHROMA_FREE) * g16) {
+			double rho = (double)nir / g16;
+			double hf = (double)(gmax - gmin) / (gmax + gmin + 64.0);
+			keep = chroma_keep_for(rho, hf);
+		}
 	}
 	rgb[0] = (int)(((uint64_t)lin[0] * gain_q12[0] + 2048) / 4096);
 	rgb[1] = lin[1];
@@ -1001,6 +1124,13 @@ static void rgb_linear_at(const uint16_t *raw, unsigned int width, unsigned int 
 	 * white balance R and B ~1.85x, then the matrix): clipping each channel on its own turns
 	 * them pink or magenta. Desaturate towards their luminance instead, as ISPs do.
 	 */
+	if (keep < 1.0) {
+		double y = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+		for (int channel = 0; channel < 3; channel++) {
+			double v = y + keep * (rgb[channel] - y);
+			rgb[channel] = v < 0 ? 0 : (int)(v + 0.5);
+		}
+	}
 	soft_clip_rgb(rgb);
 	/*
 	 * Highlights: where any site in the window is near the sensor's clip level, its
@@ -1024,19 +1154,19 @@ static void rgb_linear_at(const uint16_t *raw, unsigned int width, unsigned int 
  * gamma curve (the earlier U/V box filter) is biased: gamma is concave, so the noisier
  * channels (R and B: 2 of 16 sites each, IR subtracted, amplified by the colour matrix)
  * lose more than G, and noisy greys turned green at high gain (2026-11-18 boot-11). Here
- * each pixel keeps its own linear luminance but takes the R:G:B ratios of the (2r+1)^2
- * average; near strong luma edges those ratios are pulled towards grey.
+ * each colour-grid point keeps its own linear luminance but takes the R:G:B ratios of the
+ * (2r+1)^2 average; near strong luma edges those ratios are pulled towards grey. The result
+ * goes to col_y/col_u/col_v.
  */
-static void linear_colour_to_yuv(int r, double gain)
+struct mix_job { int r, edges; };
+
+static void linear_colour_mix_rows(void *ctx, unsigned int row0, unsigned int row1)
 {
-	for (int c = 0; c < 3; c++) {
-		memcpy(lin_avg[c], lin_plane[c], sizeof(lin_avg[c]));
-		if (r > 0)
-			box_filter_plane(lin_avg[c], r);
-	}
-	int edges = r > 0 && gain > HIGH_GAIN_X;
-	for (int oy = 0; oy < OUT_HEIGHT; oy++)
-		for (int ox = 0; ox < OUT_WIDTH; ox++) {
+	const struct mix_job *job = ctx;
+	int r = job->r, edges = job->edges;
+
+	for (int oy = (int)row0; oy < (int)row1; oy++)
+		for (int ox = 0; ox < COL_WIDTH; ox++) {
 			int lr = lin_plane[0][oy][ox], lg = lin_plane[1][oy][ox], lb = lin_plane[2][oy][ox];
 			int ar = lin_avg[0][oy][ox], ag = lin_avg[1][oy][ox], ab = lin_avg[2][oy][ox];
 			int c[3];
@@ -1048,8 +1178,8 @@ static void linear_colour_to_yuv(int r, double gain)
 				/* Strength of the local luma edge, relative to the local level. */
 				double keep = 1.0;
 				if (edges) {
-					int xl = ox > 0 ? ox - 1 : ox, xr = ox + 1 < OUT_WIDTH ? ox + 1 : ox;
-					int yu = oy > 0 ? oy - 1 : oy, yd = oy + 1 < OUT_HEIGHT ? oy + 1 : oy;
+					int xl = ox > 0 ? ox - 1 : ox, xr = ox + 1 < COL_WIDTH ? ox + 1 : ox;
+					int yu = oy > 0 ? oy - 1 : oy, yd = oy + 1 < COL_HEIGHT ? oy + 1 : oy;
 					double gx = fabs((double)lin_plane[1][oy][xr] - lin_plane[1][oy][xl]);
 					double gy = fabs((double)lin_plane[1][yd][ox] - lin_plane[1][yu][ox]);
 					double rel = (gx + gy) / (ag + 32.0);
@@ -1068,10 +1198,208 @@ static void linear_colour_to_yuv(int r, double gain)
 			}
 			for (int k = 0; k < 3; k++)
 				c[k] = gamma_lut[c[k]];
-			plane_y[oy][ox] = (int16_t)((77 * c[0] + 150 * c[1] + 29 * c[2] + 128) >> 8);
-			plane_u[oy][ox] = (int16_t)((-43 * c[0] - 85 * c[1] + 128 * c[2]) >> 8);
-			plane_v[oy][ox] = (int16_t)((128 * c[0] - 107 * c[1] - 21 * c[2]) >> 8);
+			col_y[oy][ox] = (int16_t)((77 * c[0] + 150 * c[1] + 29 * c[2] + 128) >> 8);
+			col_u[oy][ox] = (int16_t)((-43 * c[0] - 85 * c[1] + 128 * c[2]) >> 8);
+			col_v[oy][ox] = (int16_t)((128 * c[0] - 107 * c[1] - 21 * c[2]) >> 8);
 		}
+}
+
+/*
+ * Rows are independent in the colour grid, the mix and the output pass, so each runs in
+ * BRIDGE_THREADS horizontal bands (1280x960 at 30 fps needs about 45 ms of one core per frame
+ * on the i7-1180G7; two bands bring each frame under 33 ms). Threads are started per pass;
+ * if one cannot be started its band runs here.
+ */
+#define BRIDGE_THREADS 2
+struct band {
+	void (*fn)(void *ctx, unsigned int row0, unsigned int row1);
+	void *ctx;
+	unsigned int row0, row1;
+};
+
+static void *band_run(void *arg)
+{
+	struct band *b = arg;
+
+	b->fn(b->ctx, b->row0, b->row1);
+	return NULL;
+}
+
+static void run_bands(void (*fn)(void *, unsigned int, unsigned int), void *ctx, unsigned int rows)
+{
+	pthread_t thread[BRIDGE_THREADS];
+	struct band band[BRIDGE_THREADS];
+	int started[BRIDGE_THREADS] = { 0 };
+
+	for (int i = 0; i < BRIDGE_THREADS; i++) {
+		band[i].fn = fn;
+		band[i].ctx = ctx;
+		band[i].row0 = rows * (unsigned int)i / BRIDGE_THREADS;
+		band[i].row1 = rows * (unsigned int)(i + 1) / BRIDGE_THREADS;
+	}
+	for (int i = 1; i < BRIDGE_THREADS; i++)
+		started[i] = pthread_create(&thread[i], NULL, band_run, &band[i]) == 0;
+	band_run(&band[0]);
+	for (int i = 1; i < BRIDGE_THREADS; i++) {
+		if (started[i])
+			pthread_join(thread[i], NULL);
+		else
+			band_run(&band[i]);
+	}
+}
+
+static void linear_colour_mix(int r, double gain)
+{
+	struct mix_job job = { r, r > 0 && gain > HIGH_GAIN_X };
+
+	for (int c = 0; c < 3; c++) {
+		memcpy(lin_avg[c], lin_plane[c], sizeof(lin_avg[c]));
+		if (r > 0)
+			box_filter_plane(lin_avg[c], r);
+	}
+	run_bands(linear_colour_mix_rows, &job, COL_HEIGHT);
+}
+
+/*
+ * Detail. Output pixels fall on colour-grid points or halfway between them; each takes the
+ * grid's Y', U, V (bilinear), so colour is exactly the 640x480 picture's. Its brightness is
+ * then scaled by its own green relative to the window's: the 2 green sites of the 2x2 block at
+ * its sensor position (half of all sites are green, in a checkerboard, on the RGB-IR and on
+ * the Bayer sensor) over the window's 8. That ratio is linear light, so Y' scales by its
+ * 1/2.4 power (detail_lut). Green from 2 sites is noisier than from 8, so at high gain the
+ * detail is reduced: full up to DETAIL_FULL_GAIN, DETAIL_MIN at DETAIL_MIN_GAIN and above.
+ */
+#define DETAIL_FULL_GAIN 8.0
+#define DETAIL_MIN_GAIN 32.0
+#define DETAIL_MIN 0.4
+#define DETAIL_LUT_MAX 1024	/* ratio 0..4 in steps of 1/256 */
+static int detail_enabled = 1;	/* 0: colour-grid brightness only (host-test negative control) */
+static uint16_t detail_lut[DETAIL_LUT_MAX + 1];	/* Q12 factor for Y' */
+static int detail_lut_q12 = -1;
+
+static int detail_q12_for_gain(double gain)
+{
+	if (!detail_enabled)
+		return 0;
+	double t = (gain - DETAIL_FULL_GAIN) / (DETAIL_MIN_GAIN - DETAIL_FULL_GAIN);
+	t = t < 0 ? 0 : t > 1 ? 1 : t;
+	return (int)((1.0 - (1.0 - DETAIL_MIN) * t) * 4096.0 + 0.5);
+}
+
+static void detail_lut_build(int detail_q12)
+{
+	if (detail_lut_q12 == detail_q12)
+		return;
+	for (int i = 0; i <= DETAIL_LUT_MAX; i++) {
+		double f = 1.0 + detail_q12 / 4096.0 * (i / 256.0 - 1.0);
+		double y = pow(f > 0 ? f : 0, 1.0 / 2.4) * 4096.0 + 0.5;
+		detail_lut[i] = (uint16_t)(y > 65535 ? 65535 : y);
+	}
+	detail_lut_q12 = detail_q12;
+}
+
+struct frame_job {
+	const uint16_t *raw;
+	unsigned int width, height, stride;
+	const unsigned int *gain_q12;
+	int detail_q12, tnr_threshold;
+	unsigned char *out;
+};
+
+/* Colour grid rows: one 4x4 window per point to linear R, G, B, and the window's green. */
+static void colour_grid_rows(void *ctx, unsigned int row0, unsigned int row1)
+{
+	const struct frame_job *job = ctx;
+
+	for (unsigned int oy = row0; oy < row1; oy++) {
+		unsigned int sy = (unsigned int)(((uint64_t)oy * job->height) / COL_HEIGHT);
+		for (unsigned int ox = 0; ox < COL_WIDTH; ox++) {
+			unsigned int sx = (unsigned int)(((uint64_t)ox * job->width) / COL_WIDTH);
+			int c[3];
+			unsigned int shading[3], green;
+			if (lsc_active) {
+				shading[0] = lsc_map[0][oy][ox];
+				shading[1] = lsc_map[1][oy][ox];
+				shading[2] = lsc_map[2][oy][ox];
+			}
+			rgb_linear_at(job->raw, job->width, job->height, job->stride, job->gain_q12, sx, sy,
+				      lsc_active ? shading : NULL, c, &green);
+			for (int k = 0; k < 3; k++)
+				lin_plane[k][oy][ox] = (int16_t)c[k];
+			col_green[oy][ox] = (uint16_t)green;
+		}
+	}
+}
+
+/*
+ * Output rows (unrotated row sy): brightness with detail, temporal luma filter, then YUYV into
+ * output row sy, or H - 1 - sy backwards with --rotate 180 (lens shading and the statistics
+ * stay in sensor positions). U/V of a pixel pair: the mean of the pair's bilinear colour-grid
+ * values (the pair covers grid point cx and halfway to cx + 1: weights 3/4, 1/4; rows: on a
+ * grid row or halfway).
+ *
+ * Temporal filter: where a pixel changed by no more than the threshold since the last output
+ * it moves only a third of the way, averaging noise in still areas; larger changes (motion)
+ * pass through at once, so no ghosts.
+ */
+static void output_rows(void *ctx, unsigned int row0, unsigned int row1)
+{
+	const struct frame_job *job = ctx;
+	const uint16_t *raw = job->raw;
+	unsigned int width = job->width, height = job->height, stride = job->stride;
+	int detail_q12 = job->detail_q12, tnr_threshold = job->tnr_threshold;
+
+	for (unsigned int oy = row0; oy < row1; oy++) {
+		unsigned int sy = (unsigned int)(((uint64_t)oy * height) / OUT_HEIGHT);
+		if (sy > height - 2)
+			sy = height - 2;
+		const uint16_t *r0 = raw + (size_t)sy * (stride / 2), *r1 = r0 + stride / 2;
+		const uint32_t (*m0)[4] = cfa_mask[sy & 3], (*m1)[4] = cfa_mask[(sy + 1) & 3];
+		int cy0 = (int)(oy >> 1), cy1 = (oy & 1) && cy0 + 1 < COL_HEIGHT ? cy0 + 1 : cy0;
+		int16_t *yrow = plane_y[oy];
+		unsigned char *prev = tnr_previous[oy];
+		for (unsigned int ox = 0; ox < OUT_WIDTH; ox++) {
+			int cx0 = (int)(ox >> 1), cx1 = (ox & 1) && cx0 + 1 < COL_WIDTH ? cx0 + 1 : cx0;
+			int y = (col_y[cy0][cx0] + col_y[cy0][cx1] + col_y[cy1][cx0] + col_y[cy1][cx1] + 2) >> 2;
+			if (detail_q12 > 0) {
+				unsigned int sx = (unsigned int)(((uint64_t)ox * width) / OUT_WIDTH);
+				if (sx > width - 2)
+					sx = width - 2;
+				unsigned int gw = (col_green[cy0][cx0] + col_green[cy0][cx1] +
+						   col_green[cy1][cx0] + col_green[cy1][cx1] + 2) >> 2;
+				/* The 2 green sites of the 2x2 block (masks: the phase varies). */
+				unsigned int g = (raw_lin_lut[r0[sx] & 1023] & m0[sx & 3][1]) +
+					(raw_lin_lut[r0[sx + 1] & 1023] & m0[(sx + 1) & 3][1]) +
+					(raw_lin_lut[r1[sx] & 1023] & m1[sx & 3][1]) +
+					(raw_lin_lut[r1[sx + 1] & 1023] & m1[(sx + 1) & 3][1]);
+				/* index = g / 2 / gw in steps of 1/256 */
+				unsigned int i = gw ? (g * 128u) / gw : 256u;
+				y = (y * detail_lut[i > DETAIL_LUT_MAX ? DETAIL_LUT_MAX : i] + 2048) >> 12;
+			}
+			if (tnr_have_previous) {
+				int d = y - prev[ox];
+				if (d >= -tnr_threshold && d <= tnr_threshold)
+					y = prev[ox] + (d >= 0 ? (d + 1) / 3 : -((-d + 1) / 3));
+			}
+			y = clamp8(y);
+			prev[ox] = (unsigned char)y;
+			yrow[ox] = (int16_t)y;
+		}
+		unsigned char *dst = job->out + (size_t)(output_rotate180 ? OUT_HEIGHT - 1 - oy : oy) *
+			OUT_WIDTH * 2;
+		for (unsigned int ox = 0; ox < OUT_WIDTH; ox += 2) {
+			int cx = (int)(ox >> 1), cxn = cx + 1 < COL_WIDTH ? cx + 1 : cx;
+			int u = 3 * (col_u[cy0][cx] + col_u[cy1][cx]) + col_u[cy0][cxn] + col_u[cy1][cxn];
+			int v = 3 * (col_v[cy0][cx] + col_v[cy1][cx]) + col_v[cy0][cxn] + col_v[cy1][cxn];
+			unsigned char U = clamp8(128 + (u >= 0 ? (u + 4) >> 3 : -((-u + 4) >> 3)));
+			unsigned char V = clamp8(128 + (v >= 0 ? (v + 4) >> 3 : -((-v + 4) >> 3)));
+			unsigned int at = output_rotate180 ? OUT_WIDTH - 2 - ox : ox;
+			dst[at * 2] = (unsigned char)yrow[output_rotate180 ? ox + 1 : ox];
+			dst[at * 2 + 1] = U;
+			dst[at * 2 + 2] = (unsigned char)yrow[output_rotate180 ? ox : ox + 1];
+			dst[at * 2 + 3] = V;
+		}
+	}
 }
 
 static int convert_bayer_yuyv(const uint16_t *raw, unsigned int width,
@@ -1087,67 +1415,27 @@ static int convert_bayer_yuyv(const uint16_t *raw, unsigned int width,
 
 	unsigned int gain_q12[3];
 	init_gamma();
+	init_raw_lut();
 	calculate_white_balance(raw, width, height, stride, gain_q12, mean_green);
 	if (wb_last_mean[1] > 0)
 		update_lsc(wb_white_rg, wb_white_bg, width, height);
 
-	/* 1. Demosaic every output pixel to full-range BT.601 Y/U/V. */
-	for (unsigned int oy = 0; oy < OUT_HEIGHT; oy++) {
-		unsigned int sy = (unsigned int)(((uint64_t)oy * height) / OUT_HEIGHT);
-		for (unsigned int ox = 0; ox < OUT_WIDTH; ox++) {
-			unsigned int sx = (unsigned int)(((uint64_t)ox * width) / OUT_WIDTH);
-			int c[3];
-			unsigned int shading[3];
-			if (lsc_active) {
-				shading[0] = lsc_map[0][oy][ox];
-				shading[1] = lsc_map[1][oy][ox];
-				shading[2] = lsc_map[2][oy][ox];
-			}
-			rgb_linear_at(raw, width, height, stride, gain_q12, sx, sy,
-				      lsc_active ? shading : NULL, c);
-			/* Lens shading stays indexed by sensor position; only the output is turned. */
-			unsigned int ty = output_rotate180 ? OUT_HEIGHT - 1 - oy : oy;
-			unsigned int tx = output_rotate180 ? OUT_WIDTH - 1 - ox : ox;
-			for (int k = 0; k < 3; k++)
-				lin_plane[k][ty][tx] = (int16_t)c[k];
-		}
-	}
+	struct frame_job job = {
+		raw, width, height, stride, gain_q12,
+		detail_q12_for_gain(sensor_total_gain), tnr_threshold_for_gain(sensor_total_gain), out
+	};
+	/* 1. Colour grid: demosaic one 4x4 window per point to linear R, G, B. */
+	run_bands(colour_grid_rows, &job, COL_HEIGHT);
 	/*
 	 * 2. Chroma noise: R and B are only 2 of 16 sites, so at high gain colour speckle
 	 * dominates. Colour comes from a neighbourhood average in linear light (growing with
 	 * gain); luma keeps full detail.
 	 */
-	linear_colour_to_yuv(chroma_radius_for_gain(sensor_total_gain), sensor_total_gain);
-	/*
-	 * 3. Luma noise: recursive temporal filter. Where a pixel changed by no more than
-	 * TNR_THRESHOLD since the last output it moves only a third of the way, averaging
-	 * noise in still areas; larger changes (motion) pass through at once, so no ghosts.
-	 */
-	int tnr_threshold = tnr_threshold_for_gain(sensor_total_gain);
-	for (unsigned int oy = 0; oy < OUT_HEIGHT; oy++)
-		for (unsigned int ox = 0; ox < OUT_WIDTH; ox++) {
-			int y = plane_y[oy][ox];
-			if (tnr_have_previous) {
-				int d = y - tnr_previous[oy][ox];
-				if (d >= -tnr_threshold && d <= tnr_threshold)
-					y = tnr_previous[oy][ox] + (d >= 0 ? (d + 1) / 3 : -((-d + 1) / 3));
-			}
-			y = clamp8(y);
-			tnr_previous[oy][ox] = (unsigned char)y;
-			plane_y[oy][ox] = (int16_t)y;
-		}
+	linear_colour_mix(chroma_radius_for_gain(sensor_total_gain), sensor_total_gain);
+	/* 3. Full-resolution brightness from the green sites, temporal luma filter, YUYV. */
+	detail_lut_build(job.detail_q12);
+	run_bands(output_rows, &job, OUT_HEIGHT);
 	tnr_have_previous = 1;
-
-	/* 4. Pack YUYV 4:2:2: U/V of each pixel pair averaged. */
-	for (unsigned int oy = 0; oy < OUT_HEIGHT; oy++) {
-		unsigned char *dst = out + (size_t)oy * OUT_WIDTH * 2;
-		for (unsigned int ox = 0; ox < OUT_WIDTH; ox += 2) {
-			dst[ox * 2] = (unsigned char)plane_y[oy][ox];
-			dst[ox * 2 + 1] = clamp8(128 + (plane_u[oy][ox] + plane_u[oy][ox + 1]) / 2);
-			dst[ox * 2 + 2] = (unsigned char)plane_y[oy][ox + 1];
-			dst[ox * 2 + 3] = clamp8(128 + (plane_v[oy][ox] + plane_v[oy][ox + 1]) / 2);
-		}
-	}
 	return 0;
 }
 
