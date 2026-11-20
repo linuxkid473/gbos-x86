@@ -4,6 +4,8 @@
 # frames to YUYV (1920x1080 by default, CAMERA_SIZE) on a v4l2loopback device, exposed to Android's USB camera HAL through a
 # fake UVC sysfs identity. The front is required; the rear is optional (CAMERA_REAR=0 in gbos.cfg
 # turns it off) and starts only once the front streams, so a rear failure never costs the front.
+# CAMERA_LIBCAMERA=1: the rear bridge feeds the gbOS libcamera plugin (gbos_ipu6.so, Google's
+# libcamera HAL) over a frame channel instead, which serves any stream size the app asks for.
 set -u
 
 BOOT_ID=${1:-unknown}
@@ -57,12 +59,16 @@ if [ ! -s "$FRONT_DESC" ]; then
 fi
 REAR=1
 [ "$(cfg CAMERA_REAR)" = 0 ] && REAR=0
-# With the libcamera plugins on, the USB rear is not exposed: Google's adapter publishes the
-# libcamera camera as public ID 1 (device@1.0/legacy/1), and CameraService then rejected the USB
-# rear (device@1.0/usb/1, "ID 1 is already in use") on boot-17.
-if [ "$(cfg CAMERA_LIBCAMERA)" = 1 ] && [ "$REAR" = 1 ]; then
+# CAMERA_LIBCAMERA=1: the rear is the libcamera camera "camera1" (gbos_ipu6.so), fed by its bridge
+# over the frame channel (LC_REAR); =test: the test camera (gbos_test.so) takes its place. Either
+# way the USB rear is not exposed: Google's adapter publishes the libcamera camera as public ID 1
+# (device@1.0/legacy/1), and CameraService then rejected the USB rear (device@1.0/usb/1, "ID 1 is
+# already in use") on boot-17.
+LC_REAR=0
+if [ "$REAR" = 1 ] && { [ "$(cfg CAMERA_LIBCAMERA)" = 1 ] || [ "$(cfg CAMERA_LIBCAMERA)" = test ]; }; then
     REAR=0
-    echo "rear USB camera: off while CAMERA_LIBCAMERA=1 (its ID would clash with the libcamera camera)"
+    [ "$(cfg CAMERA_LIBCAMERA)" = 1 ] && LC_REAR=1
+    echo "rear USB camera: off while CAMERA_LIBCAMERA=$(cfg CAMERA_LIBCAMERA) (its ID would clash with the libcamera camera)"
 fi
 REAR_ROTATION=$(cfg CAMERA_REAR_ROTATION)
 case "$REAR_ROTATION" in
@@ -74,7 +80,8 @@ if [ "$REAR" = 1 ] && [ ! -s "$REAR_DESC" ]; then
     echo "WARNING: missing rear UVC descriptor $REAR_DESC; rear camera off"
     REAR=0
 fi
-echo "rear camera: $([ "$REAR" = 1 ] && echo "on, rotation $REAR_ROTATION" || echo off)"
+echo "rear camera: $([ "$REAR" = 1 ] && echo "on, rotation $REAR_ROTATION" ||
+    { [ "$LC_REAR" = 1 ] && echo "libcamera (gbos_ipu6.so), rotation $REAR_ROTATION"; } || echo off)"
 # Idle stop: each bridge stops its sensor stream after this many seconds without a consumer
 # (the ISYS refuses system suspend while a stream is open) and restarts it when an app streams.
 # The bridge stays running meanwhile; only a failed stop or restart exits (status 4, see the supervisor).
@@ -281,6 +288,8 @@ EOF
 # reported PRESENT while the legacy wrapper was still in setCallbacks, the wrapper crashed
 # (HandleCameraDeviceStatusChange, null pointer) 23 times in 2 minutes, and no app could open the USB
 # cameras meanwhile. Until the plugin is fixed, the vendor directory is left alone by default.
+# Since 2026-11-20 there are two plugins and one is added: CAMERA_LIBCAMERA=1 gbos_ipu6.so (the real
+# rear camera), CAMERA_LIBCAMERA=test gbos_test.so (colour bars). Both are INTERNAL "camera1".
 LIBCAMERA_PIPE=/vendor/lib64/libcamera/pipeline
 LIBCAMERA_PLUGINS=/postinstall/gbos/installer/lib/libcamera-pipeline
 LIBCAMERA_COPY=/data/local/tmp/gbos-libcamera-pipeline
@@ -298,13 +307,15 @@ libcamera_service_stable() {
     [ "$(pidof "$LIBCAMERA_PROCESS" 2>/dev/null)" = "$first" ]
 }
 add_libcamera_plugins() {
-    if [ "$(cfg CAMERA_LIBCAMERA)" != 1 ]; then
-        echo "libcamera plugins: off (CAMERA_LIBCAMERA=1 in gbos.cfg to test them)"
-        return 0
-    fi
-    set -- "$LIBCAMERA_PLUGINS"/*.so
+    case "$(cfg CAMERA_LIBCAMERA)" in
+        1) set -- "$LIBCAMERA_PLUGINS"/gbos_ipu6.so ;;
+        test) set -- "$LIBCAMERA_PLUGINS"/gbos_test.so ;;
+        *)
+            echo "libcamera plugins: off (CAMERA_LIBCAMERA=1 in gbos.cfg for the libcamera rear camera, =test for the test camera)"
+            return 0 ;;
+    esac
     if [ ! -f "$1" ]; then
-        echo "libcamera plugins: none in $LIBCAMERA_PLUGINS"
+        echo "libcamera plugins: $1 missing"
         return 0
     fi
     if [ ! -d "$LIBCAMERA_PIPE" ]; then
@@ -450,16 +461,38 @@ fi
 REAR_PID_RUN=
 REAR_FAKE=/data/local/tmp/ipu6-camera-fake-rear
 REAR_LOG=$LOGDIR/camera-bridge-rear-runtime.txt
-if [ "$REAR" = 1 ]; then
-    prepare_node 65
-    "$BRIDGE" --sensor ov8856 --rotate "$REAR_ROTATION" /dev/media0 /dev/video65 ${CAL:+"$CAL"} \
+# The rear's bridge build and output: as the front's (v4l2loopback /dev/video65), or for the
+# libcamera rear the 4:3 1920x1440 builds (installer/bin/1920x1440/, whatever CAMERA_SIZE says: the
+# plugin crops and scales to each stream) with the output "channel:camera1". GPU when the front
+# runs on the GPU.
+# --- rear bridge choice (tools/test_ipu6_camera_bridge.sh runs this block) ---
+REAR_BRIDGE_CPU=$BRIDGE_CPU
+REAR_BRIDGE_GPU=$BRIDGE_GPU
+REAR_OUT=/dev/video65
+if [ "$LC_REAR" = 1 ]; then
+    REAR_BRIDGE_CPU=/postinstall/gbos/installer/bin/1920x1440/ipu6-loopback
+    REAR_BRIDGE_GPU=/postinstall/gbos/installer/bin/1920x1440/vulkan/ipu6-loopback
+    REAR_OUT=channel:camera1
+    if [ ! -x "$REAR_BRIDGE_CPU" ]; then
+        echo "WARNING: missing $REAR_BRIDGE_CPU; libcamera rear camera off"
+        LC_REAR=0
+    fi
+fi
+REAR_BRIDGE=$REAR_BRIDGE_CPU
+if [ "$BRIDGE" = "$BRIDGE_GPU" ] && [ -x "$REAR_BRIDGE_GPU" ]; then
+    REAR_BRIDGE=$REAR_BRIDGE_GPU
+fi
+# --- end of rear bridge choice ---
+if [ "$REAR" = 1 ] || [ "$LC_REAR" = 1 ]; then
+    [ "$REAR" = 1 ] && prepare_node 65
+    "$REAR_BRIDGE" --sensor ov8856 --rotate "$REAR_ROTATION" /dev/media0 "$REAR_OUT" ${CAL:+"$CAL"} \
         > "$REAR_LOG" 2>&1 &
     REAR_PID_RUN=$!
-    echo "Started rear bridge pid=$REAR_PID_RUN"
+    echo "Started rear bridge pid=$REAR_PID_RUN ($REAR_BRIDGE, output $REAR_OUT)"
     if wait_active "$REAR_LOG" "$REAR_PID_RUN" &&
-       expose_uvc 65 "$REAR_DESC" "$REAR_FAKE" "$REAR_USB_VID" "$REAR_USB_PID"; then
-        add_rear_facing || true
-        echo "Rear bridge ready"
+       { [ "$LC_REAR" = 1 ] || expose_uvc 65 "$REAR_DESC" "$REAR_FAKE" "$REAR_USB_VID" "$REAR_USB_PID"; }; then
+        [ "$LC_REAR" = 1 ] || add_rear_facing || true
+        echo "Rear bridge ready$([ "$LC_REAR" = 1 ] && echo " (libcamera frame channel $REAR_OUT)")"
     else
         echo "WARNING: rear bridge did not reach streaming state; front camera only"
         tail -n 5 "$REAR_LOG" 2>/dev/null
@@ -502,7 +535,7 @@ start_front() {
     FRONT_SINCE=$(date +%s)
 }
 start_rear() {
-    "$BRIDGE" --sensor ov8856 --rotate "$REAR_ROTATION" --idle-stop "$REAR_IDLE_STOP" /dev/media0 /dev/video65 ${CAL:+"$CAL"} \
+    "$REAR_BRIDGE" --sensor ov8856 --rotate "$REAR_ROTATION" --idle-stop "$REAR_IDLE_STOP" /dev/media0 "$REAR_OUT" ${CAL:+"$CAL"} \
         >> "$REAR_LOG" 2>&1 &
     REAR_PID_RUN=$!
     REAR_SINCE=$(date +%s)
@@ -547,9 +580,9 @@ while [ -n "$BRIDGE_PID$REAR_PID_RUN" ]; do
         if ran_long "$REAR_SINCE"; then
             REAR_RESTARTS=0
         fi
-        if [ "$BRIDGE" = "$BRIDGE_GPU" ]; then
-            BRIDGE=$BRIDGE_CPU
-            echo "$(date +%T) GPU bridge exited; restarts use the CPU converter"
+        if [ "$REAR_BRIDGE" = "$REAR_BRIDGE_GPU" ]; then
+            REAR_BRIDGE=$REAR_BRIDGE_CPU
+            echo "$(date +%T) rear GPU bridge exited; restarts use the CPU converter"
         fi
         if [ "$rear_status" = "$EXIT_IDLE_FAILED" ] && [ "$REAR_IDLE_STOP" != 0 ]; then
             REAR_IDLE_STOP=0

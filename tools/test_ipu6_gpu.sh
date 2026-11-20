@@ -27,7 +27,7 @@ ln -s "$INC/vk_video" "$tmp/inc/vk_video"
 gcc -O2 -Wall -Wextra -Werror -Wno-unused-function -pthread -I "$tmp/inc" -o "$tmp/test-gpu" "$ROOT/tools/test_ipu6_gpu.c" -lm -ldl
 VK_ICD_FILENAMES=$ICD "$tmp/test-gpu"
 # The CAMERA_SIZE builds.
-for size in "1280 720" "640 480"; do
+for size in "1280 720" "640 480" "1920 1440"; do
 	set -- $size
 	gcc -O2 -Wall -Wextra -Werror -Wno-unused-function -pthread -DOUT_WIDTH=$1 -DOUT_HEIGHT=$2 -I "$tmp/inc" \
 		-o "$tmp/test-gpu-$1" "$ROOT/tools/test_ipu6_gpu.c" -lm -ldl

@@ -29,12 +29,12 @@ set -- video_nr=64,65 "card_label=$LOOPBACK_LABEL,$REAR_LABEL" exclusive_caps=1,
 [ "$#" -eq 3 ]
 [ "$2" = card_label=GBOS_IPU6_Camera,GBOS_IPU6_Rear_Camera ]
 # The rear bridge runs the OV8856 profile on video65; the front command line is unchanged.
-grep -Fq '"$BRIDGE" --sensor ov8856 --rotate "$REAR_ROTATION" /dev/media0 /dev/video65' "$BRIDGE"
+grep -Fq '"$REAR_BRIDGE" --sensor ov8856 --rotate "$REAR_ROTATION" /dev/media0 "$REAR_OUT"' "$BRIDGE"
 grep -Fq '"$BRIDGE" /dev/media0 /dev/video64 ${CAL:+"$CAL"}' "$BRIDGE"
 grep -Fq 'REAR_LOG=$LOGDIR/camera-bridge-rear-runtime.txt' "$BRIDGE"
 # Order: the rear starts only after the front streams, and the HAL restart comes after both.
 front_ready=$(grep -n 'wait_active "$LOGDIR/camera-bridge-runtime.txt" "$BRIDGE_PID"' "$BRIDGE" | tail -n 1 | cut -d: -f1)
-rear_start=$(grep -n '"$BRIDGE" --sensor ov8856' "$BRIDGE" | head -n 1 | cut -d: -f1)
+rear_start=$(grep -n '"$REAR_BRIDGE" --sensor ov8856' "$BRIDGE" | head -n 1 | cut -d: -f1)
 rear_ready=$(grep -n 'wait_active "$REAR_LOG" "$REAR_PID_RUN"' "$BRIDGE" | cut -d: -f1)
 hal_restart=$(grep -n 'killall -9 android.hardware.camera.provider-usb-service' "$BRIDGE" | cut -d: -f1)
 [ -n "$front_ready" ] && [ -n "$rear_start" ] && [ -n "$rear_ready" ] && [ -n "$hal_restart" ]
@@ -70,15 +70,42 @@ fi
 grep -Fq '[ "$(cfg CAMERA_REAR)" = 0 ] && REAR=0' "$BRIDGE"
 # With the libcamera plugins on, the USB rear stays off (its public ID 1 clashed on boot-17).
 rear_block=$(awk '/^REAR=1$/ { on = 1 } on { print } on && /^fi$/ { exit }' "$BRIDGE")
-rear_with() {	# CAMERA_REAR, CAMERA_LIBCAMERA -> REAR
+rear_with() {	# CAMERA_REAR, CAMERA_LIBCAMERA -> "REAR LC_REAR"
     (
         cfg() { case "$1" in CAMERA_REAR) printf '%s' "$c_rear" ;; CAMERA_LIBCAMERA) printf '%s' "$c_lc" ;; esac; }
         c_rear=$1 c_lc=$2
         eval "$rear_block" >/dev/null
-        echo "$REAR"
+        echo "$REAR $LC_REAR"
     )
 }
-[ "$(rear_with '' '')" = 1 ] && [ "$(rear_with '' 1)" = 0 ] && [ "$(rear_with 0 '')" = 0 ] && [ "$(rear_with '' 0)" = 1 ]
+# CAMERA_LIBCAMERA=1: the rear moves to the libcamera plugin; =test: the test camera replaces it.
+[ "$(rear_with '' '')" = "1 0" ] && [ "$(rear_with '' 1)" = "0 1" ] && [ "$(rear_with 0 '')" = "0 0" ] &&
+    [ "$(rear_with '' 0)" = "1 0" ] && [ "$(rear_with '' test)" = "0 0" ] && [ "$(rear_with 0 1)" = "0 0" ]
+
+# Rear bridge choice: the loopback rear uses the front's build; the libcamera rear the 1920x1440
+# builds with the frame channel output, on the GPU when the front is, and not at all without them.
+rear_choice=$(awk '/^# --- rear bridge choice/ { on = 1; next } /^# --- end of rear bridge choice/ { exit } on { print }' "$BRIDGE")
+echo "$rear_choice" | grep -q '/postinstall/gbos/installer/bin/1920x1440/vulkan/ipu6-loopback'
+rear_pick() {	# LC_REAR, front BRIDGE (cpu|gpu), 1920x1440 builds present (1|0) -> "REAR_BRIDGE REAR_OUT LC_REAR"
+    (
+        d=$(mktemp -d)
+        mkdir -p "$d/1920x1440/vulkan"
+        if [ "$3" = 1 ]; then
+            printf '#!/bin/sh\n' > "$d/1920x1440/ipu6-loopback"
+            cp "$d/1920x1440/ipu6-loopback" "$d/1920x1440/vulkan/ipu6-loopback"
+            chmod +x "$d/1920x1440/ipu6-loopback" "$d/1920x1440/vulkan/ipu6-loopback"
+        fi
+        LC_REAR=$1 BRIDGE_CPU=/cpu BRIDGE_GPU=/gpu
+        BRIDGE=/$2
+        eval "$(echo "$rear_choice" | sed "s#/postinstall/gbos/installer/bin#$d#g")" >/dev/null
+        echo "$REAR_BRIDGE $REAR_OUT $LC_REAR" | sed "s#$d#D#g"
+        rm -rf "$d"
+    )
+}
+[ "$(rear_pick 0 cpu 1)" = "/cpu /dev/video65 0" ]
+[ "$(rear_pick 1 cpu 1)" = "D/1920x1440/ipu6-loopback channel:camera1 1" ]
+[ "$(rear_pick 1 gpu 1)" = "D/1920x1440/vulkan/ipu6-loopback channel:camera1 1" ]
+[ "$(rear_pick 1 gpu 0 | cut -d' ' -f3)" = 0 ]
 # The front keeps its USB identity (Google lists 0408:4052 as FACING_FRONT).
 grep -Fq 'expose_uvc 64 "$FRONT_DESC" "$FAKE_DIR" 0408 4052' "$BRIDGE"
 
@@ -155,7 +182,26 @@ echo "$sup_out" | grep -q 'GPU bridge exited; restarts use the CPU converter'
 ! grep -q '^GPU' "$tmp/args"
 [ "$(grep -c '^--idle-stop 0 /dev/media0 /dev/video64' "$tmp/args")" = 3 ]
 # The rear gets its own switch; the front's setting is untouched by it.
-grep -Fq '"$BRIDGE" --sensor ov8856 --rotate "$REAR_ROTATION" --idle-stop "$REAR_IDLE_STOP"' "$BRIDGE"
+grep -Fq '"$REAR_BRIDGE" --sensor ov8856 --rotate "$REAR_ROTATION" --idle-stop "$REAR_IDLE_STOP" /dev/media0 "$REAR_OUT"' "$BRIDGE"
+# A rear GPU bridge that exits is restarted with its CPU build, and keeps its output (here the
+# libcamera frame channel); the front's choice is not touched.
+: > "$tmp/args"
+sup_out=$(
+    set +e
+    sleep() { :; }
+    FAKE_ARGS=$tmp/args; export FAKE_ARGS
+    LOGDIR=$tmp REAR_LOG=$tmp/rear.log CAL= REAR_ROTATION=0 IDLE_STOP=0
+    BRIDGE_CPU=$tmp/fake-bridge BRIDGE_GPU=$tmp/fake-gpu BRIDGE=$tmp/fake-gpu
+    REAR_BRIDGE_CPU=$tmp/fake-bridge REAR_BRIDGE_GPU=$tmp/fake-gpu REAR_BRIDGE=$tmp/fake-gpu
+    REAR_OUT=channel:camera1
+    BRIDGE_PID=
+    sh -c 'exit 1' & REAR_PID_RUN=$!
+    eval "$supervisor"
+) || true
+echo "$sup_out" | grep -q 'rear GPU bridge exited; restarts use the CPU converter'
+[ "$(echo "$sup_out" | grep -c 'GPU bridge exited')" = 1 ]
+! grep -q '^GPU' "$tmp/args"
+[ "$(grep -c '^--sensor ov8856 --rotate 0 --idle-stop 0 /dev/media0 channel:camera1$' "$tmp/args")" = 3 ]
 grep -Fq 'REAR_IDLE_STOP=0' "$BRIDGE"
 
 # Converter choice, run for real: the GPU build only when --probe-gpu succeeds and CAMERA_GPU is
@@ -193,6 +239,7 @@ grep -Fq 'add_libcamera_plugins || true' "$BRIDGE"
 mkdir -p "$tmp/pipe" "$tmp/plugins"
 echo google > "$tmp/pipe/camera.libipu7_hal_fatcat.so"
 echo ours > "$tmp/plugins/gbos_test.so"
+echo ipu6 > "$tmp/plugins/gbos_ipu6.so"
 run_plugins() {	# CAMERA_LIBCAMERA value, service behaviour (stable|crash|dead) -> calls made
     (
         cfg() { [ "$1" = CAMERA_LIBCAMERA ] && printf '%s' "$cfg_lc"; }
@@ -228,7 +275,13 @@ echo "$calls" | grep -qx 'start vendor.camera-provider-2-7-legacy-wrapper'
 echo "$calls" | grep -q 'stable (pid 4242)'
 echo "$calls" | grep -qx 'status 0'
 ! echo "$calls" | grep -q '^umount'
-[ "$(cat "$tmp/copy/camera.libipu7_hal_fatcat.so")" = google ] && [ "$(cat "$tmp/copy/gbos_test.so")" = ours ]
+# =1 adds only the IPU6 plugin, =test only the test camera (both are "camera1").
+[ "$(cat "$tmp/copy/camera.libipu7_hal_fatcat.so")" = google ] && [ "$(cat "$tmp/copy/gbos_ipu6.so")" = ipu6 ] &&
+    [ ! -e "$tmp/copy/gbos_test.so" ]
+rm -rf "$tmp/copy"
+calls=$(run_plugins test stable)
+echo "$calls" | grep -qx 'status 0'
+[ "$(cat "$tmp/copy/gbos_test.so")" = ours ] && [ ! -e "$tmp/copy/gbos_ipu6.so" ]
 # A crash loop (new pid at every look) or a dead service: the overlay is removed and the
 # service restarted as shipped (boot-16).
 for behaviour in crash dead; do
@@ -241,7 +294,7 @@ for behaviour in crash dead; do
 done
 calls=$(run_plugins 0)
 ! echo "$calls" | grep -q '^mount\|^stop\|^start'
-rm -f "$tmp/plugins/gbos_test.so"
+rm -f "$tmp/plugins/gbos_ipu6.so"
 calls=$(run_plugins 1)
 ! echo "$calls" | grep -q '^mount\|^stop\|^start'
 

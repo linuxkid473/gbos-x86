@@ -7,6 +7,11 @@
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 MAIN=$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir | sed 's#/\.git$##')
+# The NV12 scaler (kernel/libcamera-gbos/gbos_convert.h) runs on the build machine.
+conv=$(mktemp -d)
+gcc -O2 -Wall -Wextra -Werror -o "$conv/convert" "$ROOT/tools/test_libcamera_gbos_convert.c"
+"$conv/convert" | grep -qx LIBCAMERA_GBOS_CONVERT_TEST_PASS || { rm -rf "$conv"; exit 1; }
+rm -rf "$conv"
 NDK=${ANDROID_NDK:-$HOME/Android/Sdk/ndk/27.3.13750724}
 TC=$NDK/toolchains/llvm/prebuilt/linux-x86_64
 if [ ! -x "$TC/bin/clang++" ] || [ ! -d "$MAIN/build/src/libcamera/include" ] ||
@@ -36,11 +41,14 @@ size() { "$TC/bin/llvm-readelf" -sW "$1" | awk -v s="$2" '$8 == s { print $3; ex
 	-DLIBCAMERA_BASE_PRIVATE -DHAVE_LOCALE_T=1 -DHAVE_ANDROID_OS \
 	-isystem "$MAIN/build/libcamera-libcxx-config" -I "$MAIN/build/src/libcamera-gen/include" \
 	-I "$MAIN/build/src/libcamera/include" -I "$MAIN/build/src/libcamera/src/libcamera" -nostdlib++ \
-	-o "$tmp/test.so" "$ROOT/kernel/libcamera-gbos/gbos_test.cpp" \
+	-o "$tmp/test.so" "$ROOT/kernel/libcamera-gbos/gbos_test.cpp" "$ROOT/kernel/libcamera-gbos/gbos_ipu6.cpp" \
 	"$MAIN/build/libcamera-vendor/libc++.so" "$VLIB" -llog
 for pair in _ZTVN9libcamera15PipelineHandlerE:_ZTVN9libcamera23PipelineHandlerGbosTestE \
 	    _ZTVN9libcamera6Camera7PrivateE:_ZTVN9libcamera18GbosTestCameraDataE \
-	    _ZTVN9libcamera19CameraConfigurationE:_ZTVN9libcamera27GbosTestCameraConfigurationE; do
+	    _ZTVN9libcamera19CameraConfigurationE:_ZTVN9libcamera27GbosTestCameraConfigurationE \
+	    _ZTVN9libcamera15PipelineHandlerE:_ZTVN9libcamera23PipelineHandlerGbosIpu6E \
+	    _ZTVN9libcamera6Camera7PrivateE:_ZTVN9libcamera18GbosIpu6CameraDataE \
+	    _ZTVN9libcamera19CameraConfigurationE:_ZTVN9libcamera27GbosIpu6CameraConfigurationE; do
 	base=$(size "$VLIB" "${pair%%:*}"); ours=$(size "$tmp/test.so" "${pair#*:}")
 	[ -n "$base" ] && [ "$base" = "$ours" ] || {
 		echo "vtable size mismatch: ${pair%%:*} $base vs ${pair#*:} $ours" >&2
@@ -48,6 +56,11 @@ for pair in _ZTVN9libcamera15PipelineHandlerE:_ZTVN9libcamera23PipelineHandlerGb
 	}
 done
 # Only libraries the vendor HAL process can load.
-"$TC/bin/llvm-readelf" -d "$OUT/gbos_test.so" | awk '/NEEDED/ { print $5 }' | tr -d '[]' | sort |
-	tr '\n' ' ' | grep -qx 'camera.libcamera_hal_base.so libc++.so libc.so libdl.so liblog.so libm.so '
+for so in gbos_test.so gbos_ipu6.so; do
+	"$TC/bin/llvm-readelf" -d "$OUT/$so" | awk '/NEEDED/ { print $5 }' | tr -d '[]' | sort |
+		tr '\n' ' ' | grep -qx 'camera.libcamera_hal_base.so libc++.so libc.so libdl.so liblog.so libm.so ' || {
+		echo "$so needs a library the camera HAL process may not have" >&2
+		exit 1
+	}
+done
 echo "LIBCAMERA_GBOS_TEST_PASS"

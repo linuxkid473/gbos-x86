@@ -1285,3 +1285,31 @@ SHA-NI, 256-bit VAES/VPCLMULQDQ, AVX-IFMA and AVX-512; the lapis binaries use th
   - *GPU = CPU on real frames.* The boot-20 dumps rendered on the PC with the CPU path match the laptop's GPU pictures. Rear: mean |dU| 0.03–0.07, |dV| up to 0.13. Front, with the module's tables: |dU| 0.05, |dV| 0.07, worst 2 steps. The GPU path is not the cause of colour problems.
   - *Boot-19's front green stays unexplained.* `chroma_radius` explains the speckle, not a global green cast. The boot-20 front, with the same tables and light, is natural. If it comes back, the in-session colour lines and a `CAMERA_RAW_DUMP` dump will show whether it comes from the bridge.
   - *Not done: a second listed size.* v4l2loopback is single-format and the HAL may pick either listed size, which would not match the bridge's output (the 2026-11-17 incident). The 320x240 overlay stream it rejects is harmless.
+- 2026-11-20 **libcamera route, step 1: the real rear camera through Google's libcamera HAL (host-tested only, not deployed).**
+  - *Design:* the sensor, AE/AWB/AF and the raw→YUV conversion stay in the `ipu6-loopback` bridge, a separate process. With the output `channel:camera1` instead of `/dev/video65`, it hands each converted frame to the new plugin `kernel/libcamera-gbos/gbos_ipu6.cpp` (`usb/installer/lib/libcamera-pipeline/gbos_ipu6.so`) over a frame channel (`kernel/ipu6-channel.h`).
+    - The channel is the abstract unix socket `@gbos-camera:camera1` (SOCK_SEQPACKET, no file, so no permissions or labels), plus a memfd with 4 YUYV slots. Each frame message carries the slot, a sequence number, the capture timestamp, the exposure time and the gains.
+    - One client at a time; a new connection replaces the old one. A connected client counts as the loopback reader did, so idle, conversion, the AE fast start and the idle stop work unchanged. A frame message the client can't take at once is dropped; the bridge never waits.
+    - A bridge crash can't take the camera service down: the plugin keeps the app's requests and reconnects every 500 ms.
+  - *Plugin:* INTERNAL `camera1` (Location Back; `camera_hal.yaml` maps it to the back camera). It registers only when `/proc/net/unix` shows the bridge's channel.
+    - NV12 streams at any even size up to 1920×1440, up to 3 at once. Listed: 640×480, 1280×720, 1280×960, 1440×1080, 1920×1080, 1920×1440; the HAL adds 320×240 and 640×360. Each stream is a centred crop of the picture at the stream's aspect, scaled bilinearly (`gbos_convert.h`); 1920×1080 from 1920×1440 is a plain copy.
+    - JPEG, EXIF and thumbnails come from Google's HAL layer (`PostProcessorJpeg`, `EncoderLibJpeg` in `camera.libcamera_hal_base.so`).
+    - Metadata per request: SensorTimestamp, ExposureTime, AnalogueGain, FrameDuration. Controls as the test camera: FrameDurationLimits 33.3 ms, ExposureTime 100–66666 µs (needed for the FULL level Google forces); manual exposure isn't applied yet.
+    - Buffers are written through `MappedFrameBuffer` with `DMA_BUF_IOCTL_SYNC` around the CPU writes.
+  - *Bridge:* new 4:3 builds `installer/bin/1920x1440/{,vulkan/}ipu6-loopback`, used for the libcamera rear whatever `CAMERA_SIZE` says.
+  - *Launcher:*
+    - `CAMERA_LIBCAMERA=1` now runs the rear bridge with `channel:camera1` (no `/dev/video65`, UVC identity or facing entry) and adds only `gbos_ipu6.so`. `CAMERA_LIBCAMERA=test` adds only `gbos_test.so`, as before.
+    - The rear's GPU/CPU choice follows the front's, and it falls back to CPU on its own.
+    - If the crash guard removes the plugins, the rear is unavailable for that boot; the front is unaffected.
+  - *Tests:*
+    - `test_frame_channel`: connect/hello/memfd, slots and sequence numbers, metadata, replacement, disconnect, no blocking with a client that doesn't read, a second bridge refused, at every build size.
+    - `tools/test_libcamera_gbos_convert.c`: exact copy, uniform colours exact at all sizes, centred crops, colours in place, padding untouched.
+    - The launcher tests cover the rear mode, the rear build choice, the rear GPU→CPU restart with the channel output, and the choice of plugin. vtable sizes are checked against the vendor library for the new classes.
+  - *Unverified on hardware:*
+    - that the app opens the libcamera camera at all (boot-17's stall was the front's 1280×960 size, but the libcamera camera itself was never seen in the app);
+    - the stride of the HAL's gralloc NV12 buffers (taken from the plane length, as the test camera did);
+    - the GPU time at 1920×1440 (expected ~26–31 ms from boot-19's 20–23 ms at 1080p, close to the 33 ms frame);
+    - SELinux denials (permissive) for the provider connecting to the bridge.
+  - *To test:* `CAMERA_LIBCAMERA=1` in the stick's gbos.cfg. Look for:
+    - in `camera-bridge-setup.txt`: `rear camera: libcamera` and `Rear bridge ready (libcamera frame channel channel:camera1)`;
+    - in the rear runtime log: `frame channel: client connected`;
+    - in logcat: `GbosIpu6 ... camera1: registered`, `frame channel connected`, `30 frames delivered`.

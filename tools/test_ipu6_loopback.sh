@@ -4,7 +4,8 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 docker run --rm --network none -v "$ROOT:/repo" -w /repo gbos-kbuild \
 	sh -c 'gcc -O2 -Wall -Wextra -Werror -pthread -o /tmp/test-ipulb tools/test_ipu6_loopback.c -lm && /tmp/test-ipulb &&
 	       gcc -O2 -Wall -Wextra -Werror -pthread -DOUT_WIDTH=1280 -DOUT_HEIGHT=720 -o /tmp/test-ipulb-720 tools/test_ipu6_loopback.c -lm && /tmp/test-ipulb-720 &&
-	       gcc -O2 -Wall -Wextra -Werror -pthread -DOUT_WIDTH=640 -DOUT_HEIGHT=480 -o /tmp/test-ipulb-640 tools/test_ipu6_loopback.c -lm && /tmp/test-ipulb-640 && gcc -O2 -Wall -Wextra -Werror -o /tmp/test-sizes tools/test_v4l2loopback_framesizes.c && /tmp/test-sizes'
+	       gcc -O2 -Wall -Wextra -Werror -pthread -DOUT_WIDTH=640 -DOUT_HEIGHT=480 -o /tmp/test-ipulb-640 tools/test_ipu6_loopback.c -lm && /tmp/test-ipulb-640 &&
+	       gcc -O2 -Wall -Wextra -Werror -pthread -DOUT_WIDTH=1920 -DOUT_HEIGHT=1440 -o /tmp/test-ipulb-1440 tools/test_ipu6_loopback.c -lm && /tmp/test-ipulb-1440 && gcc -O2 -Wall -Wextra -Werror -o /tmp/test-sizes tools/test_v4l2loopback_framesizes.c && /tmp/test-sizes'
 sh -n "$ROOT/usb/installer/bin/ipu6-camera-bridge.sh" \
 	"$ROOT/usb/surface/surface-camera.sh" "$ROOT/tools/build_ipu6_loopback.sh"
 grep -q 'CAMERA_BRIDGE=0' "$ROOT/usb/gbos.cfg"

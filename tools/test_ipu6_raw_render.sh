@@ -5,7 +5,7 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
-for size in "1920 1080" "1280 720" "640 480"; do
+for size in "1920 1080" "1280 720" "640 480" "1920 1440"; do
 	set -- $size
 	gcc -O2 -Wall -Wextra -Werror -Wno-unused-function -pthread -DOUT_WIDTH=$1 -DOUT_HEIGHT=$2 \
 		-o "$tmp/render" "$ROOT/tools/ipu6_raw_render.c" -lm

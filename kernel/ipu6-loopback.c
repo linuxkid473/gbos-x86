@@ -10,6 +10,11 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+#include <stddef.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+
+#include "ipu6-channel.h"
 
 /*
  * Output 1280x960 YUYV (4:3, the sensors' aspect). Colour is computed on a COL_WIDTH x
@@ -2179,6 +2184,229 @@ static void write_black(int fd, unsigned char *frame)
 }
 
 /*
+ * Where converted frames go: a v4l2loopback node (the USB camera HAL reads it), or, with the
+ * output "channel:<camera id>", the frame channel to the gbOS libcamera plugin
+ * (kernel/ipu6-channel.h). The channel is single-consumer like the loopback node, so readers is
+ * 0 or 1 and the capture loop (idle, conversion, idle stop) works the same for both.
+ */
+struct out_sink {
+	int channel;
+	int fd;				/* loopback node, or the channel's listening socket */
+	int client;			/* channel: connected plugin, or -1 */
+	int memfd;
+	unsigned char *map;
+	size_t map_bytes;
+	uint64_t seq;
+	unsigned int next_slot;
+	char name[64];
+};
+
+#define CHANNEL_SLOT_BYTES (((OUT_FRAME_BYTES) + 4095) & ~(size_t)4095)
+
+static socklen_t channel_address(const char *name, struct sockaddr_un *a)
+{
+	memset(a, 0, sizeof(*a));
+	a->sun_family = AF_UNIX;
+	/* Abstract: sun_path[0] = 0, then the name (no terminator; the length says where it ends). */
+	int n = snprintf(a->sun_path + 1, sizeof(a->sun_path) - 1, "%s%s", IPU6_CHANNEL_PREFIX, name);
+	return (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + n);
+}
+
+static int channel_open(struct out_sink *s, const char *name)
+{
+	struct sockaddr_un a;
+	socklen_t len;
+
+	if (!*name || strlen(name) >= sizeof(s->name) || strchr(name, '/'))
+		return -1;
+	snprintf(s->name, sizeof(s->name), "%s", name);
+	s->channel = 1;
+	s->client = -1;
+	s->map_bytes = IPU6_CHANNEL_HEADER_BYTES + IPU6_CHANNEL_SLOTS * CHANNEL_SLOT_BYTES;
+	s->memfd = memfd_create("gbos-camera-frames", MFD_CLOEXEC);
+	if (s->memfd < 0 || ftruncate(s->memfd, (off_t)s->map_bytes)) {
+		perror("frame channel: memfd");
+		return -1;
+	}
+	s->map = mmap(NULL, s->map_bytes, PROT_READ | PROT_WRITE, MAP_SHARED, s->memfd, 0);
+	if (s->map == MAP_FAILED) {
+		s->map = NULL;
+		perror("frame channel: mmap");
+		return -1;
+	}
+	s->fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+	len = channel_address(name, &a);
+	if (s->fd < 0 || bind(s->fd, (struct sockaddr *)&a, len) || listen(s->fd, 2)) {
+		fprintf(stderr, "frame channel: cannot listen on @%s%s: %s\n", IPU6_CHANNEL_PREFIX, name,
+			strerror(errno));
+		return -1;
+	}
+	return 0;
+}
+
+static void channel_drop_client(struct out_sink *s, const char *why)
+{
+	if (s->client < 0)
+		return;
+	close(s->client);
+	s->client = -1;
+	printf("frame channel: client %s\n", why);
+	fflush(stdout);
+}
+
+/* A new client: the newest connection wins (a restarted camera service reconnects). */
+static void channel_accept(struct out_sink *s)
+{
+	for (;;) {
+		int c = accept4(s->fd, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
+		if (c < 0)
+			return;
+		struct ipu6_channel_hello h = {
+			.magic = IPU6_CHANNEL_MAGIC, .version = IPU6_CHANNEL_VERSION,
+			.width = OUT_WIDTH, .height = OUT_HEIGHT, .slots = IPU6_CHANNEL_SLOTS,
+			.slot_bytes = (uint32_t)CHANNEL_SLOT_BYTES, .header_bytes = IPU6_CHANNEL_HEADER_BYTES,
+			.map_bytes = s->map_bytes,
+		};
+		char control[CMSG_SPACE(sizeof(int))];
+		struct iovec iov = { .iov_base = &h, .iov_len = sizeof(h) };
+		struct msghdr m = { .msg_iov = &iov, .msg_iovlen = 1, .msg_control = control,
+				    .msg_controllen = sizeof(control) };
+		memset(control, 0, sizeof(control));
+		struct cmsghdr *cm = CMSG_FIRSTHDR(&m);
+		cm->cmsg_level = SOL_SOCKET;
+		cm->cmsg_type = SCM_RIGHTS;
+		cm->cmsg_len = CMSG_LEN(sizeof(int));
+		memcpy(CMSG_DATA(cm), &s->memfd, sizeof(int));
+		if (sendmsg(c, &m, MSG_NOSIGNAL) != (ssize_t)sizeof(h)) {
+			fprintf(stderr, "frame channel: hello failed: %s\n", strerror(errno));
+			close(c);
+			continue;
+		}
+		channel_drop_client(s, "replaced by a new connection");
+		s->client = c;
+		s->seq = 0;
+		struct ipu6_channel_shared *sh = (struct ipu6_channel_shared *)s->map;
+		for (int k = 0; k < IPU6_CHANNEL_SLOTS; k++)
+			__atomic_store_n(&sh->seq[k], 0, __ATOMIC_RELEASE);
+		printf("frame channel: client connected (%ux%u YUYV, %d slots)\n", OUT_WIDTH, OUT_HEIGHT,
+		       IPU6_CHANNEL_SLOTS);
+		fflush(stdout);
+	}
+}
+
+/* 1 while a client is connected. Never blocks. */
+static int channel_readers(struct out_sink *s)
+{
+	channel_accept(s);
+	if (s->client >= 0) {
+		struct pollfd p = { .fd = s->client, .events = POLLIN };
+		if (poll(&p, 1, 0) > 0) {
+			char buf[64];
+			ssize_t n = recv(s->client, buf, sizeof(buf), MSG_DONTWAIT);
+			if ((p.revents & (POLLHUP | POLLERR)) || n == 0 ||
+			    (n < 0 && errno != EAGAIN && errno != EINTR))
+				channel_drop_client(s, "disconnected");
+		}
+	}
+	return s->client >= 0;
+}
+
+static void channel_send(struct out_sink *s, const unsigned char *frame, const struct ipu6_channel_frame *meta)
+{
+	struct ipu6_channel_shared *sh = (struct ipu6_channel_shared *)s->map;
+	unsigned int k = s->next_slot;
+	struct ipu6_channel_frame f = *meta;
+
+	if (s->client < 0)
+		return;
+	s->next_slot = (k + 1) % IPU6_CHANNEL_SLOTS;
+	__atomic_store_n(&sh->seq[k], 0, __ATOMIC_RELEASE);
+	memcpy(s->map + IPU6_CHANNEL_HEADER_BYTES + k * CHANNEL_SLOT_BYTES, frame, OUT_FRAME_BYTES);
+	f.magic = IPU6_CHANNEL_MAGIC;
+	f.slot = k;
+	f.seq = ++s->seq;
+	__atomic_store_n(&sh->seq[k], f.seq, __ATOMIC_RELEASE);
+	if (send(s->client, &f, sizeof(f), MSG_DONTWAIT | MSG_NOSIGNAL) < 0 &&
+	    errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)
+		channel_drop_client(s, "gone (send failed)");
+}
+
+/* Opens the output; for a loopback node also sets its format and primes it with black. */
+static int sink_open(struct out_sink *s, const char *out_dev)
+{
+	memset(s, 0, sizeof(*s));
+	s->fd = s->client = s->memfd = -1;
+	if (!strncmp(out_dev, "channel:", 8))
+		return channel_open(s, out_dev + 8);
+	s->fd = open(out_dev, O_RDWR | O_CLOEXEC);
+	if (s->fd < 0) {
+		perror("open loopback node");
+		return -1;
+	}
+	struct v4l2_format outfmt = { .type = V4L2_BUF_TYPE_VIDEO_OUTPUT };
+	outfmt.fmt.pix.width = OUT_WIDTH;
+	outfmt.fmt.pix.height = OUT_HEIGHT;
+	outfmt.fmt.pix.pixelformat = OUT_FOURCC;
+	outfmt.fmt.pix.field = V4L2_FIELD_NONE;
+	outfmt.fmt.pix.bytesperline = OUT_WIDTH * 2;
+	outfmt.fmt.pix.sizeimage = OUT_FRAME_BYTES;
+	outfmt.fmt.pix.colorspace = V4L2_COLORSPACE_SRGB;
+	if (ioctl(s->fd, VIDIOC_S_FMT, &outfmt) ||
+	    outfmt.fmt.pix.pixelformat != OUT_FOURCC ||
+	    outfmt.fmt.pix.width != OUT_WIDTH || outfmt.fmt.pix.height != OUT_HEIGHT ||
+	    outfmt.fmt.pix.bytesperline != OUT_WIDTH * 2 ||
+	    outfmt.fmt.pix.sizeimage < OUT_FRAME_BYTES) {
+		perror("configure V4L2 loopback output");
+		return -1;
+	}
+	return 0;
+}
+
+static void sink_close(struct out_sink *s)
+{
+	if (s->client >= 0) close(s->client);
+	if (s->fd >= 0) close(s->fd);
+	if (s->map) munmap(s->map, s->map_bytes);
+	if (s->memfd >= 0) close(s->memfd);
+	s->fd = s->client = s->memfd = -1;
+	s->map = NULL;
+}
+
+static int sink_readers(struct out_sink *s)
+{
+	return s->channel ? channel_readers(s) : loopback_readers(s->fd);
+}
+
+/* 0 or -1 (loopback write failed); a channel frame is dropped rather than fail. */
+static int sink_write(struct out_sink *s, const unsigned char *frame, const struct ipu6_channel_frame *meta)
+{
+	if (s->channel) {
+		channel_send(s, frame, meta);
+		return 0;
+	}
+	return write(s->fd, frame, OUT_FRAME_BYTES) == (ssize_t)OUT_FRAME_BYTES ? 0 : -1;
+}
+
+/* The loopback node for its client-usage events; -1 for a channel (nothing to drain). */
+static int sink_event_fd(const struct out_sink *s)
+{
+	return s->channel ? -1 : s->fd;
+}
+
+/* Stopped: wait up to timeout_ms for a consumer (an event or a connection). <0 on a poll error. */
+static int sink_wait(struct out_sink *s, int timeout_ms)
+{
+	struct pollfd p = { .fd = s->fd, .events = s->channel ? POLLIN : POLLPRI };
+	int r = poll(&p, 1, timeout_ms);
+
+	if (r < 0)
+		return errno == EINTR ? 0 : -1;
+	if (!s->channel && r > 0 && (p.revents & POLLPRI))
+		loopback_drain_events(s->fd);
+	return 0;
+}
+
+/*
  * Frame health: counts a run of bad frames (or poll timeouts) and says when to give up.
  * Returns 1 to give up: nothing good for BAD_FRAME_GIVE_UP_S seconds.
  */
@@ -2557,6 +2785,32 @@ static void raw_dump(const char *sensor, const uint16_t *raw, unsigned int width
 	raw_dump_start(sensor, raw, width, height, stride, yuyv, ae, 0);
 }
 
+/*
+ * What a frame channel client reports to Android for this frame: the state AE has set (the
+ * sensor applies a change a frame or two later, so this lags a step while AE moves).
+ */
+static void frame_meta(struct ipu6_channel_frame *m, const struct ae_state *ae, const struct v4l2_buffer *b)
+{
+	struct timespec now;
+	double line_us;
+
+	memset(m, 0, sizeof(*m));
+	if (b->timestamp.tv_sec || b->timestamp.tv_usec) {
+		m->timestamp_ns = (int64_t)b->timestamp.tv_sec * 1000000000 + (int64_t)b->timestamp.tv_usec * 1000;
+	} else {
+		clock_gettime(CLOCK_MONOTONIC, &now);
+		m->timestamp_ns = (int64_t)now.tv_sec * 1000000000 + now.tv_nsec;
+	}
+	/* The default frame (height + default VBLANK lines) is 1/30 s; ae_frame_ms assumes the same. */
+	line_us = ae->height > 0 ? 1e6 / 30 / (ae->height + (ae->vblank.present ? ae->vblank.def : 0)) : 0;
+	m->exposure_us = (int32_t)(ae->exposure.value * line_us + 0.5);
+	m->frame_duration_us = (int32_t)(ae_frame_ms(ae) * 1000 + 0.5);
+	m->analogue_gain = ae->again.min > 0 ? (float)ae->again.value / ae->again.min : 1.0f;
+	m->digital_gain = ae->dgain.present && ae->dgain.min > 0 ? (float)ae->dgain.value / ae->dgain.min : 1.0f;
+	m->wb_gain_r = wb_last_gain_q12[0] ? wb_last_gain_q12[0] / 4096.0f : 1.0f;
+	m->wb_gain_b = wb_last_gain_q12[2] ? wb_last_gain_q12[2] / 4096.0f : 1.0f;
+}
+
 static int capture_to_loopback(const char *media_dev, const char *out_dev,
 			       const struct sensor_profile *profile)
 {
@@ -2568,7 +2822,8 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev,
 	struct media_device_info info = { 0 };
 	struct path path;
 	char sensor_path[128], csi_path[128], capture_path[128];
-	int mfd = -1, sfd = -1, cfd = -1, vfd = -1, outfd = -1;
+	int mfd = -1, sfd = -1, cfd = -1, vfd = -1;
+	struct out_sink sink = { .fd = -1, .client = -1, .memfd = -1 };
 	int linked = 0, result = 1, have_lens = 0;
 	struct capture cap = { .fd = -1 };
 	struct bridge_buffer *buffers = cap.buffers;
@@ -2600,11 +2855,12 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev,
 	sfd = open(sensor_path, O_RDWR | O_CLOEXEC);
 	cfd = open(csi_path, O_RDWR | O_CLOEXEC);
 	vfd = open(capture_path, O_RDWR | O_NONBLOCK | O_CLOEXEC);
-	outfd = open(out_dev, O_RDWR | O_CLOEXEC);
-	if (sfd < 0 || cfd < 0 || vfd < 0 || outfd < 0) {
-		perror("open camera or loopback node");
+	if (sfd < 0 || cfd < 0 || vfd < 0) {
+		perror("open camera nodes");
 		goto done;
 	}
+	if (sink_open(&sink, out_dev))
+		goto done;
 	if (subformat(sfd, path.sensor_pad->index, &sensor, VIDIOC_SUBDEV_G_FMT) ||
 	    subformat(cfd, path.csi_sink->index, &saved_sink, VIDIOC_SUBDEV_G_FMT) ||
 	    ioctl(vfd, VIDIOC_G_FMT, &saved_video)) {
@@ -2648,22 +2904,6 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev,
 	cap.min_size = video.fmt.pix.sizeimage;
 	if (capture_start(&cap))
 		goto done;
-	struct v4l2_format outfmt = { .type = V4L2_BUF_TYPE_VIDEO_OUTPUT };
-	outfmt.fmt.pix.width = OUT_WIDTH;
-	outfmt.fmt.pix.height = OUT_HEIGHT;
-	outfmt.fmt.pix.pixelformat = OUT_FOURCC;
-	outfmt.fmt.pix.field = V4L2_FIELD_NONE;
-	outfmt.fmt.pix.bytesperline = OUT_WIDTH * 2;
-	outfmt.fmt.pix.sizeimage = OUT_FRAME_BYTES;
-	outfmt.fmt.pix.colorspace = V4L2_COLORSPACE_SRGB;
-	if (ioctl(outfd, VIDIOC_S_FMT, &outfmt) ||
-	    outfmt.fmt.pix.pixelformat != OUT_FOURCC ||
-	    outfmt.fmt.pix.width != OUT_WIDTH || outfmt.fmt.pix.height != OUT_HEIGHT ||
-	    outfmt.fmt.pix.bytesperline != OUT_WIDTH * 2 ||
-	    outfmt.fmt.pix.sizeimage < OUT_FRAME_BYTES) {
-		perror("configure V4L2 loopback output");
-		goto done;
-	}
 	output = malloc(OUT_FRAME_BYTES);
 	if (!output)
 		goto done;
@@ -2673,7 +2913,7 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev,
 		output[i + 2] = 16;
 		output[i + 3] = 128;
 	}
-	if (write(outfd, output, OUT_FRAME_BYTES) != (ssize_t)OUT_FRAME_BYTES) {
+	if (!sink.channel && sink_write(&sink, output, NULL)) {
 		perror("prime V4L2 loopback");
 		goto done;
 	}
@@ -2682,12 +2922,15 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev,
 	af_init(&af, have_lens ? lens_path : NULL);
 	signal(SIGINT, stop_bridge);
 	signal(SIGTERM, stop_bridge);
-	int usage_events = loopback_subscribe_usage(outfd);
-	printf("bridge active: %ux%u %s to %ux%u YUYV%s; ", video.fmt.pix.width, video.fmt.pix.height,
+	int usage_events = sink.channel || loopback_subscribe_usage(sink.fd);
+	printf("bridge active: %ux%u %s to %ux%u YUYV%s%s%s%s; ", video.fmt.pix.width, video.fmt.pix.height,
 	       profile->rgbir ? "RGB-IR" : "Bayer", OUT_WIDTH, OUT_HEIGHT,
-	       output_rotate180 ? ", rotated 180" : "");
+	       output_rotate180 ? ", rotated 180" : "",
+	       sink.channel ? " via the frame channel @" IPU6_CHANNEL_PREFIX : "",
+	       sink.channel ? sink.name : "", sink.channel ? " (libcamera)" : "");
 	if (idle_stop_s > 0)
 		printf("sensor stops after %.0f s without a consumer (wake-up: %s)\n", idle_stop_s,
+		       sink.channel ? "channel connection" :
 		       usage_events ? "client-usage event" : "polling readers_active");
 	else
 		printf("sensor remains streaming until stop\n");
@@ -2702,16 +2945,12 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev,
 			 * event wakes us at once; readers_active is checked on every wake-up and
 			 * at least every second (every 250 ms without the event).
 			 */
-			struct pollfd ofd = { .fd = outfd, .events = POLLPRI };
-			int r = poll(&ofd, 1, usage_events ? 1000 : 250);
-			if (r < 0 && errno != EINTR) {
-				perror("poll loopback");
+			if (sink_wait(&sink, usage_events ? 1000 : 250)) {
+				perror("poll loopback or frame channel");
 				result = 1;
 				break;
 			}
-			if (r > 0 && (ofd.revents & POLLPRI))
-				loopback_drain_events(outfd);
-			int readers = loopback_readers(outfd);
+			int readers = sink_readers(&sink);
 			double now = monotonic_s();
 			if (idle_decide(&idle, readers, now, idle_stop_s) != IDLE_START)
 				continue;
@@ -2721,7 +2960,7 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev,
 			fflush(stdout);
 			/* A frame at once, so the consumer is not left waiting; real ones follow. */
 			have_output = 0;
-			write_black(outfd, output);
+			write_black(sink.channel ? -1 : sink.fd, output);
 			idle_watchdog("restart: active frame controls", idle_step_timeout_s);
 			ae_set_idle(&ae, 0);	/* the planned frame, before the sensor powers up */
 			if (idle_resume_stream(&cap)) {
@@ -2772,7 +3011,7 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev,
 			result = 1;
 			break;
 		}
-		int readers = loopback_readers(outfd);
+		int readers = sink_readers(&sink);
 		if (readers != last_readers) {
 			printf("bridge: %s\n", readers < 0 ? "readers_active unavailable; converting every frame" :
 			       readers ? "consumer streaming; converting frames" :
@@ -2792,7 +3031,7 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev,
 			printf("bridge: no consumer for %.0f s; stopping the sensor stream (stop %u)\n",
 			       idle_stop_s, idle.stops + 1);
 			fflush(stdout);
-			idle_pause_stream(&cap, &af, outfd);	/* the dequeued buffer is requeued on restart */
+			idle_pause_stream(&cap, &af, sink_event_fd(&sink));	/* the dequeued buffer is requeued on restart */
 			idle.stopped = 1;
 			idle.stops++;
 			printf("bridge: sensor stream stopped in %.1f s; sensor%s powered down, waiting for a consumer\n",
@@ -2806,8 +3045,8 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev,
 		if (bad) {
 			int give_up = frame_health_bad(&health, monotonic_s(), bad, b.flags, b.bytesused);
 			/* Keep the consumer fed with the last picture rather than nothing. */
-			if (!give_up && have_output && bridge_should_convert(readers) &&
-			    write(outfd, output, OUT_FRAME_BYTES) != (ssize_t)OUT_FRAME_BYTES) {
+			if (!give_up && have_output && bridge_should_convert(readers) && !sink.channel &&
+			    sink_write(&sink, output, NULL)) {
 				fprintf(stderr, "write loopback frame failed: %s\n", strerror(errno));
 				give_up = 1;
 			}
@@ -2827,6 +3066,8 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev,
 			woke_at = -1;
 		}
 		double mean_green = 0;
+		struct ipu6_channel_frame meta;
+		frame_meta(&meta, &ae, &b);
 		if (!bridge_should_convert(readers)) {
 			/* Idle: only the cheap sampled statistics, so exposure is right on resume. */
 			unsigned int unused_gain[3];
@@ -2836,7 +3077,7 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev,
 		} else if (convert_bayer_yuyv(buffers[b.index].data, video.fmt.pix.width,
 					      video.fmt.pix.height, video.fmt.pix.bytesperline,
 					      output, OUT_FRAME_BYTES, &mean_green) ||
-			   write(outfd, output, OUT_FRAME_BYTES) != (ssize_t)OUT_FRAME_BYTES) {
+			   sink_write(&sink, output, &meta)) {
 			fprintf(stderr, "convert or write loopback frame failed: %s\n", strerror(errno));
 			result = 1;
 			break;
@@ -2887,7 +3128,7 @@ done:
 	if (linked && setup_link(mfd, &path, path.output->flags))
 		fprintf(stderr, "could not restore IPU6 media link; reboot required\n");
 	free(output);
-	if (outfd >= 0) close(outfd);
+	sink_close(&sink);
 	if (vfd >= 0) close(vfd);
 	if (cfd >= 0) close(cfd);
 	if (sfd >= 0) close(sfd);
@@ -3008,7 +3249,7 @@ int main(int argc, char **argv)
 #endif
 	if (parse_bridge_args(argc, argv, &o)) {
 		fprintf(stderr, "usage: %s [--sensor ov5675|ov8856] [--rotate 0|180] [--idle-stop SECONDS] "
-			"/dev/mediaN /dev/videoN [calibration dir or colour-matrix table]\n", argv[0]);
+			"/dev/mediaN /dev/videoN|channel:CAMERA_ID [calibration dir or colour-matrix table]\n", argv[0]);
 		return 2;
 	}
 	setvbuf(stdout, NULL, _IOLBF, 0);

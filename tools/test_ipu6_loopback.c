@@ -1992,6 +1992,131 @@ static int test_idle_restart_deadline(void)
 	return EXIT_IDLE_FAILED == 4 && EXIT_IDLE_FAILED != 3 ? 0 : 4;
 }
 
+
+/*
+ * The frame channel to the libcamera plugin (kernel/ipu6-channel.h), with a client doing what
+ * gbos_ipu6.cpp does: connect, take the hello and the memfd, read frames from the slots.
+ */
+static int channel_client(const char *name)
+{
+	struct sockaddr_un a;
+	socklen_t len = channel_address(name, &a);
+	int c = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+
+	if (c >= 0 && connect(c, (struct sockaddr *)&a, len)) {
+		close(c);
+		return -1;
+	}
+	return c;
+}
+
+static int channel_hello(int c, struct ipu6_channel_hello *h, int *memfd)
+{
+	char control[CMSG_SPACE(sizeof(int))];
+	struct iovec iov = { .iov_base = h, .iov_len = sizeof(*h) };
+	struct msghdr m = { .msg_iov = &iov, .msg_iovlen = 1, .msg_control = control,
+			    .msg_controllen = sizeof(control) };
+	struct pollfd p = { .fd = c, .events = POLLIN };
+
+	*memfd = -1;
+	if (poll(&p, 1, 2000) != 1 || recvmsg(c, &m, 0) != (ssize_t)sizeof(*h))
+		return -1;
+	for (struct cmsghdr *cm = CMSG_FIRSTHDR(&m); cm; cm = CMSG_NXTHDR(&m, cm))
+		if (cm->cmsg_type == SCM_RIGHTS)
+			memcpy(memfd, CMSG_DATA(cm), sizeof(int));
+	return *memfd >= 0 ? 0 : -1;
+}
+
+static int channel_frame(int c, struct ipu6_channel_frame *f)
+{
+	struct pollfd p = { .fd = c, .events = POLLIN };
+
+	return poll(&p, 1, 2000) == 1 && recv(c, f, sizeof(*f), 0) == (ssize_t)sizeof(*f) ? 0 : -1;
+}
+
+static int test_frame_channel(void)
+{
+	static unsigned char frame[OUT_FRAME_BYTES];
+	struct out_sink s, other;
+	struct ipu6_channel_hello h;
+	struct ipu6_channel_frame meta = { 0 }, f;
+	char name[64], dev[80];
+	int memfd, c1, c2;
+
+	snprintf(name, sizeof(name), "test-%d", (int)getpid());
+	snprintf(dev, sizeof(dev), "channel:%s", name);
+	if (!sink_open(&other, "channel:") || !sink_open(&other, "channel:a/b"))
+		return 1;
+	sink_close(&other);
+	if (sink_open(&s, dev) || !s.channel || sink_event_fd(&s) != -1)
+		return 2;
+	if (!sink_open(&other, dev))	/* a second bridge on the same camera */
+		return 3;
+	sink_close(&other);
+	if (sink_readers(&s) != 0)
+		return 4;
+	/* Stopped bridge: a connection ends the wait at once and counts as a reader. */
+	c1 = channel_client(name);
+	double t0 = monotonic_s();
+	if (c1 < 0 || sink_wait(&s, 1000) || monotonic_s() - t0 > 0.5 || sink_readers(&s) != 1)
+		return 5;
+	if (channel_hello(c1, &h, &memfd) || h.magic != IPU6_CHANNEL_MAGIC || h.width != OUT_WIDTH ||
+	    h.height != OUT_HEIGHT || h.slots != IPU6_CHANNEL_SLOTS ||
+	    h.slot_bytes < OUT_FRAME_BYTES || h.header_bytes < sizeof(struct ipu6_channel_shared) ||
+	    h.map_bytes < h.header_bytes + (uint64_t)h.slots * h.slot_bytes)
+		return 6;
+	unsigned char *map = mmap(NULL, h.map_bytes, PROT_READ, MAP_SHARED, memfd, 0);
+	close(memfd);
+	if (map == MAP_FAILED)
+		return 7;
+	const struct ipu6_channel_shared *sh = (const void *)map;
+	for (unsigned int k = 1; k <= 6; k++) {
+		memset(frame, (int)(k * 37), sizeof(frame));
+		frame[k] = 1;
+		meta.exposure_us = (int32_t)(1000 + k);
+		meta.timestamp_ns = (int64_t)k * 33333333;
+		if (sink_write(&s, frame, &meta) || channel_frame(c1, &f))
+			return 8;
+		const unsigned char *slot = map + h.header_bytes + (size_t)f.slot * h.slot_bytes;
+		if (f.magic != IPU6_CHANNEL_MAGIC || f.seq != k || f.slot != (k - 1) % IPU6_CHANNEL_SLOTS ||
+		    f.exposure_us != (int32_t)(1000 + k) || f.timestamp_ns != (int64_t)k * 33333333 ||
+		    __atomic_load_n(&sh->seq[f.slot], __ATOMIC_ACQUIRE) != k ||
+		    memcmp(slot, frame, OUT_FRAME_BYTES))
+			return 9;
+	}
+	if (sink_readers(&s) != 1)
+		return 10;
+	/* A new connection (the camera service restarted) replaces the old one; seq starts over. */
+	c2 = channel_client(name);
+	if (c2 < 0 || sink_readers(&s) != 1 || channel_hello(c2, &h, &memfd))
+		return 11;
+	close(memfd);
+	char byte;
+	struct pollfd p = { .fd = c1, .events = POLLIN };
+	if (poll(&p, 1, 1000) != 1 || recv(c1, &byte, 1, 0) != 0)
+		return 12;
+	close(c1);
+	if (sink_write(&s, frame, &meta) || channel_frame(c2, &f) || f.seq != 1)
+		return 13;
+	/* A client that does not read: frames are dropped, the bridge never blocks. */
+	t0 = monotonic_s();
+	for (int k = 0; k < 2000; k++)
+		sink_write(&s, frame, &meta);
+	if (monotonic_s() - t0 > 20 || sink_readers(&s) != 1)
+		return 14;
+	close(c2);
+	if (sink_readers(&s) != 0)
+		return 15;
+	/* Nobody connected: writes are no-ops. */
+	if (sink_write(&s, frame, &meta))
+		return 16;
+	munmap(map, h.map_bytes);
+	sink_close(&s);
+	if (s.fd != -1 || s.map)
+		return 17;
+	return 0;
+}
+
 #ifndef IPU6_LOOPBACK_TEST_LIB	/* tools/test_ipu6_gpu.c reuses the helpers above */
 int main(void)
 {
@@ -2061,6 +2186,8 @@ int main(void)
 			return printf("test_idle_watchdog %d\n", r), 1;
 		if ((r = test_idle_restart_deadline()))
 			return printf("test_idle_restart_deadline %d\n", r), 1;
+		if ((r = test_frame_channel()))
+			return printf("test_frame_channel %d\n", r), 1;
 	}
 	if (test_no_cfa_grid())
 		return 40 + test_no_cfa_grid();

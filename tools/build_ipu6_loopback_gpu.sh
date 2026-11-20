@@ -11,11 +11,14 @@ API=30
 OUT=$ROOT/usb/installer/bin/vulkan/ipu6-loopback
 mkdir -p "$(dirname "$OUT")"
 cd "$ROOT"	# relative source path: no local paths in the binary
-# The default size (1920x1080) and the CAMERA_SIZE builds (installer/bin/<size>/vulkan/).
+# The default size (1920x1080), the CAMERA_SIZE builds (installer/bin/<size>/vulkan/) and the
+# libcamera rear's 4:3 build (1920x1440, CAMERA_LIBCAMERA=1).
 OUT720=$ROOT/usb/installer/bin/1280x720/vulkan/ipu6-loopback
 OUT640=$ROOT/usb/installer/bin/640x480/vulkan/ipu6-loopback
-mkdir -p "$(dirname "$OUT720")" "$(dirname "$OUT640")"
-for target in "$OUT:" "$OUT720:-DOUT_WIDTH=1280 -DOUT_HEIGHT=720" "$OUT640:-DOUT_WIDTH=640 -DOUT_HEIGHT=480"; do
+OUT1440=$ROOT/usb/installer/bin/1920x1440/vulkan/ipu6-loopback
+mkdir -p "$(dirname "$OUT720")" "$(dirname "$OUT640")" "$(dirname "$OUT1440")"
+for target in "$OUT:" "$OUT720:-DOUT_WIDTH=1280 -DOUT_HEIGHT=720" "$OUT640:-DOUT_WIDTH=640 -DOUT_HEIGHT=480" \
+	"$OUT1440:-DOUT_WIDTH=1920 -DOUT_HEIGHT=1440"; do
 	out=${target%%:*} size=${target#*:}
 	# shellcheck disable=SC2086
 	"$BIN/x86_64-linux-android$API-clang" -O2 -pthread -Wall -Wextra -Werror -DIPU6_GPU $size \
@@ -27,5 +30,5 @@ for target in "$OUT:" "$OUT720:-DOUT_WIDTH=1280 -DOUT_HEIGHT=720" "$OUT640:-DOUT
 		exit 1
 	fi
 done
-file "$OUT720" "$OUT640"
+file "$OUT720" "$OUT640" "$OUT1440"
 file "$OUT"
