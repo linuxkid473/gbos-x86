@@ -369,17 +369,37 @@ static double wb_locus_nir_band = 0.10;
 static double wb_white_rg = 1.0, wb_white_bg = 1.0;
 static double wb_locus_distance, wb_locus_band = WB_LOCUS_BAND, wb_nir_ratio;
 
-static void constrain_white_point(double *rg, double *bg)
+/*
+ * Green side. Many real lights sit off the locus on its green side (both R/G and B/G lower than
+ * the calibrated light of the same colour temperature): fluorescent tubes, CFLs and many LEDs.
+ * Boot-14 (2026-11-19, evening room light, white tiled wall filling the frame, NIR 0.00-0.02):
+ * the front's grey-world sat 0.10-0.14 off the locus on that side (the rear, in the same room,
+ * 0.04-0.05 on the same side), and the 0.03 band pulled it back: the wall came out green/cyan
+ * (R gain about 8%, B gain about 15-20% short). So on the front the white point is measured
+ * only on regions whose colour a light could have (within WB_LOCUS_ACCEPT_MAGENTA x band on
+ * the magenta side, wb_locus_green_band on the green side), and when enough of the frame
+ * qualifies that measurement is trusted up to wb_locus_green_band. A saturated green scene
+ * (foliage) lies outside the zone; if too little of the frame qualifies, grey-world with the
+ * plain band is used as before. The rear is unchanged (its colour is reported good).
+ */
+static double wb_locus_green_band = 0.18;	/* 0: the plain band (host-test negative control) */
+#define WB_LOCUS_ACCEPT_MAGENTA 2.0
+#define WB_REGIONS_X 8
+#define WB_REGIONS_Y 6
+#define WB_REGIONS_MIN_FRACTION 0.25	/* of the regions with signal */
+static double wb_locus_side;		/* > 0 green side, < 0 magenta side (last measurement) */
+static int wb_regions_used, wb_regions_valid;
+
+/*
+ * Nearest point of the locus polyline (calibrated white points, warm to cool). Returns the
+ * distance, signed: > 0 on the green side (towards lower R/G and B/G), < 0 on the magenta side.
+ * Needs ccm_count >= 2.
+ */
+static double locus_nearest(double rg, double bg, double *px_out, double *py_out)
 {
 	int order[CCM_MAX];
-	double best_d = 1e9, best_x = *rg, best_y = *bg;
+	double best_d = 1e9, best_x = rg, best_y = bg, best_side = 1;
 
-	wb_locus_distance = 0;
-	wb_locus_band = WB_LOCUS_BAND + wb_locus_nir_band * wb_nir_ratio;
-	if (wb_locus_band > WB_LOCUS_BAND_MAX)
-		wb_locus_band = WB_LOCUS_BAND_MAX;
-	if (ccm_count < 2)
-		return;
 	for (int i = 0; i < ccm_count; i++)
 		order[i] = i;
 	for (int i = 1; i < ccm_count; i++)	/* insertion sort by R/G, warm (high) first */
@@ -390,18 +410,66 @@ static void constrain_white_point(double *rg, double *bg)
 		double ax = ccm_table[order[i]].rg, ay = ccm_table[order[i]].bg;
 		double bx = ccm_table[order[i + 1]].rg, by = ccm_table[order[i + 1]].bg;
 		double dx = bx - ax, dy = by - ay, len2 = dx * dx + dy * dy;
-		double t = len2 > 0 ? ((*rg - ax) * dx + (*bg - ay) * dy) / len2 : 0;
+		double t = len2 > 0 ? ((rg - ax) * dx + (bg - ay) * dy) / len2 : 0;
 		if (t < 0) t = 0;
 		if (t > 1) t = 1;
-		double px = ax + t * dx, py = ay + t * dy, d = hypot(*rg - px, *bg - py);
-		if (d < best_d) { best_d = d; best_x = px; best_y = py; }
+		double px = ax + t * dx, py = ay + t * dy, d = hypot(rg - px, bg - py);
+		if (d < best_d) {
+			/* Warm-to-cool runs towards lower R/G, higher B/G: the origin side is green. */
+			double cross = dx * (bg - ay) - dy * (rg - ax);
+			best_d = d; best_x = px; best_y = py;
+			best_side = cross >= 0 ? 1 : -1;
+		}
 	}
-	wb_locus_distance = best_d;
-	if (best_d > wb_locus_band) {
-		double k = wb_locus_band / best_d;
-		*rg = best_x + (*rg - best_x) * k;
-		*bg = best_y + (*bg - best_y) * k;
+	*px_out = best_x;
+	*py_out = best_y;
+	return best_side * best_d;
+}
+
+/* The band for this frame: WB_LOCUS_BAND, widened with NIR (see above). */
+static void update_locus_band(void)
+{
+	wb_locus_band = WB_LOCUS_BAND + wb_locus_nir_band * wb_nir_ratio;
+	if (wb_locus_band > WB_LOCUS_BAND_MAX)
+		wb_locus_band = WB_LOCUS_BAND_MAX;
+}
+
+/* Pull (rg, bg) to within the band of the locus; green_band (if larger) on the green side. */
+static void constrain_white_point_sided(double *rg, double *bg, double green_band)
+{
+	double px, py;
+
+	wb_locus_distance = 0;
+	wb_locus_side = 0;
+	update_locus_band();
+	if (ccm_count < 2)
+		return;
+	double side = locus_nearest(*rg, *bg, &px, &py), d = fabs(side);
+	double band = side > 0 && green_band > wb_locus_band ? green_band : wb_locus_band;
+	wb_locus_distance = d;
+	wb_locus_side = side;
+	if (d > band) {
+		double k = band / d;
+		*rg = px + (*rg - px) * k;
+		*bg = py + (*bg - py) * k;
 	}
+}
+
+#ifdef CAMERA_BRIDGE_TEST
+/* The plain band on both sides (the rear, and the front's grey-world fallback). */
+static void constrain_white_point(double *rg, double *bg)
+{
+	constrain_white_point_sided(rg, bg, 0);
+}
+#endif
+
+/* Could a light have this colour? (Inside the zone around the locus described above.) */
+static int locus_accepts(double rg, double bg)
+{
+	double px, py, side = locus_nearest(rg, bg, &px, &py);
+
+	return side >= 0 ? side <= fmax(wb_locus_green_band, wb_locus_band)
+			 : -side <= WB_LOCUS_ACCEPT_MAGENTA * wb_locus_band;
 }
 
 /*
@@ -527,6 +595,8 @@ static void calculate_white_balance(const uint16_t *raw, unsigned int width,
 {
 	uint64_t count[4] = { 0 }, all_sum = 0, all_count = 0;
 	double sum[4] = { 0 };
+	static double rsum[WB_REGIONS_Y][WB_REGIONS_X][4];
+	static uint64_t rcount[WB_REGIONS_Y][WB_REGIONS_X][4];
 	int shaded = lsc_active && lsc_built.w == width && lsc_built.h == height && cfa_has_ir_sites();
 	static unsigned int ghist[1024];
 	unsigned int gmax = 0, gnear = 0, gcount = 0;
@@ -561,6 +631,8 @@ static void calculate_white_balance(const uint16_t *raw, unsigned int width,
 	 * and its colour is reported good, so it is left as it was (see HANDOFF 2026-11-19).
 	 */
 	unsigned int tile_limit = raw_clip - (raw_clip - BLACK_LEVEL) / 20;	/* 95% of the range */
+	memset(rsum, 0, sizeof(rsum));
+	memset(rcount, 0, sizeof(rcount));
 	for (unsigned int y = 0; y < height; y += 16) {
 		for (unsigned int x = 0; x < width; x += 16) {
 			uint64_t tsum[4] = { 0 }, tcount[4] = { 0 };
@@ -589,9 +661,13 @@ static void calculate_white_balance(const uint16_t *raw, unsigned int width,
 				shade[1] = shade[CFA_IR] = lsc_map[1][oy][ox] / 4096.0;
 				shade[2] = lsc_map[2][oy][ox] / 4096.0;
 			}
+			unsigned int rx = (unsigned int)((uint64_t)x * WB_REGIONS_X / width);
+			unsigned int ry = (unsigned int)((uint64_t)y * WB_REGIONS_Y / height);
 			for (int channel = 0; channel < 4; channel++) {
 				sum[channel] += tsum[channel] * shade[channel];
 				count[channel] += tcount[channel];
+				rsum[ry][rx][channel] += tsum[channel] * shade[channel];
+				rcount[ry][rx][channel] += tcount[channel];
 			}
 		}
 	}
@@ -627,7 +703,38 @@ static void calculate_white_balance(const uint16_t *raw, unsigned int width,
 		 * becomes a colour cast.
 		 */
 		double rg = mean[0] / mean[1], bg = mean[2] / mean[1];
-		constrain_white_point(&rg, &bg);
+		double green_band = 0;
+
+		/* Front: measure on the regions a light could have lit (see wb_locus_green_band). */
+		wb_regions_used = wb_regions_valid = 0;
+		if (cfa_has_ir_sites() && ccm_count >= 2 && wb_locus_green_band > 0) {
+			double acc[3] = { 0 };
+			update_locus_band();
+			for (int ry = 0; ry < WB_REGIONS_Y; ry++)
+				for (int rx = 0; rx < WB_REGIONS_X; rx++) {
+					double m[4];
+					for (int c = 0; c < 4; c++)
+						m[c] = rcount[ry][rx][c] ? rsum[ry][rx][c] / rcount[ry][rx][c] : 0;
+					double n = nir_estimate_f(m[CFA_IR], m[1]);
+					for (int c = 0; c < 3; c++)
+						m[c] = fmax(0, m[c] - m[CFA_IR] + n * nir_keep_q12[c] / 4096.0);
+					if (m[1] < 4 * WB_MIN_SIGNAL || m[0] <= 0 || m[2] <= 0)
+						continue;
+					wb_regions_valid++;
+					if (!locus_accepts(m[0] / m[1], m[2] / m[1]))
+						continue;
+					wb_regions_used++;
+					for (int c = 0; c < 3; c++)	/* brighter regions weigh more */
+						acc[c] += m[c];
+				}
+			if (wb_regions_used > 0 &&
+			    wb_regions_used >= WB_REGIONS_MIN_FRACTION * wb_regions_valid) {
+				rg = acc[0] / acc[1];
+				bg = acc[2] / acc[1];
+				green_band = wb_locus_green_band;
+			}
+		}
+		constrain_white_point_sided(&rg, &bg, green_band);
 		wb_white_rg = rg;
 		wb_white_bg = bg;
 		double gain = 1.0 / rg;
@@ -682,11 +789,19 @@ static void log_cfa_phases(const uint16_t *raw, unsigned int width,
 	       wb_last_gain_q12[0] >= 16384 || wb_last_gain_q12[2] >= 16384 ||
 	       wb_last_gain_q12[0] <= 1024 || wb_last_gain_q12[2] <= 1024 ? " (clamped)" : "");
 	if (ccm_active)
-		printf("ccm: illuminant %d (%.0f%%) + %d, grey-world R/G=%.3f B/G=%.3f, used %.3f/%.3f (locus distance %.3f, band %.3f)\n",
+		printf("ccm: illuminant %d (%.0f%%) + %d, grey-world R/G=%.3f B/G=%.3f, used %.3f/%.3f (locus distance %.3f %s, band %.3f",
 		       ccm_pick[0], ccm_weight * 100.0, ccm_pick[1],
 		       wb_last_mean[1] > 0 ? wb_last_mean[0] / wb_last_mean[1] : 0.0,
 		       wb_last_mean[1] > 0 ? wb_last_mean[2] / wb_last_mean[1] : 0.0,
-		       wb_white_rg, wb_white_bg, wb_locus_distance, wb_locus_band);
+		       wb_white_rg, wb_white_bg, wb_locus_distance,
+		       wb_locus_side > 0 ? "green side" : wb_locus_side < 0 ? "magenta side" : "on it",
+		       wb_locus_band);
+	if (ccm_active && wb_regions_valid)
+		printf(", %d of %d regions lit like a light%s)\n", wb_regions_used, wb_regions_valid,
+		       wb_regions_used >= WB_REGIONS_MIN_FRACTION * wb_regions_valid && wb_regions_used ?
+		       ", green side allowed" : "; grey-world");
+	else if (ccm_active)
+		printf(")\n");
 	else
 		printf("ccm: no calibration table; generic saturation %.2f\n", saturation_q12 / 4096.0);
 	if (cfa_has_ir_sites())

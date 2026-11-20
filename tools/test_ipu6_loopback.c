@@ -1149,6 +1149,7 @@ static void restore_colour_defaults(int keep_b, double nir_band)
 {
 	nir_keep_q12[2] = keep_b;
 	wb_locus_nir_band = nir_band;
+	wb_locus_green_band = 0.18;
 	clip_detect = 1;
 	ccm_count = 0; ccm_active = 0;
 }
@@ -1156,6 +1157,8 @@ static void restore_colour_defaults(int keep_b, double nir_band)
 /*
  * A boot12_daylight grey with strong infrared is neutral. Negative control: the old full IR
  * subtraction with the fixed 0.03 band (boot-12's bridge) pulls it to the locus: green.
+ * The controls below run without the green-side zone (boot-14), which on its own also accepts
+ * this daylight grey; the first check runs with everything on.
  */
 static int test_daylight_ir_grey(void)
 {
@@ -1171,6 +1174,7 @@ static int test_daylight_ir_grey(void)
 		result = 2;
 	else if (wb_nir_ratio < 0.35 || wb_nir_ratio > 0.5 || wb_locus_distance > wb_locus_band)
 		result = 3;	/* NIR ~0.43 of green; within the (widened) band */
+	wb_locus_green_band = 0;
 	/* Negative control: no blue NIR term, fixed band. */
 	nir_keep_q12[2] = 0;
 	wb_locus_nir_band = 0;
@@ -1211,6 +1215,68 @@ static int test_lowlight_led_grey(void)
 	if (!result && (run_rgbir_scene(&sc, &old) || fabs(old.u - r.u) > 0.5 || fabs(old.v - r.v) > 0.5))
 		result = 4;
 	restore_colour_defaults(keep, band);
+	return result;
+}
+
+/*
+ * Boot-14 (2026-11-19): white tiled wall under evening room light, front camera, 4x gain. Raw
+ * cfa4x4 means of frame 1800, above black: R 97.2, G 159.3, B 78.4, IR 14.3 (NIR about 0).
+ * After IR removal R/G 0.57, B/G 0.44: about 0.12 off this test locus on its green side, as
+ * the real frames were 0.10-0.14 off the module's. The wall must come out neutral.
+ * Negative control: the plain 0.03 band (boot-14's bridge) leaves it green (U and V < -2).
+ */
+static const struct rgbir_scene boot14_wall = { { 97.2, 159.3, 78.4, 14.3 }, { 0 }, 0, 0, 20.0, 4.0 };
+
+static int test_green_side_light(void)
+{
+	struct scene_result r;
+	int result = 0;
+
+	if (load_test_locus())
+		return 1;
+	if (run_rgbir_scene(&boot14_wall, &r) || fabs(r.u) > 2 || fabs(r.v) > 2)
+		result = 2;
+	else if (wb_locus_side <= 0.10 || wb_regions_used != wb_regions_valid || !wb_regions_valid)
+		result = 3;	/* really the boot-14 case: well off on the green side, all regions used */
+	wb_locus_green_band = 0;
+	if (!result && (run_rgbir_scene(&boot14_wall, &r) || !(r.u < -2 && r.v < -2)))
+		result = 4;
+	restore_colour_defaults(nir_keep_q12[2], wb_locus_nir_band);
+	return result;
+}
+
+/*
+ * Foliage: a saturated green top third (IR-free R/G 0.30, B/G 0.25, far outside the zone) over
+ * a grey that sits on the locus. Its regions are left out, so the grey stays neutral; plain
+ * grey-world (the zone off) is pulled towards the foliage and tints the grey (U -3, V +5). A frame
+ * of foliage only has no region a light could have lit: grey-world with the plain band, so the
+ * green side never opens for it.
+ */
+static int test_green_scene_not_light(void)
+{
+	struct rgbir_scene sc = { { 0.70 * 160 + 16, 176, 0.50 * 160 + 16, 16 },
+				  { 0.30 * 160 + 16, 176, 0.25 * 160 + 16, 16 }, 972 / 3, 0, 10.0, 2.0 };
+	struct scene_result r;
+	int result = 0;
+
+	if (load_test_locus())
+		return 1;
+	if (run_rgbir_scene(&sc, &r) || fabs(r.u) > 2 || fabs(r.v) > 2)
+		result = 2;
+	else if (wb_regions_valid != 48 || wb_regions_used < 30 || wb_regions_used > 34)
+		result = 3;	/* the 16 top regions (and any straddling the edge) left out */
+	wb_locus_green_band = 0;	/* grey-world over the whole frame */
+	if (!result && (run_rgbir_scene(&sc, &r) || !(fabs(r.u) > 2 || fabs(r.v) > 2)))
+		result = 4;
+	wb_locus_green_band = 0.18;
+	sc.top_rows = 972;		/* foliage everywhere */
+	if (!result && run_rgbir_scene(&sc, &r))
+		result = 5;
+	else if (!result && (wb_regions_used != 0 || wb_locus_distance < 0.1))
+		result = 6;
+	else if (!result && fabs(hypot(wb_white_rg - 0.30, wb_white_bg - 0.25)) < 0.1)
+		result = 7;	/* pulled to the locus band, not trusted */
+	restore_colour_defaults(nir_keep_q12[2], wb_locus_nir_band);
 	return result;
 }
 
@@ -1660,6 +1726,10 @@ int main(void)
 			return printf("test_daylight_ir_grey %d\n", r), 260 + r;
 		if ((r = test_lowlight_led_grey()))
 			return printf("test_lowlight_led_grey %d\n", r), 270 + r;
+		if ((r = test_green_side_light()))
+			return printf("test_green_side_light %d\n", r), 1;
+		if ((r = test_green_scene_not_light()))
+			return printf("test_green_scene_not_light %d\n", r), 1;
 		if ((r = test_clipped_sky()))
 			return printf("test_clipped_sky %d\n", r), 280 + r;
 		if ((r = test_soft_clip()))

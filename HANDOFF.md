@@ -1051,3 +1051,19 @@ SHA-NI, 256-bit VAES/VPCLMULQDQ, AVX-IFMA and AVX-512; the lapis binaries use th
   - *Dual-boot installer:* its file list was months old. It lacked sensor_vendor_overlay.sh, sensor_trial_diag.sh, tablet_mode.sh, sensordiag.sh, mask_vendor_modules.sh, gbos_fp, sensors/, camera/, thermal/ and display/, and still shipped `optimize.sh` (performance governor), which nothing else installs. It now matches usb/install.sh. New `tools/test_build_lists.sh` checks that the image builder, the dual-boot installer and deploy_stick.sh copy every FILES/DIRS item usb/install.sh does, plus the build.sh defaults. It fails on the old install_dualboot.sh, with 10 items missing.
   - *Not included:* `gbos-latitude7320-rotation-policy.apk`, which is unsigned and never registered by Android (2026-11-19 brightness entry); rotation works through tablet_mode.sh. The stick's `DEBUG_LOGS=1` is test-only; images keep 0.
   - *Not run:* a full image build (writes an ~8 GB image to dist/). The dry run reports everything present, sensor sub-HAL "will build", cameras on with calibration.
+- 2026-11-20 **Boot-14 front green tint under evening room light: cause and fix (bridge `f0cbd504…`; host-tested only, not deployed).**
+  - *Cause:* the light, not the IR model. The white wall's grey-world (lens-shading-corrected, IR-free) was R/G 0.57–0.62, B/G 0.40–0.42, which is 0.10–0.14 off the module's locus on its green side (both ratios lower than the calibrated light of the same colour temperature, as fluorescent and many LED lights are). NIR was 0.00–0.02.
+    - The rear, in the same room, sat 0.04–0.05 off on the same side, so the light really is greenish. The RGB-IR filters just see it as more so.
+    - Even with nothing subtracted from blue, B/G would have been about 0.50 against a locus value of about 0.57, so the IR subtraction can't explain it.
+    - The 0.03 band pulled the white point back to the locus: R gain about 8% and B gain about 15–20% short, so the wall came out green/cyan.
+  - *Fix (front only; the rear is unchanged):*
+    - White-balance statistics are also gathered per region (8×6). The white point is the mean of the regions whose colour a light could have: up to 2× the band on the magenta side and up to 0.18 on the green side. That mean may stay up to 0.18 off on the green side.
+    - If fewer than a quarter of the regions qualify (for example a frame of foliage), it falls back to grey-world with the plain band, as before.
+    - Saturated colours are left out of the measurement, so a grey under a green top third now stays neutral. Before, it was tinted U −3, V +5.
+    - Log: `ccm: ... (locus distance D green side|magenta side, band B, N of M regions lit like a light, green side allowed|; grey-world)`.
+  - Simulated with the module's real tables (stick only, never committed): boot-14 frames 1800/2700 go from U −6.7/V −3.6 to −0.0/−0.5. Boot-11 LED at 17.5x, boot-12 daylight and boot-14's dark start-up frame change by ≤0.1.
+  - Tests (synthetic locus):
+    - `test_green_side_light`: boot-14 levels come out neutral; negative control with the zone off is green.
+    - `test_green_scene_not_light`: foliage regions are left out; the zone off tints the grey; foliage alone never opens the green side.
+    - The daylight test's old-bridge controls now also switch the zone off.
+  - Unverified on hardware: other lights, and pale green walls, which any grey-world AWB will neutralise.
