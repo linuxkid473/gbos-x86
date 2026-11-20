@@ -46,6 +46,24 @@
 #define AE_MAX_STEP 1.6
 #define AE_INTERVAL 3	/* frames between updates; sensor settings lag about two frames */
 /*
+ * Fast phase when an app starts streaming (ae_wake): the idle state's exposure is often far off.
+ * Boot-20: on every rear session the first frames were ~2x over the target (green mean 345 vs
+ * 174 just before, at 11.6x gain), and with 1.6x steps every 3 frames the picture stayed blown out
+ * for over a second (the raw dump 1 s in). For AE_FAST_FRAMES frames AE updates every
+ * AE_FAST_INTERVAL frames (the settings' lag) with steps of up to AE_FAST_MAX_STEP.
+ */
+#define AE_FAST_FRAMES 12
+#define AE_FAST_INTERVAL 2
+#define AE_FAST_MAX_STEP 4.0
+/*
+ * A blown-out picture hides how far over it is (clipped sites stop at the sensor's maximum, so the
+ * mean under-reports). In the fast phase, when more than AE_FAST_CLIP_FRACTION of the green samples
+ * are clipped, exposure at least halves. Normal operation is unchanged (a lamp in the picture must
+ * not darken the rest).
+ */
+#define AE_FAST_CLIP_FRACTION 0.05
+static double ae_clip_fraction;	/* green samples at >= 95% of the clip level (last statistics) */
+/*
  * Exposure program limits from the module's Windows tuning (OV5678_0BF501T3_TGL.aiqb, AE
  * exposure-program record 261): analogue gain at most 15.5x (also the top of its black-level
  * calibration; the driver allows 2047/128 = 16x), and in automatic mode exposure up to
@@ -717,6 +735,10 @@ static void calculate_white_balance(const uint16_t *raw, unsigned int width,
 	 * and its colour is reported good, so it is left as it was (see HANDOFF 2026-11-19).
 	 */
 	unsigned int tile_limit = raw_clip - (raw_clip - BLACK_LEVEL) / 20;	/* 95% of the range */
+	unsigned int clipped = 0;
+	for (unsigned int v = tile_limit; v < 1024; v++)
+		clipped += ghist[v];
+	ae_clip_fraction = gcount ? (double)clipped / gcount : 0;
 	memset(rsum, 0, sizeof(rsum));
 	memset(rcount, 0, sizeof(rcount));
 	/* Statistics (white balance, AE) over what the picture shows: the crop. */
@@ -1525,6 +1547,7 @@ struct ae_state {
 	int height, base_max, long_max, margin;
 	/* Idle: frame stretched to idle_vblank; applied_vblank is what the sensor has now. */
 	int idle, idle_vblank, applied_vblank;
+	int fast;		/* frames left in the fast phase (ae_wake) */
 };
 
 /* VBLANK the sensor should have: the plan's, or the idle frame while nobody reads. */
@@ -1613,11 +1636,14 @@ static int ae_update(struct ae_state *ae, double mean_green)
 	int exposure = ae->exposure.value, again = ae->again.value, dgain = ae->dgain.value;
 	int vblank = ae->vblank.value;
 
-	ratio = mean_green > 1.0 ? AE_TARGET / mean_green : AE_MAX_STEP;
+	double max_step = ae->fast > 0 ? AE_FAST_MAX_STEP : AE_MAX_STEP;
+	ratio = mean_green > 1.0 ? AE_TARGET / mean_green : max_step;
+	if (ae->fast > 0 && ae_clip_fraction > AE_FAST_CLIP_FRACTION && ratio > 0.5)
+		ratio = 0.5;
 	if (ratio > 1.0 - AE_DEADBAND && ratio < 1.0 + AE_DEADBAND)
 		return 0;
-	if (ratio > AE_MAX_STEP) ratio = AE_MAX_STEP;
-	if (ratio < 1.0 / AE_MAX_STEP) ratio = 1.0 / AE_MAX_STEP;
+	if (ratio > max_step) ratio = max_step;
+	if (ratio < 1.0 / max_step) ratio = 1.0 / max_step;
 	ae_plan(ae, before * ratio);
 	return exposure != ae->exposure.value || again != ae->again.value ||
 	       dgain != ae->dgain.value || vblank != ae->vblank.value;
@@ -1789,7 +1815,10 @@ static void ae_frame(struct ae_state *ae, double mean_green)
 		       "(%.1f ms frame%s, %.1fx gain)\n", mean_green, AE_TARGET, ae->exposure.value,
 		       ae->again.value, ae->dgain.value, ae_effective_vblank(ae), ae_frame_ms(ae),
 		       ae->idle ? ", idle" : "", sensor_total_gain);
-	if (ae->frames % AE_INTERVAL || !ae_update(ae, mean_green))
+	int interval = ae->fast > 0 ? AE_FAST_INTERVAL : AE_INTERVAL;
+	if (ae->fast > 0)
+		ae->fast--;
+	if (ae->frames % interval || !ae_update(ae, mean_green))
 		return;
 	int vblank = ae_effective_vblank(ae);
 	if (ae_apply(ae, ae->exposure.value, vblank, ae->again.value, ae->dgain.value,
@@ -1799,6 +1828,13 @@ static void ae_frame(struct ae_state *ae, double mean_green)
 		return;
 	}
 	ae->applied_vblank = vblank;
+}
+
+/* An app started streaming (or the stream restarted): converge fast for the next frames. */
+static void ae_wake(struct ae_state *ae)
+{
+	ae->fast = AE_FAST_FRAMES;
+	ae->frames = 0;
 }
 
 /* A consumer started or stopped: switch between the planned and the idle frame at once. */
@@ -2411,47 +2447,114 @@ static int idle_resume_stream(struct capture *cap)
 static const char *raw_dump_dir;
 static int raw_dump_left;
 
+/*
+ * The files are written by a detached thread from copies, never from the frame loop: boot-20's
+ * first rear dump (16 MB raw + 4 MB YUYV onto the FAT stick) stalled the loop long enough for
+ * the USB HAL to give up ("v4l2 dequeue timeout", "serious device error"). One dump at a time;
+ * one requested while another is still being written is skipped.
+ */
+struct raw_dump_job {
+	char base[480];
+	void *raw, *yuyv;
+	size_t raw_size;
+	char info[1024];
+};
+static volatile int raw_dump_busy;
+
+static void raw_dump_write(const char *path, const void *data, size_t size)
+{
+	FILE *f = fopen(path, "wb");
+
+	if (f) {
+		fwrite(data, 1, size, f);
+		fclose(f);
+	}
+}
+
+static void *raw_dump_thread(void *arg)
+{
+	struct raw_dump_job *job = arg;
+	char path[512];
+
+	snprintf(path, sizeof(path), "%s.raw", job->base);
+	raw_dump_write(path, job->raw, job->raw_size);
+	snprintf(path, sizeof(path), "%s.yuyv", job->base);
+	raw_dump_write(path, job->yuyv, OUT_FRAME_BYTES);
+	snprintf(path, sizeof(path), "%s.txt", job->base);	/* last: the dump is complete */
+	raw_dump_write(path, job->info, strlen(job->info));
+	printf("raw dump: %s.{raw,yuyv,txt} written\n", job->base);
+	fflush(stdout);
+	free(job->raw);
+	free(job->yuyv);
+	free(job);
+	__atomic_store_n(&raw_dump_busy, 0, __ATOMIC_RELEASE);
+	return NULL;
+}
+
+/* Returns 0 when a dump was started (or written, with wait set: the host tests). */
+static int raw_dump_start(const char *sensor, const uint16_t *raw, unsigned int width,
+			  unsigned int height, unsigned int stride, const unsigned char *yuyv,
+			  const struct ae_state *ae, int wait)
+{
+	static int n;
+	struct raw_dump_job *job;
+	pthread_t thread;
+
+	if (!raw_dump_dir || raw_dump_left <= 0 || __atomic_load_n(&raw_dump_busy, __ATOMIC_ACQUIRE))
+		return -1;
+	job = calloc(1, sizeof(*job));
+	if (!job)
+		return -1;
+	job->raw_size = (size_t)stride * height;
+	job->raw = malloc(job->raw_size);
+	job->yuyv = malloc(OUT_FRAME_BYTES);
+	if (!job->raw || !job->yuyv) {
+		free(job->raw);
+		free(job->yuyv);
+		free(job);
+		return -1;
+	}
+	memcpy(job->raw, raw, job->raw_size);
+	memcpy(job->yuyv, yuyv, OUT_FRAME_BYTES);
+	raw_dump_left--;
+	n++;
+	snprintf(job->base, sizeof(job->base), "%s/raw-%s-%d", raw_dump_dir, sensor, n);
+	snprintf(job->info, sizeof(job->info),
+		 "sensor %s\nwidth %u\nheight %u\nstride %u\nout %dx%d\nrotate %d\n"
+		 "gain %.4f\nexposure %d\nagain %d\ndgain %d\nvblank %d\n"
+		 "wb_white %.5f %.5f\nwb_mean %.2f %.2f %.2f\nwb_gain %u %u\nnir_ratio %.4f\n"
+		 "ccm_active %d\nccm_pick %d %d %.3f\nlsc_active %d\nlsc_pick %d %d %.3f %.3f\n"
+		 "converter %s\n",
+		 sensor, width, height, stride, OUT_WIDTH, OUT_HEIGHT, output_rotate180,
+		 sensor_total_gain, ae->exposure.value, ae->again.value, ae->dgain.value, ae->vblank.value,
+		 wb_white_rg, wb_white_bg, wb_last_mean[0], wb_last_mean[1], wb_last_mean[2],
+		 wb_last_gain_q12[0], wb_last_gain_q12[2], wb_nir_ratio,
+		 ccm_active, ccm_pick[0], ccm_pick[1], ccm_weight, lsc_active, lsc_pick[0], lsc_pick[1],
+		 lsc_weight, lsc_strength,
+#ifdef IPU6_GPU
+		 gpu.ok ? "gpu" : "cpu"
+#else
+		 "cpu"
+#endif
+		);
+	__atomic_store_n(&raw_dump_busy, 1, __ATOMIC_RELEASE);
+	printf("raw dump: %s (writing in the background)\n", job->base);
+	if (wait) {
+		raw_dump_thread(job);
+		return 0;
+	}
+	if (pthread_create(&thread, NULL, raw_dump_thread, job)) {
+		raw_dump_thread(job);	/* no thread: write now rather than lose it */
+		return 0;
+	}
+	pthread_detach(thread);
+	return 0;
+}
+
 static void raw_dump(const char *sensor, const uint16_t *raw, unsigned int width, unsigned int height,
 		     unsigned int stride, const unsigned char *yuyv, const struct ae_state *ae)
 {
-	static int n;
-	char path[512];
-	FILE *f;
-
-	if (!raw_dump_dir || raw_dump_left <= 0)
-		return;
-	raw_dump_left--;
-	n++;
-	snprintf(path, sizeof(path), "%s/raw-%s-%d.raw", raw_dump_dir, sensor, n);
-	if ((f = fopen(path, "wb"))) {
-		fwrite(raw, 1, (size_t)stride * height, f);
-		fclose(f);
-	}
-	snprintf(path, sizeof(path), "%s/raw-%s-%d.yuyv", raw_dump_dir, sensor, n);
-	if ((f = fopen(path, "wb"))) {
-		fwrite(yuyv, 1, OUT_FRAME_BYTES, f);
-		fclose(f);
-	}
-	snprintf(path, sizeof(path), "%s/raw-%s-%d.txt", raw_dump_dir, sensor, n);
-	if (!(f = fopen(path, "w")))
-		return;
-	fprintf(f, "sensor %s\nwidth %u\nheight %u\nstride %u\nout %dx%d\nrotate %d\n", sensor, width,
-		height, stride, OUT_WIDTH, OUT_HEIGHT, output_rotate180);
-	fprintf(f, "gain %.4f\nexposure %d\nagain %d\ndgain %d\nvblank %d\n", sensor_total_gain,
-		ae->exposure.value, ae->again.value, ae->dgain.value, ae->vblank.value);
-	fprintf(f, "wb_white %.5f %.5f\nwb_mean %.2f %.2f %.2f\nwb_gain %u %u\nnir_ratio %.4f\n",
-		wb_white_rg, wb_white_bg, wb_last_mean[0], wb_last_mean[1], wb_last_mean[2],
-		wb_last_gain_q12[0], wb_last_gain_q12[2], wb_nir_ratio);
-	fprintf(f, "ccm_active %d\nccm_pick %d %d %.3f\nlsc_active %d\nlsc_pick %d %d %.3f %.3f\n",
-		ccm_active, ccm_pick[0], ccm_pick[1], ccm_weight, lsc_active, lsc_pick[0], lsc_pick[1],
-		lsc_weight, lsc_strength);
-#ifdef IPU6_GPU
-	fprintf(f, "converter %s\n", gpu.ok ? "gpu" : "cpu");
-#else
-	fprintf(f, "converter cpu\n");
-#endif
-	fclose(f);
-	printf("raw dump: %s/raw-%s-%d.{raw,yuyv,txt}\n", raw_dump_dir, sensor, n);
+	raw_dump_start(sensor, raw, width, height, stride, yuyv, ae, 0);
 }
 
 static int capture_to_loopback(const char *media_dev, const char *out_dev,
@@ -2679,8 +2782,10 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev,
 			session_frames = 0;
 			tnr_reset();	/* the scene may have changed while idle */
 			ae_set_idle(&ae, !bridge_should_convert(readers));
-			if (bridge_should_convert(readers))
+			if (bridge_should_convert(readers)) {
+				ae_wake(&ae);
 				af_start(&af);
+			}
 		}
 		if (idle_decide(&idle, readers, monotonic_s(), idle_stop_s) == IDLE_STOP) {
 			double t0 = monotonic_s();

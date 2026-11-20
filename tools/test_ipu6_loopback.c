@@ -1517,6 +1517,70 @@ static int test_sensor_crop(void)
 }
 
 /*
+ * Boot-20: every rear session started ~2x overexposed and AE took over a second. Simulated sensor
+ * (the picture's mean follows the exposure x gain set two frames earlier): after ae_wake() a 2x
+ * overexposure is inside the deadband within 5 frames (4 here); the normal steps (negative control) need 8
+ * or more. In the fast phase a blown-out picture (clip fraction > 5%) at least halves exposure.
+ */
+static int ae_frames_to_settle(int wake, double start_over)
+{
+	struct ae_state ae;
+	double history[4];
+
+	ov5675_ae(&ae, 1);
+	ae.exposure.value = 2016;
+	ae.again.value = 512;	/* 4x: room to go both ways */
+	ae_frame_limits(&ae, 1944);
+	double t0 = ae_total(&ae), scene = AE_TARGET * start_over / t0;
+	for (int i = 0; i < 4; i++)
+		history[i] = t0;
+	if (wake)
+		ae_wake(&ae);
+	ae_clip_fraction = 0;
+	for (int frame = 1; frame <= 60; frame++) {
+		double mean = scene * history[0];	/* settings from two frames ago */
+		if (fabs(mean / AE_TARGET - 1.0) < AE_DEADBAND && frame > 2)
+			return frame;
+		ae_frame(&ae, mean);
+		history[0] = history[1];
+		history[1] = ae_total(&ae);
+	}
+	return 99;
+}
+
+static int test_ae_fast_start(void)
+{
+	int fast = ae_frames_to_settle(1, 2.0), slow = ae_frames_to_settle(0, 2.0);
+
+	if (fast > 5 || slow < 8)
+		return 1;
+	if (ae_frames_to_settle(1, 0.4) > 5)	/* underexposed start too */
+		return 2;
+	/* Clipped highlights in the fast phase: at least halve, even when the mean looks near target. */
+	struct ae_state ae;
+	ov5675_ae(&ae, 1);
+	ae.exposure.value = 2016;
+	ae.again.value = 512;
+	ae_frame_limits(&ae, 1944);
+	double before = ae_total(&ae);
+	ae_wake(&ae);
+	ae.fast = 2;
+	ae_clip_fraction = 0.3;
+	ae_update(&ae, AE_TARGET * 1.2);
+	int halved = ae_total(&ae) <= before * 0.51;
+	/* Normal phase: the clip fraction is ignored (1.2x over: one 1/1.2 step). */
+	ov5675_ae(&ae, 1);
+	ae.exposure.value = 2016;
+	ae.again.value = 512;
+	ae_frame_limits(&ae, 1944);
+	before = ae_total(&ae);
+	ae_update(&ae, AE_TARGET * 1.2);
+	int normal_ok = ae_total(&ae) > before * 0.8;
+	ae_clip_fraction = 0;
+	return halved ? (normal_ok ? 0 : 4) : 3;
+}
+
+/*
  * Clipped highlights come out white, not pink. The daylit sky: green saturates (here at raw
  * 920, below full scale, as a sensor can) while R and B, under white-balance gains of ~1.85,
  * do not. Negative control: the fade keyed to full scale (clip detection off) leaves pink
@@ -1967,6 +2031,8 @@ int main(void)
 			return printf("test_green_side_light %d\n", r), 1;
 		if ((r = test_green_scene_not_light()))
 			return printf("test_green_scene_not_light %d\n", r), 1;
+		if ((r = test_ae_fast_start()))
+			return printf("test_ae_fast_start %d\n", r), 1;
 		if ((r = test_sensor_crop()))
 			return printf("test_sensor_crop %d\n", r), 1;
 		if ((r = test_detail_stripes()))

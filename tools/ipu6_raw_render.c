@@ -133,7 +133,7 @@ static int self_test(void)
 		return 2;
 	raw_dump_dir = dir;
 	raw_dump_left = 1;
-	raw_dump("ov5678", f, w, h, w * 2, out, &ae);
+	raw_dump_start("ov5678", f, w, h, w * 2, out, &ae, 1);	/* synchronous for the test */
 	snprintf(path, sizeof(path), "%s/raw-ov5678-1.txt", dir);
 	if (read_info(path, &d) || d.out_w != OUT_WIDTH || d.out_h != OUT_HEIGHT)
 		return 3;
@@ -150,10 +150,30 @@ static int self_test(void)
 	compare(out, again, &du, &dv, &dy, &worst);
 	if (worst != 0)
 		return 7;
-	for (const char *ext = "raw"; ext; ext = !strcmp(ext, "raw") ? "yuyv" : !strcmp(ext, "yuyv") ? "txt" : NULL) {
-		snprintf(path, sizeof(path), "%s/raw-ov5678-1.%s", dir, ext);
-		unlink(path);
+	/* The bridge's path: written by a background thread; a dump asked for meanwhile is skipped. */
+	raw_dump_left = 2;
+	__atomic_store_n(&raw_dump_busy, 1, __ATOMIC_RELEASE);
+	if (raw_dump_start("ov5678", f, w, h, w * 2, out, &ae, 0) != -1 || raw_dump_left != 2)
+		return 8;
+	__atomic_store_n(&raw_dump_busy, 0, __ATOMIC_RELEASE);
+	if (raw_dump_start("ov5678", f, w, h, w * 2, out, &ae, 0))
+		return 9;
+	for (int ms = 0; __atomic_load_n(&raw_dump_busy, __ATOMIC_ACQUIRE); ms++) {
+		if (ms > 10000)
+			return 10;
+		usleep(1000);
 	}
+	snprintf(path, sizeof(path), "%s/raw-ov5678-2.raw", dir);
+	if (read_file(path, back, (size_t)w * h * 2) || memcmp(back, f, (size_t)w * h * 2))
+		return 11;
+	snprintf(path, sizeof(path), "%s/raw-ov5678-2.txt", dir);
+	if (read_info(path, &d))
+		return 12;
+	for (int k = 1; k <= 2; k++)
+		for (const char *ext = "raw"; ext; ext = !strcmp(ext, "raw") ? "yuyv" : !strcmp(ext, "yuyv") ? "txt" : NULL) {
+			snprintf(path, sizeof(path), "%s/raw-ov5678-%d.%s", dir, k, ext);
+			unlink(path);
+		}
 	rmdir(dir);
 	free(f);
 	free(back);
