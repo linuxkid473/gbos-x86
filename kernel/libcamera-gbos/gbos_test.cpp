@@ -8,8 +8,15 @@
  * headers of AOSP external/libcamera android17-release.
  *
  * The HAL dlopen()s every .so in /vendor/lib64/libcamera/pipeline; REGISTER_PIPELINE_HANDLER
- * below runs from this library's constructors. The camera reports itself as external, which
- * the HAL accepts without an entry in /vendor/etc/camera/libcamera/camera_hal.yaml.
+ * below runs from this library's constructors.
+ *
+ * The camera is INTERNAL, id "camera1", which the image's camera_hal.yaml maps to the back
+ * camera. Boot-16 (2026-11-20): as an external camera it crash-looped the provider. The HAL's
+ * CameraHalManager::setCallbacks() reports every external camera PRESENT at once, and Google's
+ * adapter (AidlCameraProvider::Create) calls setCallbacks before its provider object exists:
+ * HandleCameraDeviceStatusChange dereferenced null, 23 crashes in 2 minutes. Internal cameras
+ * get no such callback. So no gbOS plugin may register an external camera, or add one after
+ * start (a hotplug is reported the same way).
  */
 
 #include <algorithm>
@@ -78,7 +85,8 @@ public:
 		: Camera::Private(pipe), streams_(kMaxStreams)
 	{
 		const Size max = largestSize();
-		properties_.set(properties::Location, properties::CameraLocationExternal);
+		properties_.set(properties::Location, properties::CameraLocationBack);
+		properties_.set(properties::Rotation, 0);
 		properties_.set(properties::Model, "gbOS test camera");
 		properties_.set(properties::PixelArraySize, max);
 		properties_.set(properties::PixelArrayActiveAreas, { Rectangle(max) });
@@ -149,7 +157,8 @@ private:
 	void fill(FrameBuffer *buffer, const Size &size, unsigned int frame);
 
 	static bool created_;
-	DmaHeap dmaHeap_;
+	/* Opened on first use: the HAL process may not open /dev/dma_heap/system (boot-16). */
+	std::unique_ptr<DmaHeap> dmaHeap_;
 };
 
 bool PipelineHandlerGbosTest::created_ = false;
@@ -191,14 +200,16 @@ int PipelineHandlerGbosTest::configure(Camera *camera, CameraConfiguration *conf
 int PipelineHandlerGbosTest::exportFrameBuffers([[maybe_unused]] Camera *camera, Stream *stream,
 						std::vector<std::unique_ptr<FrameBuffer>> *buffers)
 {
-	if (!dmaHeap_.isValid())
+	if (!dmaHeap_)
+		dmaHeap_ = std::make_unique<DmaHeap>();
+	if (!dmaHeap_->isValid())
 		return -ENOBUFS;
 	const StreamConfiguration &config = stream->configuration();
 	const PixelFormatInfo &info = PixelFormatInfo::info(config.pixelFormat);
 	std::vector<unsigned int> planeSizes;
 	for (size_t i = 0; i < info.planes.size(); i++)
 		planeSizes.push_back(info.planeSize(config.size, i));
-	return dmaHeap_.exportBuffers(config.bufferCount, planeSizes, buffers, DmaHeap::Type::System);
+	return dmaHeap_->exportBuffers(config.bufferCount, planeSizes, buffers, DmaHeap::Type::System);
 }
 
 int PipelineHandlerGbosTest::start(Camera *camera, [[maybe_unused]] const ControlList *controls)
@@ -282,7 +293,7 @@ bool PipelineHandlerGbosTest::match([[maybe_unused]] DeviceEnumerator *enumerato
 	std::set<Stream *> streams;
 	for (Stream &stream : data->streams_)
 		streams.insert(&stream);
-	std::shared_ptr<Camera> camera = Camera::create(std::move(data), "gbos-test", streams);
+	std::shared_ptr<Camera> camera = Camera::create(std::move(data), "camera1", streams);
 	registerCamera(std::move(camera));
 	LOG(GbosTest, Info) << "gbOS test camera registered";
 	return true;

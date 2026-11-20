@@ -10,7 +10,13 @@ BIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin
 API=30
 OUT=$ROOT/usb/installer/bin/vulkan/ipu6-loopback
 mkdir -p "$(dirname "$OUT")"
+cd "$ROOT"	# relative source path: no local paths in the binary
 "$BIN/x86_64-linux-android$API-clang" -O2 -pthread -Wall -Wextra -Werror -DIPU6_GPU \
-	-o "$OUT" "$ROOT/kernel/ipu6-loopback.c" -lm -ldl
+	-ffile-prefix-map="$ROOT/=" -ffile-prefix-map="$NDK/=ndk/" \
+	-o "$OUT" kernel/ipu6-loopback.c -lm -ldl
 "$BIN/llvm-strip" "$OUT"
+if strings -n 6 "$OUT" | grep -q -e "$HOME" -e /home/; then
+	echo "$OUT embeds a local path" >&2
+	exit 1
+fi
 file "$OUT"

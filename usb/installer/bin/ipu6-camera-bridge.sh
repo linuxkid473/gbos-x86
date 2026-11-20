@@ -250,6 +250,18 @@ LIBCAMERA_PIPE=/vendor/lib64/libcamera/pipeline
 LIBCAMERA_PLUGINS=/postinstall/gbos/installer/lib/libcamera-pipeline
 LIBCAMERA_COPY=/data/local/tmp/gbos-libcamera-pipeline
 LIBCAMERA_SERVICE=vendor.camera-provider-2-7-legacy-wrapper
+LIBCAMERA_PROCESS=android.hardware.camera.provider@2.7-service-legacy-wrapper
+LIBCAMERA_SETTLE_S=3	# seconds after the restart before the first look
+LIBCAMERA_WATCH_S=8	# then the same pid must still run this much later
+# libcamera_service_stable: 0 when the restarted service runs and keeps one pid (a crash loop
+# restarts it every ~5 s with a new pid, as on boot-16).
+libcamera_service_stable() {
+    sleep "$LIBCAMERA_SETTLE_S"
+    first=$(pidof "$LIBCAMERA_PROCESS" 2>/dev/null)
+    [ -n "$first" ] || return 1
+    sleep "$LIBCAMERA_WATCH_S"
+    [ "$(pidof "$LIBCAMERA_PROCESS" 2>/dev/null)" = "$first" ]
+}
 add_libcamera_plugins() {
     if [ "$(cfg CAMERA_LIBCAMERA)" != 1 ]; then
         echo "libcamera plugins: off (CAMERA_LIBCAMERA=1 in gbos.cfg to test them)"
@@ -286,6 +298,22 @@ add_libcamera_plugins() {
     stop "$LIBCAMERA_SERVICE" 2>/dev/null
     start "$LIBCAMERA_SERVICE" 2>/dev/null
     echo "libcamera plugins: restarted $LIBCAMERA_SERVICE"
+    # A plugin that crashes the service must not keep it (and cameraserver, waiting on it)
+    # down: remove the overlay and start the service as the image ships it.
+    if libcamera_service_stable; then
+        echo "libcamera plugins: $LIBCAMERA_SERVICE stable (pid $(pidof "$LIBCAMERA_PROCESS"))"
+        return 0
+    fi
+    echo "WARNING: $LIBCAMERA_SERVICE crashed or restarted with the plugins; removing them for this boot"
+    stop "$LIBCAMERA_SERVICE" 2>/dev/null
+    umount "$LIBCAMERA_PIPE" 2>/dev/null || umount -l "$LIBCAMERA_PIPE" 2>/dev/null
+    start "$LIBCAMERA_SERVICE" 2>/dev/null
+    if grep -q " $LIBCAMERA_PIPE " /proc/mounts; then
+        echo "WARNING: $LIBCAMERA_PIPE is still overlaid"
+    else
+        echo "libcamera plugins: removed; $LIBCAMERA_SERVICE restarted without them"
+    fi
+    return 1
 }
 
 # wait_active LOGFILE PID: 0 once the bridge logs that it streams, 1 if it exits or times out.
@@ -342,9 +370,11 @@ elif [ ! -x "$BRIDGE_GPU" ]; then
     echo "camera converter: CPU (no GPU build at $BRIDGE_GPU)"
 elif probe=$(timeout 10 "$BRIDGE_GPU" --probe-gpu 2>&1); then
     BRIDGE=$BRIDGE_GPU
-    echo "camera converter: GPU ($probe)"
+    echo "camera converter: GPU ($(echo "$probe" | tail -n 1))"
+    echo "$probe" | sed 's/^/  probe: /'
 else
     echo "camera converter: CPU (GPU build unusable: $(echo "$probe" | tail -n 1))"
+    echo "$probe" | sed 's/^/  probe: /'
 fi
 # --- end of converter choice ---
 # Optional colour matrices and lens shading extracted from each module's Windows tuning file

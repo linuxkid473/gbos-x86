@@ -174,35 +174,60 @@ grep -Fq 'WARNING: GPU bridge did not reach streaming state; using the CPU conve
 # libcamera plugins: the vendor pipeline directory is copied with our plugins added, the copy
 # bind-mounted over it and the legacy-wrapper service restarted; CAMERA_LIBCAMERA=0 or no
 # plugins leave it alone. Run with stubs for mount/chcon/stop/start.
-plugin_fn=$(awk '/^add_libcamera_plugins\(\) \{/ { on = 1 } on { print } on && /^}/ { exit }' "$BRIDGE")
+plugin_fn=$(awk '/^(add_libcamera_plugins|libcamera_service_stable)\(\) \{/ { on = 1 } on { print } on && /^}/ { on = 0 }' "$BRIDGE")
+[ "$(echo "$plugin_fn" | grep -c '^[a-z_]*() {')" = 2 ]
 echo "$plugin_fn" | grep -q 'mount -o bind "$LIBCAMERA_COPY" "$LIBCAMERA_PIPE"'
 grep -Fq 'add_libcamera_plugins || true' "$BRIDGE"
 [ "$(grep -n 'add_libcamera_plugins || true' "$BRIDGE" | cut -d: -f1)" -lt "$(grep -n 'killall -9 cameraserver' "$BRIDGE" | cut -d: -f1)" ]
 mkdir -p "$tmp/pipe" "$tmp/plugins"
 echo google > "$tmp/pipe/camera.libipu7_hal_fatcat.so"
 echo ours > "$tmp/plugins/gbos_test.so"
-run_plugins() {	# CAMERA_LIBCAMERA value -> calls made
+run_plugins() {	# CAMERA_LIBCAMERA value, service behaviour (stable|crash|dead) -> calls made
     (
         cfg() { [ "$1" = CAMERA_LIBCAMERA ] && printf '%s' "$cfg_lc"; }
         mount() { echo "mount $*"; }
+        umount() { echo "umount $*"; }
         chcon() { :; }
         stop() { echo "stop $*"; }
         start() { echo "start $*"; }
-        cfg_lc=$1
+        sleep() { :; }
+        pidof() {	# a crash loop gives a new pid at every look
+            case "$behaviour" in
+            stable) echo 4242 ;;
+            crash) n=$(( $(cat "$tmp/pidn" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$tmp/pidn"; echo "50$n" ;;
+            *) return 1 ;;
+            esac
+        }
+        cfg_lc=$1 behaviour=${2:-stable}
         LIBCAMERA_PIPE=$tmp/pipe LIBCAMERA_PLUGINS=$tmp/plugins LIBCAMERA_COPY=$tmp/copy
         LIBCAMERA_SERVICE=vendor.camera-provider-2-7-legacy-wrapper
+        LIBCAMERA_PROCESS=android.hardware.camera.provider@2.7-service-legacy-wrapper
+        LIBCAMERA_SETTLE_S=3 LIBCAMERA_WATCH_S=8
         eval "$plugin_fn"
-        add_libcamera_plugins
+        if add_libcamera_plugins; then echo "status 0"; else echo "status 1"; fi
     )
 }
 # Off by default since boot-16's crash loop: only CAMERA_LIBCAMERA=1 adds the plugins.
 calls=$(run_plugins '')
 ! echo "$calls" | grep -q '^mount\|^stop\|^start'
-calls=$(run_plugins 1)
+calls=$(run_plugins 1 stable)
 echo "$calls" | grep -qx "mount -o bind $tmp/copy $tmp/pipe"
 echo "$calls" | grep -qx 'stop vendor.camera-provider-2-7-legacy-wrapper'
 echo "$calls" | grep -qx 'start vendor.camera-provider-2-7-legacy-wrapper'
+echo "$calls" | grep -q 'stable (pid 4242)'
+echo "$calls" | grep -qx 'status 0'
+! echo "$calls" | grep -q '^umount'
 [ "$(cat "$tmp/copy/camera.libipu7_hal_fatcat.so")" = google ] && [ "$(cat "$tmp/copy/gbos_test.so")" = ours ]
+# A crash loop (new pid at every look) or a dead service: the overlay is removed and the
+# service restarted as shipped (boot-16).
+for behaviour in crash dead; do
+    rm -rf "$tmp/copy" "$tmp/pidn"
+    calls=$(run_plugins 1 "$behaviour")
+    echo "$calls" | grep -qx "umount $tmp/pipe"
+    [ "$(echo "$calls" | grep -c '^start vendor.camera-provider-2-7-legacy-wrapper')" = 2 ]
+    echo "$calls" | grep -q 'WARNING: vendor.camera-provider-2-7-legacy-wrapper crashed'
+    echo "$calls" | grep -qx 'status 1'
+done
 calls=$(run_plugins 0)
 ! echo "$calls" | grep -q '^mount\|^stop\|^start'
 rm -f "$tmp/plugins/gbos_test.so"

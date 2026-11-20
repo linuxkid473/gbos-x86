@@ -248,36 +248,135 @@ static int gpu_pipeline(int which, const uint32_t *code, size_t bytes)
 	return r ? gpu_fail("vkCreateComputePipelines", r) : 0;
 }
 
+static const VkApplicationInfo gpu_app = {
+	.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "ipu6-loopback",
+	.apiVersion = VK_API_VERSION_1_1,
+};
+
+/* Create the instance through vkGetInstanceProcAddr (set by the caller) and list the devices. */
+static int gpu_instance_and_devices(const char *via, VkPhysicalDevice *devices, uint32_t *count)
+{
+	VkInstanceCreateInfo ii = { .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &gpu_app };
+	VkResult r;
+
+	if (!vkGetInstanceProcAddr ||
+	    !(vkCreateInstance = (PFN_vkCreateInstance)vkGetInstanceProcAddr(NULL, "vkCreateInstance"))) {
+		fprintf(stderr, "gpu: %s: no vkCreateInstance\n", via);
+		return -1;
+	}
+	if ((r = vkCreateInstance(&ii, NULL, &gpu.instance))) {
+		fprintf(stderr, "gpu: %s: vkCreateInstance failed (VkResult %d)\n", via, (int)r);
+		gpu.instance = VK_NULL_HANDLE;
+		return -1;
+	}
+	if (gpu_load_instance_functions()) {
+		fprintf(stderr, "gpu: %s: instance functions missing\n", via);
+		return -1;
+	}
+	if ((r = vkEnumeratePhysicalDevices(gpu.instance, count, devices)) < 0 || !*count) {
+		fprintf(stderr, "gpu: %s: vkEnumeratePhysicalDevices failed (VkResult %d, %u devices)\n",
+			via, (int)r, *count);
+		vkDestroyInstance(gpu.instance, NULL);
+		gpu.instance = VK_NULL_HANDLE;
+		return -1;
+	}
+	return 0;
+}
+
+#ifdef __ANDROID__
+/*
+ * Android's libvulkan is a thin loader: it opens the vendor driver as a hardware module
+ * (/vendor/lib64/hw/vulkan.<ro.hardware.vulkan>.so, here Mesa's vulkan.intel.so) and calls its
+ * entry points. On boot-16 (2026-11-20) the loader found no device for this binary, started from
+ * the stick (vkEnumeratePhysicalDevices: VK_ERROR_INITIALIZATION_FAILED), probably because the
+ * loader's driver lookup depends on the linker namespace of where a binary lives. So when the
+ * loader yields nothing, open the driver module ourselves: the module (symbol "HMI") opens device
+ * "vk0", whose GetInstanceProcAddr is the driver's own. Layouts as in AOSP
+ * hardware/libhardware/include/hardware/{hardware,hwvulkan}.h (64-bit).
+ */
+#include <sys/system_properties.h>
+
+struct gbos_hw_module;
+struct gbos_hw_device {
+	uint32_t tag, version;
+	struct gbos_hw_module *module;
+	uint64_t reserved[12];
+	int (*close)(struct gbos_hw_device *device);
+};
+struct gbos_hw_module_methods {
+	int (*open)(const struct gbos_hw_module *module, const char *id, struct gbos_hw_device **device);
+};
+struct gbos_hw_module {
+	uint32_t tag;
+	uint16_t module_api_version, hal_api_version;
+	const char *id, *name, *author;
+	struct gbos_hw_module_methods *methods;
+	void *dso;
+	uint64_t reserved[32 - 7];
+};
+struct gbos_hwvulkan_device {
+	struct gbos_hw_device common;
+	PFN_vkEnumerateInstanceExtensionProperties EnumerateInstanceExtensionProperties;
+	PFN_vkCreateInstance CreateInstance;
+	PFN_vkGetInstanceProcAddr GetInstanceProcAddr;
+};
+#define GBOS_HWVULKAN_DEVICE_0 "vk0"
+
+static int gpu_open_vendor_driver(void)
+{
+	char name[PROP_VALUE_MAX] = "", path[256];
+
+	if (__system_property_get("ro.hardware.vulkan", name) <= 0)
+		snprintf(name, sizeof(name), "intel");
+	snprintf(path, sizeof(path), "/vendor/lib64/hw/vulkan.%s.so", name);
+	void *dso = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+	if (!dso) {
+		fprintf(stderr, "gpu: vendor driver: dlopen %s: %s\n", path, dlerror());
+		return -1;
+	}
+	struct gbos_hw_module *module = dlsym(dso, "HMI");
+	struct gbos_hw_device *device = NULL;
+	if (!module || !module->methods || !module->methods->open) {
+		fprintf(stderr, "gpu: vendor driver: %s has no hardware module (HMI)\n", path);
+		return -1;
+	}
+	int err = module->methods->open(module, GBOS_HWVULKAN_DEVICE_0, &device);
+	if (err || !device) {
+		fprintf(stderr, "gpu: vendor driver: open(vk0) failed (%d)\n", err);
+		return -1;
+	}
+	vkGetInstanceProcAddr = ((struct gbos_hwvulkan_device *)device)->GetInstanceProcAddr;
+	printf("gpu: using the vendor driver directly (%s)\n", path);
+	return 0;
+}
+#endif
+
 /* 0 when the GPU path is ready. Prints why not otherwise. */
 static int gpu_init(void)
 {
 	static const char *libs[] = { "libvulkan.so", "libvulkan.so.1" };
+	VkPhysicalDevice devices[8];
+	uint32_t count = 8;
+	int ready = -1;
 	VkResult r;
 
 	for (size_t i = 0; i < sizeof(libs) / sizeof(libs[0]) && !gpu.lib; i++)
 		gpu.lib = dlopen(libs[i], RTLD_NOW | RTLD_LOCAL);
-	if (!gpu.lib) {
-		fprintf(stderr, "gpu: no libvulkan (%s); converting on the CPU\n", dlerror());
-		return -1;
+	if (gpu.lib) {
+		vkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)dlsym(gpu.lib, "vkGetInstanceProcAddr");
+		ready = gpu_instance_and_devices("libvulkan", devices, &count);
+	} else {
+		fprintf(stderr, "gpu: no libvulkan (%s)\n", dlerror());
 	}
-	vkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)dlsym(gpu.lib, "vkGetInstanceProcAddr");
-	if (!vkGetInstanceProcAddr ||
-	    !(vkCreateInstance = (PFN_vkCreateInstance)vkGetInstanceProcAddr(NULL, "vkCreateInstance")))
-		return gpu_fail("loading vkCreateInstance", VK_ERROR_INITIALIZATION_FAILED);
-	VkApplicationInfo app = {
-		.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "ipu6-loopback",
-		.apiVersion = VK_API_VERSION_1_1,
-	};
-	VkInstanceCreateInfo ii = { .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app };
-	if ((r = vkCreateInstance(&ii, NULL, &gpu.instance)))
-		return gpu_fail("vkCreateInstance", r);
-	if (gpu_load_instance_functions())
-		return gpu_fail("loading instance functions", VK_ERROR_INITIALIZATION_FAILED);
-
-	VkPhysicalDevice devices[8];
-	uint32_t count = 8;
-	if ((r = vkEnumeratePhysicalDevices(gpu.instance, &count, devices)) < 0 || !count)
-		return gpu_fail("vkEnumeratePhysicalDevices", r ? r : VK_ERROR_INITIALIZATION_FAILED);
+#ifdef __ANDROID__
+	if (ready) {
+		count = 8;
+		if (gpu_open_vendor_driver() == 0)
+			ready = gpu_instance_and_devices("vendor driver", devices, &count);
+	}
+#endif
+	if (ready)
+		return gpu_fail("finding a Vulkan device", VK_ERROR_INITIALIZATION_FAILED);
 	for (uint32_t i = 0; i < count && !gpu.phys; i++) {
 		VkPhysicalDeviceProperties p;
 		vkGetPhysicalDeviceProperties(devices[i], &p);
