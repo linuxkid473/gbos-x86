@@ -64,11 +64,19 @@ if [ "${1:-}" = --inner ]; then
   [ "$FPLOG" = /dev/gbos-system-log/fingerprint.txt ] && ok "gbos_fp gets --log $FPLOG" || bad "gbos_system_log printed [$FPLOG]: $(cat $W/hook.log)"
   F=/new$FPLOG
   as 1000 "echo fp-line >> $F" && [ "$(cat $L/fingerprint.txt)" = fp-line ] && ok "uid 1000 appends fingerprint.txt after the /dev move; it lands in logs/boot-7" || bad "uid 1000 cannot append fingerprint.txt"
+  # gbos_fp.c's own open: O_WRONLY|O_CREAT|O_APPEND|O_CLOEXEC|O_NOFOLLOW, 0644, as uid 1000 gid 1000. (No sed -i here: replacing the
+  # bound file leaves its old inode unlinked but mounted, and then the shutdown superblock remount read-only fails with EBUSY.)
+  FPWANT=fp-line
+  if command -v python3 >/dev/null; then
+    as 1000 "python3 -c 'import os; fd = os.open(\"$F\", os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_CLOEXEC | os.O_NOFOLLOW, 0o644); os.write(fd, b\"fp-open\\n\")'" \
+      && [ "$(tail -n 1 $L/fingerprint.txt)" = fp-open ] && FPWANT="fp-line fp-open" \
+      && ok "uid 1000 opens it with gbos_fp's flags (O_CREAT|O_APPEND|O_NOFOLLOW)" || bad "gbos_fp's open() flags fail on /dev/gbos-system-log/fingerprint.txt"
+  fi
   as 1000 "echo x > /new/dev/gbos-system-log/other" && bad "uid 1000 can create other files in /dev/gbos-system-log" || ok "uid 1000 cannot create other files there (mode 0500)"
   as 1000 "rm -f $F; test ! -e $F" && bad "uid 1000 can remove the log file" || ok "uid 1000 cannot remove it"
   as 10123 "echo pwn >> $F" && bad "an app can write fingerprint.txt" || ok "an app cannot write fingerprint.txt"
   as 10123 "ls /new/dev/gbos-system-log" && bad "an app can list /dev/gbos-system-log" || ok "an app cannot list /dev/gbos-system-log"
-  [ "$(cat $L/fingerprint.txt)" = fp-line ] && ok "fingerprint.txt holds only the HAL's line" || bad "fingerprint.txt: $(cat $L/fingerprint.txt)"
+  [ "$(cat $L/fingerprint.txt | tr '\n' ' ')" = "$FPWANT " ] && ok "fingerprint.txt holds only the HAL's lines" || bad "fingerprint.txt: $(cat $L/fingerprint.txt)"
   grep -q '^MODE=ask$' $G/gbos.cfg && [ ! -e $G/hook.sh ] && [ ! -e $G/run.sh ] && [ ! -e $L/run.sh ] && ok "nothing changed on the volume" || bad "the volume changed"
   # root services
   echo line > $P/logs/boot-7/logcat.txt && [ "$(cat $L/logcat.txt)" = line ] && ok "root writes logs/boot-7, it lands on the volume" || bad "root cannot write logs/boot-7"
