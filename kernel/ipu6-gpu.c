@@ -74,6 +74,7 @@ struct gpu_params {
 	float edge_desaturation;
 	int32_t detail_q12, tnr_threshold, tnr_have_previous, rotate180;
 	int32_t cfa[16], cfa_count[4];
+	int32_t crop_x, crop_y, crop_w, crop_h;
 };
 
 enum {
@@ -593,6 +594,8 @@ static int gpu_convert(const uint16_t *raw, unsigned int width, unsigned int hei
 			p->cfa[y * 4 + x] = cfa[y][x];
 	for (int c = 0; c < 4; c++)
 		p->cfa_count[c] = (int32_t)cfa_count[c];
+	p->crop_x = (int32_t)crop_x; p->crop_y = (int32_t)crop_y;
+	p->crop_w = (int32_t)crop_w; p->crop_h = (int32_t)crop_h;
 
 	VkCommandBufferBeginInfo bi = {
 		.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,

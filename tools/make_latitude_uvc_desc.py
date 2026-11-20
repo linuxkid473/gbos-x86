@@ -2,7 +2,8 @@
 """Create a Latitude 7320 UVC descriptor matching the fixed loopback mode.
 
 The shared descriptor's 640x480 YUY2 frame is kept as the only frame and resized to the
-bridge's output (1280x960 since 2026-11-20: OUT_WIDTH/OUT_HEIGHT in kernel/ipu6-loopback.c),
+bridge's output (1920x1080 by default, --size for the CAMERA_SIZE builds; OUT_WIDTH/OUT_HEIGHT
+in kernel/ipu6-loopback.c),
 with its bit rates and frame buffer size recomputed for 30 fps.
 """
 
@@ -10,7 +11,7 @@ import argparse
 import struct
 from pathlib import Path
 
-OUTPUT_SIZE = (1280, 960)
+OUTPUT_SIZE = (1920, 1080)
 FPS = 30
 
 

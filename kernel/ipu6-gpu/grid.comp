@@ -22,8 +22,8 @@ void main()
 	int ox = int(gl_GlobalInvocationID.x), oy = int(gl_GlobalInvocationID.y);
 	if (ox >= P.col_w || oy >= P.col_h)
 		return;
-	int sx = int((uint(ox) * uint(P.width)) / uint(P.col_w));
-	int sy = int((uint(oy) * uint(P.height)) / uint(P.col_h));
+	int sx = P.crop_x + int((uint(ox) * uint(P.crop_w)) / uint(P.col_w));
+	int sy = P.crop_y + int((uint(oy) * uint(P.crop_h)) / uint(P.col_h));
 	int x0 = sx > 0 ? sx - 1 : 0, y0 = sy > 0 ? sy - 1 : 0;
 	x0 = min(x0, P.width - 4);
 	y0 = min(y0, P.height - 4);

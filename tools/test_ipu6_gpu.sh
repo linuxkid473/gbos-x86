@@ -26,7 +26,10 @@ ln -s "$INC/vulkan" "$tmp/inc/vulkan"
 ln -s "$INC/vk_video" "$tmp/inc/vk_video"
 gcc -O2 -Wall -Wextra -Werror -Wno-unused-function -pthread -I "$tmp/inc" -o "$tmp/test-gpu" "$ROOT/tools/test_ipu6_gpu.c" -lm -ldl
 VK_ICD_FILENAMES=$ICD "$tmp/test-gpu"
-# The CAMERA_SIZE=640x480 fallback build.
-gcc -O2 -Wall -Wextra -Werror -Wno-unused-function -pthread -DOUT_WIDTH=640 -DOUT_HEIGHT=480 -I "$tmp/inc" \
-	-o "$tmp/test-gpu-640" "$ROOT/tools/test_ipu6_gpu.c" -lm -ldl
-VK_ICD_FILENAMES=$ICD "$tmp/test-gpu-640"
+# The CAMERA_SIZE builds.
+for size in "1280 720" "640 480"; do
+	set -- $size
+	gcc -O2 -Wall -Wextra -Werror -Wno-unused-function -pthread -DOUT_WIDTH=$1 -DOUT_HEIGHT=$2 -I "$tmp/inc" \
+		-o "$tmp/test-gpu-$1" "$ROOT/tools/test_ipu6_gpu.c" -lm -ldl
+	VK_ICD_FILENAMES=$ICD "$tmp/test-gpu-$1"
+done

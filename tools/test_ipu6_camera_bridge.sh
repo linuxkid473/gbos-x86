@@ -257,17 +257,21 @@ size_of() {	# CAMERA_SIZE value -> "W H SIZE_DIR FRONT_DESC REAR_DESC"
     )
 }
 S=/postinstall/gbos/surface
-[ "$(size_of '')" = "1280 960  $S/latitude_fake_uvc_desc.bin $S/latitude_rear_fake_uvc_desc.bin" ]
-[ "$(size_of 1280x960)" = "$(size_of '')" ]
+[ "$(size_of '')" = "1920 1080  $S/latitude_fake_uvc_desc.bin $S/latitude_rear_fake_uvc_desc.bin" ]
+[ "$(size_of 1920x1080)" = "$(size_of '')" ]
+[ "$(size_of 1280x720)" = "1280 720 /1280x720 $S/latitude_fake_uvc_desc-1280x720.bin $S/latitude_rear_fake_uvc_desc-1280x720.bin" ]
 [ "$(size_of 640x480)" = "640 480 /640x480 $S/latitude_fake_uvc_desc-640x480.bin $S/latitude_rear_fake_uvc_desc-640x480.bin" ]
+# 1280x960 (no CameraX video quality: the app crashed on boot-18) and anything else: the default.
+[ "$(size_of 1280x960)" = "$(size_of '')" ]
 [ "$(size_of 800x600)" = "$(size_of '')" ]
 grep -Fq 'BRIDGE_CPU=/postinstall/gbos/installer/bin$SIZE_DIR/ipu6-loopback' "$BRIDGE"
 grep -Fq 'BRIDGE_GPU=/postinstall/gbos/installer/bin$SIZE_DIR/vulkan/ipu6-loopback' "$BRIDGE"
-for f in installer/bin/640x480/ipu6-loopback installer/bin/640x480/vulkan/ipu6-loopback \
-	 surface/latitude_fake_uvc_desc-640x480.bin surface/latitude_rear_fake_uvc_desc-640x480.bin; do
-    [ -s "$ROOT/usb/$f" ]
+for size in 1280x720 640x480; do
+    for f in installer/bin/$size/ipu6-loopback installer/bin/$size/vulkan/ipu6-loopback; do
+        [ -x "$ROOT/usb/$f" ]
+    done
+    [ -s "$ROOT/usb/surface/latitude_fake_uvc_desc-$size.bin" ] && [ -s "$ROOT/usb/surface/latitude_rear_fake_uvc_desc-$size.bin" ]
 done
-[ -x "$ROOT/usb/installer/bin/640x480/ipu6-loopback" ] && [ -x "$ROOT/usb/installer/bin/640x480/vulkan/ipu6-loopback" ]
 
 # Front uevent: byte-identical to the one the launcher wrote before the rear camera existed.
 cat > "$tmp/front.expected" <<'EOF'

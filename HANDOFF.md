@@ -1234,3 +1234,18 @@ SHA-NI, 256-bit VAES/VPCLMULQDQ, AVX-IFMA and AVX-512; the lapis binaries use th
   - *Fallback:* `CAMERA_SIZE=640x480` in gbos.cfg selects the previous output size: bridge builds in `installer/bin/640x480/` (`-DOUT_WIDTH=640 -DOUT_HEIGHT=480`, colour grid 320×240, luma detail at 640×480), loopback bounds 640×480 and the `-640x480` descriptors (byte-identical to the pre-1280 ones). The default (1280×960) binaries are unchanged. The host, docker and GPU suites also run the 640×480 build.
   - *Next boot (CAMERA_LIBCAMERA=0):* the same as boot-15 except 1280×960 and the GPU converter. If the app opens, the stall came from the libcamera camera. If it stalls again, set `CAMERA_SIZE=640x480`.
   - Seen in the adapter log: it also tries `/vendor/lib64/hw/camera.libipu6_hal_brya.so` (Intel's ChromeOS IPU6 HAL, "brya" boards), which is not in this image. Worth remembering for Intel's own pipeline later.
+- 2026-11-20 **Boot-18: why Google's camera app rejects 1280×960, and 1920×1080 by default (host-tested only, not deployed).**
+  - *Cause, from the app itself* (AL_Camera.apk from lapis/parts, inspected locally with the SDK's dexdump; nothing kept):
+    - The crash `IllegalStateException: Required value was null` at `ezv.k`, line 169, is in `com/google/android/desktop/camera/main/MainViewModel`: the state's `Size` (field `fas.b`) is null.
+    - That size comes from CameraX's video `Quality` mapping (class `aws`: SD 720×480/640×480, HD 1280×720, FHD 1920×1080, QHD 2560×1440, UHD 3840×2160).
+    - The vendor image has no encoder profiles for these cameras (only `media_profiles_camera_fl225f-1b.xml`), so CameraX matches qualities to the camera's sizes. 1280×960 matches none; 640×480 (boot-15) is SD.
+    - So boot-17's stall was the same cause, not the libcamera camera.
+  - *Change:*
+    - Output 1920×1080 by default. That is also the active array Google's camera table declares for the front's `0408:4052` identity.
+    - The 4:3 sensors are cropped to a centred 16:9 band (`sensor_crop`: front 2592×1458 from row 243, rear 3280×1845 from row 309), with no stretching.
+    - The crop drives the colour grid, the detail pass, the lens-shading map and the WB/AE statistics, on the CPU and in the GPU shaders. 4:3 outputs crop (almost) nothing.
+    - `CAMERA_SIZE=1280x720` or `640x480` select builds in `installer/bin/<size>/` (`-DOUT_WIDTH/-DOUT_HEIGHT`), that size's descriptors and loopback bounds. `1280x960` and anything else fall back to 1920×1080 with a warning.
+    - No module change: v4l2loopback's list already has 1920×1080 and 1280×720.
+  - *Cost:* the CPU converter at 1920×1080 is 35 ms/frame (2 threads, ~28 fps); the GPU path (working since boot-17) is the default.
+  - *Tests:* `test_sensor_crop` (aspect, centring, 4:3 untouched); the scene and lens-shading tests are now crop-aware. The host, docker and GPU suites run 1920×1080, 1280×720 and 640×480. The launcher size block is tested for '', 1920x1080, 1280x720, 640x480, 1280x960 and invalid values.
+  - *Unverified:* that the app accepts the 16:9 FHD size, and the USB HAL's extra CPU at 1920×1080. `CAMERA_SIZE=640x480` (on the stick now) should work as on boot-15: the same builds as deployed, crop = full sensor.

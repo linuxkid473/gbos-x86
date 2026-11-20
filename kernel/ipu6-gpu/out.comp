@@ -10,7 +10,7 @@ int luma_at(int ox, int oy, int cy0, int cy1, int sy)
 	int w = P.col_w;
 	int y = (yuv[cy0 * w + cx0] + yuv[cy0 * w + cx1] + yuv[cy1 * w + cx0] + yuv[cy1 * w + cx1] + 2) >> 2;
 	if (P.detail_q12 > 0) {
-		int sx = int((uint(ox) * uint(P.width)) / uint(P.out_w));
+		int sx = P.crop_x + int((uint(ox) * uint(P.crop_w)) / uint(P.out_w));
 		sx = min(sx, P.width - 2);
 		uint gw = (green[cy0 * w + cx0] + green[cy0 * w + cx1] + green[cy1 * w + cx0] +
 			   green[cy1 * w + cx1] + 2u) >> 2;
@@ -48,7 +48,7 @@ void main()
 	if (pair >= P.out_w / 2 || oy >= P.out_h)
 		return;
 	int ox = pair * 2;
-	int sy = int((uint(oy) * uint(P.height)) / uint(P.out_h));
+	int sy = P.crop_y + int((uint(oy) * uint(P.crop_h)) / uint(P.out_h));
 	sy = min(sy, P.height - 2);
 	int cy0 = oy >> 1, cy1 = (oy & 1) != 0 && cy0 + 1 < P.col_h ? cy0 + 1 : cy0;
 	int y0 = luma_at(ox, oy, cy0, cy1, sy), y1 = luma_at(ox + 1, oy, cy0, cy1, sy);

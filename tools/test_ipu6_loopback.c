@@ -478,20 +478,25 @@ static int test_lens_shading(void)
 		return 2;
 	unlink(path);
 
-	/* Gain map: ~1.0 at the centre, ~4.0 near a corner at low sensor gain. */
+	/*
+	 * Gain map: ~1.0 at the centre, the table's gain at the shown area's corner (the sensor
+	 * corner, ~4.0, for 4:3 output; the 16:9 crop's corner, less vignetted, for 16:9).
+	 */
 	sensor_total_gain = 1.0;
+	sensor_crop(w, h);
+	double expect = synthetic_shading((crop_x + 1.0) / w, (crop_y + 1.0) / h, 4.0);
 	update_lsc(0.9, 0.45, w, h);
 	if (!lsc_active || lsc_pick[0] != 1 || lsc_strength != 1.0)
 		return 3;
 	double centre = lsc_map[1][COL_HEIGHT / 2][COL_WIDTH / 2] / 4096.0;
 	double corner = lsc_map[0][0][0] / 4096.0;
-	if (centre < 0.98 || centre > 1.03 || corner < 3.7 || corner > 4.05)
+	if (centre < 0.98 || centre > 1.03 || fabs(corner - expect) > 0.15 || expect < 3.0)
 		return 4;
-	/* At 64x sensor gain the correction eases to 60%: 4^0.6 ~ 2.3 at the corner. */
+	/* At 64x sensor gain the correction eases to 60%: gain^0.6 at the corner. */
 	sensor_total_gain = 64.0;
 	update_lsc(0.9, 0.45, w, h);
 	corner = lsc_map[0][0][0] / 4096.0;
-	if (lsc_strength > 0.61 || corner < 2.1 || corner > 2.35)
+	if (lsc_strength > 0.61 || fabs(corner - pow(expect, 0.6)) > 0.1)
 		return 5;
 
 	/* A vignetted flat grey field (raw = flat / shading) comes out flat after correction. */
@@ -1131,7 +1136,9 @@ static int run_rgbir_scene(const struct rgbir_scene *s, struct scene_result *r)
 	sensor_total_gain = saved_g;
 	memset(r, 0, sizeof(*r));
 	double n = 0, tn = 0;
-	unsigned int top_out = (unsigned int)((uint64_t)s->top_rows * OUT_HEIGHT / h);
+	/* Rows of the top band that the output shows (the 16:9 crop of the 4:3 frame: sensor_crop). */
+	unsigned int top_out = s->top_rows <= crop_y ? 0 :
+		(unsigned int)((uint64_t)(s->top_rows - crop_y) * OUT_HEIGHT / crop_h);
 	for (unsigned int oy = 0; oy < OUT_HEIGHT; oy++)
 		for (unsigned int ox = 0; ox < OUT_WIDTH; ox += 2) {
 			size_t at = ((size_t)oy * OUT_WIDTH + ox) * 2;
@@ -1473,6 +1480,36 @@ static int test_nir_dark_green(void)
 		result = 3;
 	restore_colour_defaults(keep, wb_locus_nir_band);
 	return result;
+}
+
+/*
+ * The picture shows a centred sensor area with the output's aspect ratio (boot-18: the camera app
+ * needs a 16:9 size of 1280 or wider; the sensors are 4:3). Front 2592x1944 and rear 3280x2464.
+ */
+static int test_sensor_crop(void)
+{
+	static const unsigned int sensors[][2] = { { 2592, 1944 }, { 3280, 2464 }, { 1296, 972 } };
+
+	for (unsigned int i = 0; i < 3; i++) {
+		unsigned int w = sensors[i][0], h = sensors[i][1];
+		sensor_crop(w, h);
+		/* Aspect within one row/column of the output's, centred, inside the sensor. */
+		if (llabs((long long)crop_w * OUT_HEIGHT - (long long)crop_h * OUT_WIDTH) > (long long)2 * OUT_WIDTH ||
+		    crop_x + crop_w > w || crop_y + crop_h > h ||
+		    abs((int)(crop_x * 2 + crop_w) - (int)w) > 2 || abs((int)(crop_y * 2 + crop_h) - (int)h) > 2)
+			return 1 + (int)i;
+		/*
+		 * 4:3 output on a 4:3 sensor: (nearly) all of it (the 640x480 build; the rear's
+		 * 3280x2464 is a little wider than 4:3, so 4 rows go), else the full width.
+		 */
+		if ((uint64_t)OUT_WIDTH * 3 == (uint64_t)OUT_HEIGHT * 4) {
+			if (crop_w * 100 < w * 99 || crop_h * 100 < h * 99)
+				return 5;
+		} else if (crop_x || crop_w != w || crop_h >= h) {
+			return 6;
+		}
+	}
+	return 0;
 }
 
 /*
@@ -1926,6 +1963,8 @@ int main(void)
 			return printf("test_green_side_light %d\n", r), 1;
 		if ((r = test_green_scene_not_light()))
 			return printf("test_green_scene_not_light %d\n", r), 1;
+		if ((r = test_sensor_crop()))
+			return printf("test_sensor_crop %d\n", r), 1;
 		if ((r = test_detail_stripes()))
 			return printf("test_detail_stripes %d\n", r), 1;
 		if ((r = test_stripe_fringes()))

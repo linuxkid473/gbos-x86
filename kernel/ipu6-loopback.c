@@ -17,9 +17,18 @@
  * takes its brightness detail from the green sites (half of all sites, a checkerboard on both
  * sensors) at full output resolution. See convert_bayer_yuyv.
  */
-#ifndef OUT_WIDTH	/* -DOUT_WIDTH=640 -DOUT_HEIGHT=480: the CAMERA_SIZE=640x480 fallback build */
-#define OUT_WIDTH 1280
-#define OUT_HEIGHT 960
+/*
+ * 1920x1080 since 2026-11-20 (boot-18). Google's camera app creates a CameraX video use case, and
+ * with no encoder profiles for these cameras CameraX only accepts its own quality sizes: SD
+ * 720x480/640x480, HD 1280x720, FHD 1920x1080, QHD 2560x1440, UHD 3840x2160. With 1280x960 as the
+ * only size no quality matched: "Required value was null" in the app's MainViewModel (boot-18),
+ * the silent stall of boot-17. 640x480 (SD) worked on boot-15. Every quality of 1280 or wider is
+ * 16:9, so the 4:3 sensors are cropped (sensor_crop). -DOUT_WIDTH/-DOUT_HEIGHT: the CAMERA_SIZE
+ * builds (1280x720, 640x480).
+ */
+#ifndef OUT_WIDTH
+#define OUT_WIDTH 1920
+#define OUT_HEIGHT 1080
 #endif
 #define COL_WIDTH (OUT_WIDTH / 2)
 #define COL_HEIGHT (OUT_HEIGHT / 2)
@@ -214,6 +223,26 @@ static void init_raw_lut(void)
 		raw_lin_lut[code] = (uint16_t)((value * LINEAR_MAX + RAW_RANGE / 2) / RAW_RANGE);
 	}
 	ready = 1;
+}
+
+/*
+ * The sensor area the picture shows: centred, with the output's aspect ratio (all of a 4:3
+ * sensor for 4:3 output; a 16:9 band for 16:9 output). Set for each frame by sensor_crop().
+ */
+static unsigned int crop_x, crop_y, crop_w = 1, crop_h = 1;
+
+static void sensor_crop(unsigned int width, unsigned int height)
+{
+	crop_x = crop_y = 0;
+	crop_w = width;
+	crop_h = height;
+	if ((uint64_t)width * OUT_HEIGHT > (uint64_t)height * OUT_WIDTH) {
+		crop_w = (unsigned int)((uint64_t)height * OUT_WIDTH / OUT_HEIGHT) & ~1u;
+		crop_x = ((width - crop_w) / 2) & ~1u;
+	} else if ((uint64_t)width * OUT_HEIGHT < (uint64_t)height * OUT_WIDTH) {
+		crop_h = (unsigned int)((uint64_t)width * OUT_HEIGHT / OUT_WIDTH) & ~1u;
+		crop_y = ((height - crop_h) / 2) & ~1u;
+	}
 }
 
 static unsigned int raw_at(const uint16_t *raw, unsigned int width,
@@ -541,7 +570,7 @@ static struct lsc_entry lsc_table[LSC_MAX_ILL];
 static int lsc_count, lsc_active, lsc_pick[2] = { -1, -1 };
 static double lsc_weight, lsc_strength = 1.0, sensor_total_gain = 1.0;
 static uint16_t lsc_map[3][COL_HEIGHT][COL_WIDTH];	/* per colour-grid point */
-static struct { int pick[2]; double weight, strength; unsigned int w, h; } lsc_built = { { -2, -2 }, 0, 0, 0, 0 };
+static struct { int pick[2]; double weight, strength; unsigned int w, h, crop_x, crop_y; } lsc_built = { { -2, -2 }, 0, 0, 0, 0, 0, 0 };
 static unsigned int lsc_generation;	/* counts lsc_map rebuilds (the GPU copy follows it) */
 
 static int load_lsc_table(const char *path)
@@ -620,14 +649,15 @@ static void update_lsc(double rg, double bg, unsigned int width, unsigned int he
 	lsc_strength = lsc_strength_for_gain(sensor_total_gain);
 	lsc_active = 1;
 	if (lsc_built.pick[0] == a && lsc_built.pick[1] == b && fabs(lsc_built.weight - wa) < 0.05 &&
+	    lsc_built.crop_y == crop_y && lsc_built.crop_x == crop_x &&
 	    fabs(lsc_built.strength - lsc_strength) < 0.05 && lsc_built.w == width && lsc_built.h == height)
 		return;
 	const struct lsc_entry *ea = &lsc_table[a], *eb = &lsc_table[b];
 	for (int oy = 0; oy < COL_HEIGHT; oy++) {
-		double sy = ((oy * (double)height) / COL_HEIGHT + 1.0) / height;	/* window centre, 0..1 */
+		double sy = (crop_y + (oy * (double)crop_h) / COL_HEIGHT + 1.0) / height;	/* window centre, 0..1 */
 		double gy = sy * (ea->gh - 1);
 		for (int ox = 0; ox < COL_WIDTH; ox++) {
-			double sx = ((ox * (double)width) / COL_WIDTH + 1.0) / width;
+			double sx = (crop_x + (ox * (double)crop_w) / COL_WIDTH + 1.0) / width;
 			double gx = sx * (ea->gw - 1);
 			for (int c = 0; c < 3; c++) {
 				double g = wa * lsc_grid_at(ea, c, gx, gy) + (1 - wa) * lsc_grid_at(eb, c, gx, gy);
@@ -639,6 +669,7 @@ static void update_lsc(double rg, double bg, unsigned int width, unsigned int he
 	lsc_built.pick[0] = a; lsc_built.pick[1] = b;
 	lsc_built.weight = wa; lsc_built.strength = lsc_strength;
 	lsc_built.w = width; lsc_built.h = height;
+	lsc_built.crop_x = crop_x; lsc_built.crop_y = crop_y;
 	lsc_generation++;
 }
 
@@ -654,6 +685,8 @@ static void calculate_white_balance(const uint16_t *raw, unsigned int width,
 	static unsigned int ghist[1024];
 	unsigned int gmax = 0, gnear = 0, gcount = 0;
 	double mean[4];
+
+	sensor_crop(width, height);
 
 	/* Sensor clip level: a flat top among this frame's sampled green sites (see raw_clip). */
 	memset(ghist, 0, sizeof(ghist));
@@ -686,8 +719,9 @@ static void calculate_white_balance(const uint16_t *raw, unsigned int width,
 	unsigned int tile_limit = raw_clip - (raw_clip - BLACK_LEVEL) / 20;	/* 95% of the range */
 	memset(rsum, 0, sizeof(rsum));
 	memset(rcount, 0, sizeof(rcount));
-	for (unsigned int y = 0; y < height; y += 16) {
-		for (unsigned int x = 0; x < width; x += 16) {
+	/* Statistics (white balance, AE) over what the picture shows: the crop. */
+	for (unsigned int y = crop_y; y < crop_y + crop_h; y += 16) {
+		for (unsigned int x = crop_x; x < crop_x + crop_w; x += 16) {
 			uint64_t tsum[4] = { 0 }, tcount[4] = { 0 };
 			unsigned int tpeak = 0;
 			for (unsigned int dy = 0; dy < 4 && y + dy < height; dy++) {
@@ -708,14 +742,14 @@ static void calculate_white_balance(const uint16_t *raw, unsigned int width,
 				continue;
 			double shade[4] = { 1, 1, 1, 1 };
 			if (shaded) {
-				unsigned int ox = (unsigned int)(((uint64_t)x * COL_WIDTH) / width);
-				unsigned int oy = (unsigned int)(((uint64_t)y * COL_HEIGHT) / height);
+				unsigned int ox = (unsigned int)(((uint64_t)(x - crop_x) * COL_WIDTH) / crop_w);
+				unsigned int oy = (unsigned int)(((uint64_t)(y - crop_y) * COL_HEIGHT) / crop_h);
 				shade[0] = lsc_map[0][oy][ox] / 4096.0;
 				shade[1] = shade[CFA_IR] = lsc_map[1][oy][ox] / 4096.0;
 				shade[2] = lsc_map[2][oy][ox] / 4096.0;
 			}
-			unsigned int rx = (unsigned int)((uint64_t)x * WB_REGIONS_X / width);
-			unsigned int ry = (unsigned int)((uint64_t)y * WB_REGIONS_Y / height);
+			unsigned int rx = (unsigned int)((uint64_t)(x - crop_x) * WB_REGIONS_X / crop_w);
+			unsigned int ry = (unsigned int)((uint64_t)(y - crop_y) * WB_REGIONS_Y / crop_h);
 			for (int channel = 0; channel < 4; channel++) {
 				sum[channel] += tsum[channel] * shade[channel];
 				count[channel] += tcount[channel];
@@ -1316,9 +1350,9 @@ static void colour_grid_rows(void *ctx, unsigned int row0, unsigned int row1)
 	const struct frame_job *job = ctx;
 
 	for (unsigned int oy = row0; oy < row1; oy++) {
-		unsigned int sy = (unsigned int)(((uint64_t)oy * job->height) / COL_HEIGHT);
+		unsigned int sy = crop_y + (unsigned int)(((uint64_t)oy * crop_h) / COL_HEIGHT);
 		for (unsigned int ox = 0; ox < COL_WIDTH; ox++) {
-			unsigned int sx = (unsigned int)(((uint64_t)ox * job->width) / COL_WIDTH);
+			unsigned int sx = crop_x + (unsigned int)(((uint64_t)ox * crop_w) / COL_WIDTH);
 			int c[3];
 			unsigned int shading[3], green;
 			if (lsc_active) {
@@ -1354,7 +1388,7 @@ static void output_rows(void *ctx, unsigned int row0, unsigned int row1)
 	int detail_q12 = job->detail_q12, tnr_threshold = job->tnr_threshold;
 
 	for (unsigned int oy = row0; oy < row1; oy++) {
-		unsigned int sy = (unsigned int)(((uint64_t)oy * height) / OUT_HEIGHT);
+		unsigned int sy = crop_y + (unsigned int)(((uint64_t)oy * crop_h) / OUT_HEIGHT);
 		if (sy > height - 2)
 			sy = height - 2;
 		const uint16_t *r0 = raw + (size_t)sy * (stride / 2), *r1 = r0 + stride / 2;
@@ -1366,7 +1400,7 @@ static void output_rows(void *ctx, unsigned int row0, unsigned int row1)
 			int cx0 = (int)(ox >> 1), cx1 = (ox & 1) && cx0 + 1 < COL_WIDTH ? cx0 + 1 : cx0;
 			int y = (col_y[cy0][cx0] + col_y[cy0][cx1] + col_y[cy1][cx0] + col_y[cy1][cx1] + 2) >> 2;
 			if (detail_q12 > 0) {
-				unsigned int sx = (unsigned int)(((uint64_t)ox * width) / OUT_WIDTH);
+				unsigned int sx = crop_x + (unsigned int)(((uint64_t)ox * crop_w) / OUT_WIDTH);
 				if (sx > width - 2)
 					sx = width - 2;
 				unsigned int gw = (col_green[cy0][cx0] + col_green[cy0][cx1] +

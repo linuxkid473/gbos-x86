@@ -1,7 +1,7 @@
 #!/system/bin/sh
 # Latitude 7320 Detachable IPU6 camera bridges: front OV5678 (ov5675 driver) on /dev/video64 and
 # rear OV8856 on /dev/video65. Each sensor has its own ipu6-loopback process that converts raw
-# frames to 1280x960 YUYV on a v4l2loopback device, exposed to Android's USB camera HAL through a
+# frames to YUYV (1920x1080 by default, CAMERA_SIZE) on a v4l2loopback device, exposed to Android's USB camera HAL through a
 # fake UVC sysfs identity. The front is required; the rear is optional (CAMERA_REAR=0 in gbos.cfg
 # turns it off) and starts only once the front streams, so a rear failure never costs the front.
 set -u
@@ -33,17 +33,19 @@ cfg() {
     sed -n "s/^$1=//p" /postinstall/gbos/gbos.cfg 2>/dev/null | tail -n 1 | tr -d '\r'
 }
 
-# Output size. 1280x960 since 2026-11-20; CAMERA_SIZE=640x480 in gbos.cfg selects the previous size
-# (bridge builds in installer/bin/640x480/, the 640x480 descriptors, matching loopback bounds) in case
-# an app cannot use 1280x960. Bridge, loopback bounds and descriptors must agree: the HAL takes the
-# size v4l2loopback lists.
+# Output size: 1920x1080 by default; CAMERA_SIZE=1280x720 or 640x480 in gbos.cfg (bridge builds in
+# installer/bin/<size>/, that size's descriptors and loopback bounds). It must be one of CameraX's
+# video qualities (SD 640x480, HD 1280x720, FHD 1920x1080): Google's camera app crashed (boot-18)
+# or stalled (boot-17) with 1280x960. Bridge, loopback bounds and descriptors must agree: the HAL
+# takes the size v4l2loopback lists.
 # --- output size (tools/test_ipu6_camera_bridge.sh runs this block) ---
 SURFACE=/postinstall/gbos/surface
 case "$(cfg CAMERA_SIZE)" in
     640x480) OUT_W=640 OUT_H=480 SIZE_DIR=/640x480 DESC_SUFFIX=-640x480 ;;
-    ''|1280x960) OUT_W=1280 OUT_H=960 SIZE_DIR= DESC_SUFFIX= ;;
-    *) echo "WARNING: CAMERA_SIZE=$(cfg CAMERA_SIZE) is not 1280x960 or 640x480; using 1280x960"
-       OUT_W=1280 OUT_H=960 SIZE_DIR= DESC_SUFFIX= ;;
+    1280x720) OUT_W=1280 OUT_H=720 SIZE_DIR=/1280x720 DESC_SUFFIX=-1280x720 ;;
+    ''|1920x1080) OUT_W=1920 OUT_H=1080 SIZE_DIR= DESC_SUFFIX= ;;
+    *) echo "WARNING: CAMERA_SIZE=$(cfg CAMERA_SIZE) is not 1920x1080, 1280x720 or 640x480; using 1920x1080"
+       OUT_W=1920 OUT_H=1080 SIZE_DIR= DESC_SUFFIX= ;;
 esac
 FRONT_DESC=$SURFACE/latitude_fake_uvc_desc$DESC_SUFFIX.bin
 REAR_DESC=$SURFACE/latitude_rear_fake_uvc_desc$DESC_SUFFIX.bin
