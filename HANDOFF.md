@@ -1062,3 +1062,19 @@ SHA-NI, 256-bit VAES/VPCLMULQDQ, AVX-IFMA and AVX-512; the lapis binaries use th
   - *Test:* `fingerprint/fp_log_test.c` (host; run by `fingerprint/build.sh`) kills a logging child with SIGTERM and finds every line complete. A buffered stdio writer killed the same way leaves an empty file (negative control). A mutant without the write fails.
   - *Not changed:* the main `gbos_logcat` still loses under 4 KB at shutdown.
   - *Built:* `usb/gbos_fp` SHA-256 `d322a24f09b2fce1357b37bbb923dc3bf98ee1486dbe62a503d8cafb6c273e1f`, `usb/hook.sh` `5ba8e62b4f90ba2ecc15861d986f99a641ed03293b349416b453dd7101e6df8b`. Not deployed.
+- 2026-11-20 **Boot-14 front green tint under evening room light: cause and fix (bridge `f0cbd504…`; host-tested only, not deployed).**
+  - *Cause:* the light, not the IR model. The white wall's grey-world (lens-shading-corrected, IR-free) was R/G 0.57–0.62, B/G 0.40–0.42, which is 0.10–0.14 off the module's locus on its green side (both ratios lower than the calibrated light of the same colour temperature, as fluorescent and many LED lights are). NIR was 0.00–0.02.
+    - The rear, in the same room, sat 0.04–0.05 off on the same side, so the light really is greenish. The RGB-IR filters just see it as more so.
+    - Even with nothing subtracted from blue, B/G would have been about 0.50 against a locus value of about 0.57, so the IR subtraction can't explain it.
+    - The 0.03 band pulled the white point back to the locus: R gain about 8% and B gain about 15–20% short, so the wall came out green/cyan.
+  - *Fix (front only; the rear is unchanged):*
+    - White-balance statistics are also gathered per region (8×6). The white point is the mean of the regions whose colour a light could have: up to 2× the band on the magenta side and up to 0.18 on the green side. That mean may stay up to 0.18 off on the green side.
+    - If fewer than a quarter of the regions qualify (for example a frame of foliage), it falls back to grey-world with the plain band, as before.
+    - Saturated colours are left out of the measurement, so a grey under a green top third now stays neutral. Before, it was tinted U −3, V +5.
+    - Log: `ccm: ... (locus distance D green side|magenta side, band B, N of M regions lit like a light, green side allowed|; grey-world)`.
+  - Simulated with the module's real tables (stick only, never committed): boot-14 frames 1800/2700 go from U −6.7/V −3.6 to −0.0/−0.5. Boot-11 LED at 17.5x, boot-12 daylight and boot-14's dark start-up frame change by ≤0.1.
+  - Tests (synthetic locus):
+    - `test_green_side_light`: boot-14 levels come out neutral; negative control with the zone off is green.
+    - `test_green_scene_not_light`: foliage regions are left out; the zone off tints the grey; foliage alone never opens the green side.
+    - The daylight test's old-bridge controls now also switch the zone off.
+  - Unverified on hardware: other lights, and pale green walls, which any grey-world AWB will neutralise.
