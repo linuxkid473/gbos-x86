@@ -34,6 +34,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdarg.h>
 
 /* ---- bionic ---- */
 typedef struct { void (**preinit_array)(void); void (**init_array)(void); void (**fini_array)(void);
@@ -45,9 +46,15 @@ void *memcpy(void *, const void *, size_t); void *memset(void *, int, size_t);
 int memcmp(const void *, const void *, size_t); size_t strlen(const char *);
 int strcmp(const char *, const char *); int strncmp(const char *, const char *, size_t);
 int snprintf(char *, size_t, const char *, ...) __attribute__((format(printf, 3, 4)));
+int vsnprintf(char *, size_t, const char *, va_list) __attribute__((format(printf, 3, 0)));
+struct tm { int tm_sec, tm_min, tm_hour, tm_mday, tm_mon, tm_year, tm_wday, tm_yday, tm_isdst;
+	    long tm_gmtoff; const char *tm_zone; };	/* bionic LP64 */
+struct tm *localtime_r(const long *, struct tm *);
+int getpid(void); int gettid(void);
 void arc4random_buf(void *, size_t);
 struct timespec { long tv_sec, tv_nsec; };
 int clock_gettime(int, struct timespec *);
+#define CLOCK_REALTIME 0
 #define CLOCK_MONOTONIC 1
 #define CLOCK_BOOTTIME 7
 int open(const char *, int, ...); int close(int);
@@ -68,6 +75,7 @@ int *__errno(void);
 #define O_RDWR 2
 #define O_CREAT 0100
 #define O_TRUNC 01000
+#define O_APPEND 02000
 #define O_NOFOLLOW 0400000
 #define O_CLOEXEC 02000000
 #define ENOENT 2
@@ -89,12 +97,15 @@ int pthread_cond_signal(pthread_cond_t *);
 int pthread_cond_wait(pthread_cond_t *, pthread_mutex_t *);
 int pthread_cond_clockwait(pthread_cond_t *, pthread_mutex_t *, int clock, const struct timespec *);
 
-/* ---- liblog ---- */
+/* ---- liblog, and our own copy of each line ---- */
+int __android_log_write(int prio, const char *tag, const char *text);
 int __android_log_print(int prio, const char *tag, const char *fmt, ...) __attribute__((format(printf, 3, 4)));
-#define LOGI(...) __android_log_print(4, "gbos_fp", __VA_ARGS__)
-#define LOGW(...) __android_log_print(5, "gbos_fp", __VA_ARGS__)
-#define LOGE(...) __android_log_print(6, "gbos_fp", __VA_ARGS__)
-#define LOGD(...) __android_log_print(3, "gbos_fp", __VA_ARGS__)
+
+#include "fp_log.h"
+#define LOGI(...) fp_log(4, __VA_ARGS__)
+#define LOGW(...) fp_log(5, __VA_ARGS__)
+#define LOGE(...) fp_log(6, __VA_ARGS__)
+#define LOGD(...) fp_log(3, __VA_ARGS__)
 
 /* ---- BoringSSL ---- */
 typedef struct env_md_st EVP_MD;
@@ -825,6 +836,22 @@ static void on_sensor_event(void *ctx, int kind, int value)
 	}
 }
 
+/*
+ * goodix_open() failed. -ECANCELED is the framework cancelling the operation while the sensor was being opened
+ * (boot-13: keyguard restarts authentication right after a lockout is cleared): report a cancel, as
+ * BiometricScheduler expects, not ERR_HW_UNAVAILABLE, which made it recreate the session every time.
+ */
+static void open_failed(struct session *ss, int r, const char *when)
+{
+	if (r == -ECANCELED) {
+		LOGI("user %d: cancelled while opening the sensor%s", ss->user, when);
+		cb_error(ss, ERR_CANCELED, 0);
+		return;
+	}
+	LOGE("user %d: sensor open failed%s: %d", ss->user, when, r);
+	cb_error(ss, ERR_HW_UNAVAILABLE, 0);
+}
+
 /* A rejected finger: count it and lock out at the thresholds. True when the operation must end. */
 static bool count_failure(struct session *ss)
 {
@@ -885,8 +912,7 @@ static void op_authenticate(struct session *ss)
 	}
 	LOGI("user %d: authenticate starting (%d enrollments)", ss->user, st->n);
 	if ((r = goodix_open(&dev)) < 0) {
-		LOGE("user %d: sensor open failed: %d", ss->user, r);
-		cb_error(ss, ERR_HW_UNAVAILABLE, 0);
+		open_failed(ss, r, "");
 		return;
 	}
 	for (;;) {
@@ -986,16 +1012,14 @@ static void op_enroll(struct session *ss, const struct hat *hat)
 	}
 	LOGI("user %d: enroll %d starting as %s", ss->user, id, name);
 	if ((r = goodix_open(&dev)) < 0) {
-		LOGE("user %d: sensor open failed: %d", ss->user, r);
-		cb_error(ss, ERR_HW_UNAVAILABLE, 0);
+		open_failed(ss, r, "");
 		return;
 	}
 	/* createSession queued a cleanup; if it could not run, do it now, before the sensor's duplicate check */
 	if (!ss->reconciled && reconcile(ss) < 0) {
 		goodix_close(&dev);
 		if ((r = goodix_open(&dev)) < 0) {
-			LOGE("user %d: sensor open failed after the template cleanup: %d", ss->user, r);
-			cb_error(ss, ERR_HW_UNAVAILABLE, 0);
+			open_failed(ss, r, " after the template cleanup");
 			return;
 		}
 	}
@@ -1460,6 +1484,11 @@ int main(int argc, char **argv, char **envp)
 			no_install = true;
 		else if (strcmp(argv[i], "--installed") == 0)
 			boot_installed = true;
+		else if (strcmp(argv[i], "--log") == 0 && i + 1 < argc) {
+			log_fd = open(argv[++i], O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW, 0644);
+			if (log_fd < 0)
+				__android_log_print(6, "gbos_fp", "cannot open log %s: errno %d", argv[i], errno);
+		}
 		else
 			LOGW("ignoring unknown argument %s", argv[i]);
 	}

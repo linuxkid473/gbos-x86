@@ -10,7 +10,7 @@ G=$T/gbos
 STICK_ONLY="a11y logs"
 # update: the system updater's state on the installed system (usb/sysupdate.sh), made at boot, never copied.
 RUNTIME="update"
-NEED="firmware patched audio installer kmod modules surface ksu sensors camera thermal"
+NEED="firmware patched audio installer kmod modules surface ksu sensors camera thermal display"
 for d in $NEED $STICK_ONLY; do mkdir -p "$G/$d"; done
 # The DIRS assignments, as install.sh runs them.
 sed -n '/^DIRS="/,/^for d in \$DIRS; do \[ -d/p' "$ROOT/usb/install.sh" | grep -v -e "^for d in \$DIRS" -e "\$FILES" > "$T/dirs.sh"

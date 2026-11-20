@@ -36,8 +36,8 @@
 #define AE_LONG_FRAME_X 2.0
 #define AE_LONG_KNEE_X 4.0
 /*
- * While no consumer reads a bridge, its sensor keeps streaming (the IPU6 firmware cannot stop
- * cleanly) but with a frame 8x the default (about 3.75 fps): two full-rate streams at once
+ * While no consumer reads a bridge, until its idle stop (IDLE_STOP_S_DEFAULT), its sensor
+ * streams with a frame 8x the default (about 3.75 fps): two full-rate streams at once
  * overflowed the ISYS transfer FIFOs on both CSI ports (2026-11-18 boot-9). AE statistics
  * continue at the low rate; the planned frame comes back as soon as a consumer streams.
  */
@@ -163,6 +163,15 @@ static int channel_at(unsigned int x, unsigned int y)
 	return cfa[y & 3][x & 3];
 }
 
+static int cfa_has_ir_sites(void)
+{
+	for (int y = 0; y < 4; y++)
+		for (int x = 0; x < 4; x++)
+			if (cfa[y][x] == CFA_IR)
+				return 1;
+	return 0;
+}
+
 static unsigned int raw_at(const uint16_t *raw, unsigned int width,
 			   unsigned int height, unsigned int stride,
 			   int x, int y)
@@ -174,6 +183,77 @@ static unsigned int raw_at(const uint16_t *raw, unsigned int width,
 	unsigned int value = raw[(size_t)y * (stride / 2) + (unsigned int)x] & 1023;
 	value = value > BLACK_LEVEL ? value - BLACK_LEVEL : 0;
 	return (value * LINEAR_MAX + RAW_RANGE / 2) / RAW_RANGE;
+}
+
+/*
+ * Infrared on the RGB-IR sensor. An IR site reads near-infrared light (NIR) plus a little
+ * visible light: under the module tuning file's calibration lights, which carry almost no NIR,
+ * it reads 0.096-0.105 of green (the per-light ratios stored with the tuning file's RGB-IR
+ * record 27); boot-11's LED room gave 0.103-0.106. Subtracting the IR site from every colour
+ * site (what the bridge did) is right for that visible share, and it is what the calibrated
+ * white points assume: boot-5/11 under LED light sit on the locus.
+ *
+ * Daylight adds real NIR (IR site 0.25-0.35 of green on boot-8 and boot-12), and the blue sites
+ * respond to it less than the IR site does: after a full subtraction every daylight frame of
+ * boot-8 and boot-12 (25 samples) sat 0.07-0.15 off the locus on the low-blue side, always
+ * with raw R = raw B, while the rear camera in the same room sat on its own locus (0.02-0.04)
+ * at about 6000 K. Fitting a blue NIR response k_B (red and green at 1) to those samples, with
+ * lens-shading-corrected statistics as below, gives a median locus distance of 0.033-0.042 for
+ * k_B = 0.5-0.6 (0.135 with 1.0); at 0.60 boot-12's daylight frames sit 0.001-0.022 from the
+ * locus, boot-8's 0.03-0.08 and boot-11's LED frames stay at 0.005-0.017. This is our fit under
+ * the grey-world assumption, not a value from the tuning file (its RGB-IR record 27 holds
+ * per-light G/R/B grids whose meaning and scale are not confirmed; see HANDOFF 2026-11-19).
+ *
+ *   NIR n = max(0, IR x (1 + v) - v x G),  v = ir_visible_q12 / 4096   (window or frame means)
+ *   colour = C - IR + (1 - k_c) x n,        nir_keep_q12[c] = (1 - k_c) x 4096
+ *
+ * With no NIR (n = 0) this is the old full subtraction, so LED and lamp light are unchanged.
+ * Plain Bayer has no IR sites: IR = 0, n = 0.
+ */
+static int ir_visible_q12 = 410;		/* 0.10 */
+static int nir_keep_q12[3] = { 0, 0, 1638 };	/* R, G: k = 1; B: k = 0.60 */
+
+static int nir_estimate(int ir, int green)
+{
+	int n = (int)(((int64_t)ir * (4096 + ir_visible_q12) - (int64_t)green * ir_visible_q12 + 2048) >> 12);
+
+	return n > 0 ? n : 0;
+}
+
+static double nir_estimate_f(double ir, double green)
+{
+	double v = ir_visible_q12 / 4096.0, n = ir * (1 + v) - v * green;
+
+	return n > 0 ? n : 0;
+}
+
+/*
+ * Sensor saturation. The highlight fade (rgb_linear_at) must reach white where a site clips;
+ * if the sensor saturates below code 1023, a fade keyed to full scale stops short and the
+ * clipped colour (green clips first: WB then lifts R and B above it and the matrix turns that
+ * magenta) shows: the pink sky of boot-12. Each frame's white-balance sampling looks for a
+ * flat top among the green sites in the top quarter of the range: at least 0.1% of them (and
+ * 8) within 2 codes of the maximum mean the sensor clipped there. Otherwise full scale.
+ */
+#define CLIP_MIN_RAW 768
+static int clip_detect = 1;			/* 0: assume full scale (host-test negative control) */
+static unsigned int raw_clip = 1023;		/* raw code (with black level) where sites clip */
+static unsigned int highlight_start_lin, highlight_full_lin;
+
+static unsigned int raw_to_linear(unsigned int raw)
+{
+	unsigned int value = raw > BLACK_LEVEL ? raw - BLACK_LEVEL : 0;
+	return (value * LINEAR_MAX + RAW_RANGE / 2) / RAW_RANGE;
+}
+
+/* Fade from 80% to 97% of the clip level (in linear units). */
+static void set_highlight_range(unsigned int clip)
+{
+	unsigned int lin = raw_to_linear(clip);
+
+	raw_clip = clip;
+	highlight_start_lin = lin * 80 / 100;
+	highlight_full_lin = lin * 97 / 100;
 }
 
 static unsigned char gamma_lut[LINEAR_MAX + 1];
@@ -278,17 +358,48 @@ static void select_ccm(double rg, double bg)
  */
 #define WB_LOCUS_BAND 0.03
 #define WB_MIN_SIGNAL 4.0	/* mean green (raw units above black) below which WB keeps its last state */
+/*
+ * The calibration lights carry almost no near infrared, so the locus is less certain in light
+ * that does (daylight): the band widens by WB_LOCUS_NIR_BAND per unit of NIR relative to green
+ * (wb_nir_ratio, see the infrared model below), up to WB_LOCUS_BAND_MAX. Boot-12 daylight has
+ * a ratio of about 0.3-0.45 (band about 0.06-0.075); boot-11's LED room about 0.02 (0.032).
+ */
+static double wb_locus_nir_band = 0.10;
+#define WB_LOCUS_BAND_MAX 0.08
 static double wb_white_rg = 1.0, wb_white_bg = 1.0;
-static double wb_locus_distance;
+static double wb_locus_distance, wb_locus_band = WB_LOCUS_BAND, wb_nir_ratio;
 
-static void constrain_white_point(double *rg, double *bg)
+/*
+ * Green side. Many real lights sit off the locus on its green side (both R/G and B/G lower than
+ * the calibrated light of the same colour temperature): fluorescent tubes, CFLs and many LEDs.
+ * Boot-14 (2026-11-19, evening room light, white tiled wall filling the frame, NIR 0.00-0.02):
+ * the front's grey-world sat 0.10-0.14 off the locus on that side (the rear, in the same room,
+ * 0.04-0.05 on the same side), and the 0.03 band pulled it back: the wall came out green/cyan
+ * (R gain about 8%, B gain about 15-20% short). So on the front the white point is measured
+ * only on regions whose colour a light could have (within WB_LOCUS_ACCEPT_MAGENTA x band on
+ * the magenta side, wb_locus_green_band on the green side), and when enough of the frame
+ * qualifies that measurement is trusted up to wb_locus_green_band. A saturated green scene
+ * (foliage) lies outside the zone; if too little of the frame qualifies, grey-world with the
+ * plain band is used as before. The rear is unchanged (its colour is reported good).
+ */
+static double wb_locus_green_band = 0.18;	/* 0: the plain band (host-test negative control) */
+#define WB_LOCUS_ACCEPT_MAGENTA 2.0
+#define WB_REGIONS_X 8
+#define WB_REGIONS_Y 6
+#define WB_REGIONS_MIN_FRACTION 0.25	/* of the regions with signal */
+static double wb_locus_side;		/* > 0 green side, < 0 magenta side (last measurement) */
+static int wb_regions_used, wb_regions_valid;
+
+/*
+ * Nearest point of the locus polyline (calibrated white points, warm to cool). Returns the
+ * distance, signed: > 0 on the green side (towards lower R/G and B/G), < 0 on the magenta side.
+ * Needs ccm_count >= 2.
+ */
+static double locus_nearest(double rg, double bg, double *px_out, double *py_out)
 {
 	int order[CCM_MAX];
-	double best_d = 1e9, best_x = *rg, best_y = *bg;
+	double best_d = 1e9, best_x = rg, best_y = bg, best_side = 1;
 
-	wb_locus_distance = 0;
-	if (ccm_count < 2)
-		return;
 	for (int i = 0; i < ccm_count; i++)
 		order[i] = i;
 	for (int i = 1; i < ccm_count; i++)	/* insertion sort by R/G, warm (high) first */
@@ -299,18 +410,66 @@ static void constrain_white_point(double *rg, double *bg)
 		double ax = ccm_table[order[i]].rg, ay = ccm_table[order[i]].bg;
 		double bx = ccm_table[order[i + 1]].rg, by = ccm_table[order[i + 1]].bg;
 		double dx = bx - ax, dy = by - ay, len2 = dx * dx + dy * dy;
-		double t = len2 > 0 ? ((*rg - ax) * dx + (*bg - ay) * dy) / len2 : 0;
+		double t = len2 > 0 ? ((rg - ax) * dx + (bg - ay) * dy) / len2 : 0;
 		if (t < 0) t = 0;
 		if (t > 1) t = 1;
-		double px = ax + t * dx, py = ay + t * dy, d = hypot(*rg - px, *bg - py);
-		if (d < best_d) { best_d = d; best_x = px; best_y = py; }
+		double px = ax + t * dx, py = ay + t * dy, d = hypot(rg - px, bg - py);
+		if (d < best_d) {
+			/* Warm-to-cool runs towards lower R/G, higher B/G: the origin side is green. */
+			double cross = dx * (bg - ay) - dy * (rg - ax);
+			best_d = d; best_x = px; best_y = py;
+			best_side = cross >= 0 ? 1 : -1;
+		}
 	}
-	wb_locus_distance = best_d;
-	if (best_d > WB_LOCUS_BAND) {
-		double k = WB_LOCUS_BAND / best_d;
-		*rg = best_x + (*rg - best_x) * k;
-		*bg = best_y + (*bg - best_y) * k;
+	*px_out = best_x;
+	*py_out = best_y;
+	return best_side * best_d;
+}
+
+/* The band for this frame: WB_LOCUS_BAND, widened with NIR (see above). */
+static void update_locus_band(void)
+{
+	wb_locus_band = WB_LOCUS_BAND + wb_locus_nir_band * wb_nir_ratio;
+	if (wb_locus_band > WB_LOCUS_BAND_MAX)
+		wb_locus_band = WB_LOCUS_BAND_MAX;
+}
+
+/* Pull (rg, bg) to within the band of the locus; green_band (if larger) on the green side. */
+static void constrain_white_point_sided(double *rg, double *bg, double green_band)
+{
+	double px, py;
+
+	wb_locus_distance = 0;
+	wb_locus_side = 0;
+	update_locus_band();
+	if (ccm_count < 2)
+		return;
+	double side = locus_nearest(*rg, *bg, &px, &py), d = fabs(side);
+	double band = side > 0 && green_band > wb_locus_band ? green_band : wb_locus_band;
+	wb_locus_distance = d;
+	wb_locus_side = side;
+	if (d > band) {
+		double k = band / d;
+		*rg = px + (*rg - px) * k;
+		*bg = py + (*bg - py) * k;
 	}
+}
+
+#ifdef CAMERA_BRIDGE_TEST
+/* The plain band on both sides (the rear, and the front's grey-world fallback). */
+static void constrain_white_point(double *rg, double *bg)
+{
+	constrain_white_point_sided(rg, bg, 0);
+}
+#endif
+
+/* Could a light have this colour? (Inside the zone around the locus described above.) */
+static int locus_accepts(double rg, double bg)
+{
+	double px, py, side = locus_nearest(rg, bg, &px, &py);
+
+	return side >= 0 ? side <= fmax(wb_locus_green_band, wb_locus_band)
+			 : -side <= WB_LOCUS_ACCEPT_MAGENTA * wb_locus_band;
 }
 
 /*
@@ -434,35 +593,98 @@ static void calculate_white_balance(const uint16_t *raw, unsigned int width,
 				    unsigned int height, unsigned int stride,
 				    unsigned int gain_q12[3], double *mean_green)
 {
-	uint64_t sum[4] = { 0 }, count[4] = { 0 };
+	uint64_t count[4] = { 0 }, all_sum = 0, all_count = 0;
+	double sum[4] = { 0 };
+	static double rsum[WB_REGIONS_Y][WB_REGIONS_X][4];
+	static uint64_t rcount[WB_REGIONS_Y][WB_REGIONS_X][4];
+	int shaded = lsc_active && lsc_built.w == width && lsc_built.h == height && cfa_has_ir_sites();
+	static unsigned int ghist[1024];
+	unsigned int gmax = 0, gnear = 0, gcount = 0;
 	double mean[4];
 
+	/* Sensor clip level: a flat top among this frame's sampled green sites (see raw_clip). */
+	memset(ghist, 0, sizeof(ghist));
+	for (unsigned int y = 0; y < height; y += 16)
+		for (unsigned int x = 0; x < width; x += 16)
+			for (unsigned int dy = 0; dy < 4 && y + dy < height; dy++)
+				for (unsigned int dx = 0; dx < 4 && x + dx < width; dx++)
+					if (channel_at(x + dx, y + dy) == 1) {
+						ghist[raw[(size_t)(y + dy) * (stride / 2) + x + dx] & 1023]++;
+						gcount++;
+					}
+	for (gmax = 1023; gmax > 0 && !ghist[gmax]; gmax--)
+		;
+	for (unsigned int v = gmax >= 2 ? gmax - 2 : 0; v <= gmax; v++)
+		gnear += ghist[v];
+	set_highlight_range(clip_detect && gmax >= CLIP_MIN_RAW && gnear >= 8 && gnear * 1000 >= gcount ?
+			    gmax : 1023);
+
+	/*
+	 * Grey-world over 4x4 tiles every 16 pixels. Tiles with a site near the clip level carry
+	 * no colour (one clipped channel) and are left out, as ISPs leave saturated patches out
+	 * of their white-balance statistics; the AE mean still counts them. With lens shading
+	 * active each tile takes the shading gains of its position (IR sites the green gain), so
+	 * the white point is measured in the same units as the picture: on the raw frame the
+	 * corners, where blue falls off less than green, raised B/G by ~5%, which left the centre
+	 * of a grey wall slightly yellow-green (host simulation, boot-11 and boot-12 levels: U -4).
+	 * Front (RGB-IR) only: the rear's grey-world sat on its locus without it (boot-12: 0.02-0.04)
+	 * and its colour is reported good, so it is left as it was (see HANDOFF 2026-11-19).
+	 */
+	unsigned int tile_limit = raw_clip - (raw_clip - BLACK_LEVEL) / 20;	/* 95% of the range */
+	memset(rsum, 0, sizeof(rsum));
+	memset(rcount, 0, sizeof(rcount));
 	for (unsigned int y = 0; y < height; y += 16) {
 		for (unsigned int x = 0; x < width; x += 16) {
+			uint64_t tsum[4] = { 0 }, tcount[4] = { 0 };
+			unsigned int tpeak = 0;
 			for (unsigned int dy = 0; dy < 4 && y + dy < height; dy++) {
 				for (unsigned int dx = 0; dx < 4 && x + dx < width; dx++) {
 					int channel = channel_at(x + dx, y + dy);
 					unsigned int value =
 						raw[(size_t)(y + dy) * (stride / 2) + x + dx] & 1023;
+					if (value > tpeak)
+						tpeak = value;
 					if (value > BLACK_LEVEL)
-						sum[channel] += value - BLACK_LEVEL;
-					count[channel]++;
+						tsum[channel] += value - BLACK_LEVEL;
+					tcount[channel]++;
 				}
+			}
+			all_sum += tsum[1];
+			all_count += tcount[1];
+			if (tpeak >= tile_limit)
+				continue;
+			double shade[4] = { 1, 1, 1, 1 };
+			if (shaded) {
+				unsigned int ox = (unsigned int)(((uint64_t)x * OUT_WIDTH) / width);
+				unsigned int oy = (unsigned int)(((uint64_t)y * OUT_HEIGHT) / height);
+				shade[0] = lsc_map[0][oy][ox] / 4096.0;
+				shade[1] = shade[CFA_IR] = lsc_map[1][oy][ox] / 4096.0;
+				shade[2] = lsc_map[2][oy][ox] / 4096.0;
+			}
+			unsigned int rx = (unsigned int)((uint64_t)x * WB_REGIONS_X / width);
+			unsigned int ry = (unsigned int)((uint64_t)y * WB_REGIONS_Y / height);
+			for (int channel = 0; channel < 4; channel++) {
+				sum[channel] += tsum[channel] * shade[channel];
+				count[channel] += tcount[channel];
+				rsum[ry][rx][channel] += tsum[channel] * shade[channel];
+				rcount[ry][rx][channel] += tcount[channel];
 			}
 		}
 	}
 
 	for (int channel = 0; channel < 4; channel++)
-		mean[channel] = count[channel] ? (double)sum[channel] / count[channel] : 0;
-	/* AE meters raw green (IR included: it is light the sensor really collects). */
+		mean[channel] = count[channel] ? sum[channel] / count[channel] : 0;
+	/* AE meters raw green over every tile (IR included: light the sensor really collects). */
 	if (mean_green)
-		*mean_green = mean[1];
-	/* Balance the colour after removing the IR that leaks into R, G and B. */
+		*mean_green = all_count ? (double)all_sum / all_count : 0;
+	/* Balance the colour after removing the IR that leaks into R, G and B (model above). */
+	double nir = nir_estimate_f(mean[CFA_IR], mean[1]);
 	for (int channel = 0; channel < 3; channel++) {
-		mean[channel] -= mean[CFA_IR];
+		mean[channel] += -mean[CFA_IR] + nir * nir_keep_q12[channel] / 4096.0;
 		if (mean[channel] < 0)
 			mean[channel] = 0;
 	}
+	wb_nir_ratio = mean[1] > WB_MIN_SIGNAL ? nir / mean[1] : 0;
 	gain_q12[0] = gain_q12[2] = 4096;
 	memcpy(wb_last_mean, mean, sizeof(wb_last_mean));
 	/*
@@ -481,7 +703,38 @@ static void calculate_white_balance(const uint16_t *raw, unsigned int width,
 		 * becomes a colour cast.
 		 */
 		double rg = mean[0] / mean[1], bg = mean[2] / mean[1];
-		constrain_white_point(&rg, &bg);
+		double green_band = 0;
+
+		/* Front: measure on the regions a light could have lit (see wb_locus_green_band). */
+		wb_regions_used = wb_regions_valid = 0;
+		if (cfa_has_ir_sites() && ccm_count >= 2 && wb_locus_green_band > 0) {
+			double acc[3] = { 0 };
+			update_locus_band();
+			for (int ry = 0; ry < WB_REGIONS_Y; ry++)
+				for (int rx = 0; rx < WB_REGIONS_X; rx++) {
+					double m[4];
+					for (int c = 0; c < 4; c++)
+						m[c] = rcount[ry][rx][c] ? rsum[ry][rx][c] / rcount[ry][rx][c] : 0;
+					double n = nir_estimate_f(m[CFA_IR], m[1]);
+					for (int c = 0; c < 3; c++)
+						m[c] = fmax(0, m[c] - m[CFA_IR] + n * nir_keep_q12[c] / 4096.0);
+					if (m[1] < 4 * WB_MIN_SIGNAL || m[0] <= 0 || m[2] <= 0)
+						continue;
+					wb_regions_valid++;
+					if (!locus_accepts(m[0] / m[1], m[2] / m[1]))
+						continue;
+					wb_regions_used++;
+					for (int c = 0; c < 3; c++)	/* brighter regions weigh more */
+						acc[c] += m[c];
+				}
+			if (wb_regions_used > 0 &&
+			    wb_regions_used >= WB_REGIONS_MIN_FRACTION * wb_regions_valid) {
+				rg = acc[0] / acc[1];
+				bg = acc[2] / acc[1];
+				green_band = wb_locus_green_band;
+			}
+		}
+		constrain_white_point_sided(&rg, &bg, green_band);
 		wb_white_rg = rg;
 		wb_white_bg = bg;
 		double gain = 1.0 / rg;
@@ -536,13 +789,26 @@ static void log_cfa_phases(const uint16_t *raw, unsigned int width,
 	       wb_last_gain_q12[0] >= 16384 || wb_last_gain_q12[2] >= 16384 ||
 	       wb_last_gain_q12[0] <= 1024 || wb_last_gain_q12[2] <= 1024 ? " (clamped)" : "");
 	if (ccm_active)
-		printf("ccm: illuminant %d (%.0f%%) + %d, grey-world R/G=%.3f B/G=%.3f, used %.3f/%.3f (locus distance %.3f)\n",
+		printf("ccm: illuminant %d (%.0f%%) + %d, grey-world R/G=%.3f B/G=%.3f, used %.3f/%.3f (locus distance %.3f %s, band %.3f",
 		       ccm_pick[0], ccm_weight * 100.0, ccm_pick[1],
 		       wb_last_mean[1] > 0 ? wb_last_mean[0] / wb_last_mean[1] : 0.0,
 		       wb_last_mean[1] > 0 ? wb_last_mean[2] / wb_last_mean[1] : 0.0,
-		       wb_white_rg, wb_white_bg, wb_locus_distance);
+		       wb_white_rg, wb_white_bg, wb_locus_distance,
+		       wb_locus_side > 0 ? "green side" : wb_locus_side < 0 ? "magenta side" : "on it",
+		       wb_locus_band);
+	if (ccm_active && wb_regions_valid)
+		printf(", %d of %d regions lit like a light%s)\n", wb_regions_used, wb_regions_valid,
+		       wb_regions_used >= WB_REGIONS_MIN_FRACTION * wb_regions_valid && wb_regions_used ?
+		       ", green side allowed" : "; grey-world");
+	else if (ccm_active)
+		printf(")\n");
 	else
 		printf("ccm: no calibration table; generic saturation %.2f\n", saturation_q12 / 4096.0);
+	if (cfa_has_ir_sites())
+		printf("ir: NIR %.2f of green (IR site minus %.2f x green), blue NIR response %.2f; clip at raw %u\n",
+		       wb_nir_ratio, ir_visible_q12 / 4096.0, 1.0 - nir_keep_q12[2] / 4096.0, raw_clip);
+	else
+		printf("clip: raw %u\n", raw_clip);
 	if (lsc_active)
 		printf("lsc: illuminant %d (%.0f%%) + %d, strength %.2f at sensor gain %.1fx\n", lsc_pick[0],
 		       lsc_weight * 100.0, lsc_pick[1], lsc_strength, sensor_total_gain);
@@ -583,7 +849,31 @@ static int tnr_threshold_for_gain(double gain)
 	double k = gain > HIGH_GAIN_X ? sqrt(gain / HIGH_GAIN_X) : 1.0;
 	return (int)(TNR_THRESHOLD * (k > 2.0 ? 2.0 : k) + 0.5);
 }
-#define HIGHLIGHT_START (LINEAR_MAX * 85 / 100)	/* raw level where clipping handling starts */
+
+/*
+ * Fit a linear colour into 0..LINEAR_MAX: keep its luminance (Rec. 709) and hue, reduce its
+ * saturation just enough; white when the luminance itself is past the top.
+ */
+static void soft_clip_rgb(int c[3])
+{
+	int mx = c[0] > c[1] ? c[0] : c[1];
+
+	if (c[2] > mx)
+		mx = c[2];
+	if (mx <= (int)LINEAR_MAX)
+		return;
+	int64_t y = (2126LL * c[0] + 7152LL * c[1] + 722LL * c[2] + 5000) / 10000;
+	for (int k = 0; k < 3; k++) {
+		if (y >= (int64_t)LINEAR_MAX)
+			c[k] = (int)LINEAR_MAX;
+		else
+			c[k] = (int)(y + ((int64_t)c[k] - y) * ((int64_t)LINEAR_MAX - y) / ((int64_t)mx - y));
+		if (c[k] < 0)
+			c[k] = 0;
+		if (c[k] > (int)LINEAR_MAX)
+			c[k] = (int)LINEAR_MAX;
+	}
+}
 
 /*
  * Turn the output by 180 degrees (--rotate 180). The ov8856 driver exposes no mounting
@@ -673,9 +963,11 @@ static void rgb_linear_at(const uint16_t *raw, unsigned int width, unsigned int 
 		mean[channel] = n[channel] ?
 			(int)(((uint64_t)sum[channel] * shade[channel] / n[channel] + 2048) / 4096) : 0;
 	int ir = mean[CFA_IR];
+	int nir = n[CFA_IR] ? nir_estimate(ir, mean[1]) : 0;
 	int lin[3];
 	for (int channel = 0; channel < 3; channel++) {
-		lin[channel] = n[channel] ? mean[channel] - ir : 0;
+		lin[channel] = n[channel] ?
+			mean[channel] - ir + ((nir * nir_keep_q12[channel] + 2048) >> 12) : 0;
 		if (lin[channel] < 0)
 			lin[channel] = 0;
 	}
@@ -705,24 +997,26 @@ static void rgb_linear_at(const uint16_t *raw, unsigned int width, unsigned int 
 		}
 	}
 	/*
-	 * Highlights: where any site in the window is near the sensor's full scale, its
+	 * Bright colours past the top of the range (lens shading lifts the edges up to ~4x,
+	 * white balance R and B ~1.85x, then the matrix): clipping each channel on its own turns
+	 * them pink or magenta. Desaturate towards their luminance instead, as ISPs do.
+	 */
+	soft_clip_rgb(rgb);
+	/*
+	 * Highlights: where any site in the window is near the sensor's clip level, its
 	 * colour is no longer measured. On the RGB-IR sensor the IR sites clip too, and
 	 * "clipped colour minus clipped IR" is zero: lamps turned black with a magenta rim
 	 * (green clips first; 2026-11-17 photo). Fade such windows towards white, from no
-	 * effect at HIGHLIGHT_START of full scale to pure white when a site is at full scale.
+	 * effect at 80% of the clip level to pure white at 97% (set_highlight_range).
 	 */
-	if (peak > HIGHLIGHT_START) {
-		int t = (int)(((peak - HIGHLIGHT_START) * 4096u) / (LINEAR_MAX - HIGHLIGHT_START));
+	if (peak > highlight_start_lin) {
+		int t = highlight_full_lin > highlight_start_lin ?
+			(int)(((peak - highlight_start_lin) * 4096u) / (highlight_full_lin - highlight_start_lin)) : 4096;
 		if (t > 4096)
 			t = 4096;
-		for (int channel = 0; channel < 3; channel++) {
-			int v = rgb[channel] > (int)LINEAR_MAX ? (int)LINEAR_MAX : rgb[channel];
-			rgb[channel] = (v * (4096 - t) + (int)LINEAR_MAX * t + 2048) >> 12;
-		}
+		for (int channel = 0; channel < 3; channel++)
+			rgb[channel] = (rgb[channel] * (4096 - t) + (int)LINEAR_MAX * t + 2048) >> 12;
 	}
-	for (int channel = 0; channel < 3; channel++)
-		if (rgb[channel] > (int)LINEAR_MAX)
-			rgb[channel] = (int)LINEAR_MAX;
 }
 
 /*
@@ -768,8 +1062,9 @@ static void linear_colour_to_yuv(int r, double gain)
 					double ratio = (double)avg[k] * 10000.0 / (double)yavg;
 					ratio = 1.0 + keep * (ratio - 1.0);
 					double v = (double)ylin / 10000.0 * ratio;
-					c[k] = v < 0 ? 0 : v > LINEAR_MAX ? (int)LINEAR_MAX : (int)(v + 0.5);
+					c[k] = v < 0 ? 0 : v > 4.0 * LINEAR_MAX ? 4 * (int)LINEAR_MAX : (int)(v + 0.5);
 				}
+				soft_clip_rgb(c);	/* a bright pixel taking a saturated average */
 			}
 			for (int k = 0; k < 3; k++)
 				c[k] = gamma_lut[c[k]];
@@ -1193,13 +1488,301 @@ static int loopback_readers(int fd)
 }
 
 /*
- * The IPU6 firmware cannot stop a stream cleanly, so the sensor keeps streaming;
- * but with no consumer the ~12 ms/frame conversion (about a third of a core at
- * 30 fps) is skipped. The next frame after a consumer starts is converted.
+ * With no consumer the conversion (~25 ms/frame) is skipped; the sensor keeps streaming
+ * until the idle stop (below). The next frame after a consumer starts is converted.
  */
 static int bridge_should_convert(int readers)
 {
 	return readers != 0;
+}
+
+/*
+ * Idle stop. A streaming capture holds the ISYS stream open, and isys_suspend refuses system
+ * sleep while any stream is open (-EBUSY): on boot-12, 24 of 25 s2idle attempts failed with
+ * "isys_suspend ... returns -16" while both bridges streamed with no consumer, and both
+ * sensors stayed powered. After IDLE_STOP_S without a consumer the bridge stops its stream
+ * (STREAMOFF with the buffers kept, lens subdev closed: the sensor and VCM power down) but keeps
+ * the loopback output and the sensor's controls, so Android still sees the camera and the
+ * exposure is kept. A consumer (readers_active, or v4l2loopback's client-usage event) starts
+ * the stream again.
+ *
+ * 15 s: longer than a camera switch or a photo/video mode change in an app (the stream is
+ * closed for well under 2 s), so those do not cycle the sensor; shorter than Android's
+ * shortest screen timeout (15 s) plus the time before it tries to suspend, so by the time the
+ * screen is off the sensors are. A stop can take up to ~4 s (IPU6 firmware stop/close
+ * timeouts of 2 s each); restarts take the sensor's power-up and first frames.
+ * --idle-stop 0 keeps streaming as before. An older v4l2loopback without readers_active
+ * (readers -1) never stops: the bridge could not tell when to start again.
+ */
+#define IDLE_STOP_S_DEFAULT 15.0
+static double idle_stop_s = IDLE_STOP_S_DEFAULT;
+enum { IDLE_KEEP, IDLE_STOP, IDLE_START };
+
+struct idle_state {
+	double since;	/* when the consumer went away; < 0 while one streams */
+	int stopped;	/* sensor stream stopped */
+	unsigned int stops, starts;
+};
+
+static void idle_reset(struct idle_state *s)
+{
+	memset(s, 0, sizeof(*s));
+	s->since = -1;
+}
+
+static int idle_decide(struct idle_state *s, int readers, double now, double timeout)
+{
+	if (readers != 0) {
+		s->since = -1;
+		return s->stopped ? IDLE_START : IDLE_KEEP;
+	}
+	if (s->since < 0)
+		s->since = now;
+	if (!s->stopped && timeout > 0 && now - s->since >= timeout)
+		return IDLE_STOP;
+	return IDLE_KEEP;
+}
+
+/*
+ * Idle stop and restart steps go through these, so the host tests can make a step fail or
+ * block. Outside the tests they are plain ioctl() and poll().
+ */
+#ifdef CAMERA_BRIDGE_TEST
+static int (*bridge_ioctl_hook)(int fd, unsigned long request, void *arg);
+static int (*bridge_poll_hook)(struct pollfd *fds, nfds_t n, int timeout);
+static int bridge_ioctl(int fd, unsigned long request, void *arg)
+{
+	return bridge_ioctl_hook ? bridge_ioctl_hook(fd, request, arg) : ioctl(fd, request, arg);
+}
+static int bridge_poll(struct pollfd *fds, nfds_t n, int timeout)
+{
+	return bridge_poll_hook ? bridge_poll_hook(fds, n, timeout) : poll(fds, n, timeout);
+}
+#else
+#define bridge_ioctl ioctl
+#define bridge_poll poll
+#endif
+
+/*
+ * Idle stop/restart watchdog. Boot-13 (2026-11-19): after the first idle stop both bridges went
+ * silent and never streamed again, so no app could open a camera. Each step is now logged, and
+ * a step that does not return within IDLE_STEP_TIMEOUT_S ends the process with
+ * EXIT_IDLE_FAILED: the launcher then starts a fresh bridge with idle stops off for the rest of
+ * the boot. (The IPU6 firmware's own stop and close timeouts are 2 s each.) A wait the kernel
+ * cannot interrupt still delays the exit until it returns.
+ */
+#define IDLE_STEP_TIMEOUT_S 12
+static unsigned int idle_step_timeout_s = IDLE_STEP_TIMEOUT_S;	/* the tests shorten it */
+#define EXIT_IDLE_FAILED 4
+/* After a restart the first good frame must come within this, or the restart has failed. */
+#define RESTART_FIRST_FRAME_S 5.0
+static const char *volatile idle_step = "";
+
+/* woke_at: when the consumer appeared (< 0 once a good frame came after the restart). */
+static int idle_restart_overdue(double woke_at, double now)
+{
+	return woke_at >= 0 && now - woke_at > RESTART_FIRST_FRAME_S;
+}
+
+static void idle_watchdog_fired(int sig)
+{
+	static const char a[] = "ipu6: idle step '", b[] =
+		"' blocked; exiting so the launcher restarts the bridge without idle stops\n";
+	const char *step = idle_step;
+
+	(void)sig;
+	(void)!write(STDERR_FILENO, a, sizeof(a) - 1);
+	(void)!write(STDERR_FILENO, step, strlen(step));
+	(void)!write(STDERR_FILENO, b, sizeof(b) - 1);
+	_exit(EXIT_IDLE_FAILED);
+}
+
+/* Name the step about to run and arm the watchdog for it; seconds 0 disarms. */
+static void idle_watchdog(const char *step, unsigned int seconds)
+{
+	struct sigaction sa = { .sa_handler = idle_watchdog_fired };
+
+	idle_step = step;
+	if (seconds) {
+		sigemptyset(&sa.sa_mask);
+		sigaction(SIGALRM, &sa, NULL);	/* no SA_RESTART: interrupt the blocked call */
+		printf("bridge: idle step: %s\n", step);
+		fflush(stdout);
+	}
+	alarm(seconds);
+}
+
+/* The IPU6 capture node's buffers; started and stopped as a unit. */
+struct capture {
+	int fd;
+	unsigned int count;
+	size_t min_size;
+	int streaming;
+	struct bridge_buffer buffers[3];
+};
+
+static void capture_release(struct capture *c)
+{
+	struct v4l2_requestbuffers request = {
+		.count = 0, .type = V4L2_BUF_TYPE_VIDEO_CAPTURE, .memory = V4L2_MEMORY_MMAP
+	};
+
+	for (unsigned int i = 0; i < c->count; i++)
+		if (c->buffers[i].data) {
+			munmap(c->buffers[i].data, c->buffers[i].length);
+			c->buffers[i].data = NULL;
+		}
+	if (c->fd >= 0 && c->count && bridge_ioctl(c->fd, VIDIOC_REQBUFS, &request))
+		perror("release IPU6 buffers");
+	c->count = 0;
+}
+
+static void capture_stop(struct capture *c)
+{
+	enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+
+	if (c->streaming && bridge_ioctl(c->fd, VIDIOC_STREAMOFF, &type))
+		perror("VIDIOC_STREAMOFF");
+	c->streaming = 0;
+	capture_release(c);
+}
+
+/*
+ * Idle stop: STREAMOFF only. That ends the ISYS stream (stream_opened, which blocks system
+ * suspend, drops at stream stop) and the sensor's s_stream, while the buffers stay requested and
+ * mapped, so the restart is QBUF + STREAMON and avoids REQBUFS on a firmware that has just timed
+ * out. 0 on success; on failure the buffers are released too and capture_resume() starts over.
+ */
+static int capture_pause(struct capture *c)
+{
+	enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+
+	if (!c->streaming)
+		return 0;
+	c->streaming = 0;
+	if (bridge_ioctl(c->fd, VIDIOC_STREAMOFF, &type) == 0)
+		return 0;
+	perror("idle stop: VIDIOC_STREAMOFF");
+	capture_release(c);
+	return -1;
+}
+
+/* Request, map and queue the buffers, then stream on. 0 on success; on failure all released. */
+static int capture_start(struct capture *c)
+{
+	struct v4l2_requestbuffers request = {
+		.count = 3, .type = V4L2_BUF_TYPE_VIDEO_CAPTURE, .memory = V4L2_MEMORY_MMAP
+	};
+	enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+
+	if (bridge_ioctl(c->fd, VIDIOC_REQBUFS, &request)) {
+		perror("VIDIOC_REQBUFS");
+		return -1;
+	}
+	c->count = request.count > 3 ? 3 : request.count;
+	if (request.count < 2 || request.count > 3) {
+		fprintf(stderr, "unexpected IPU6 buffer count %u\n", request.count);
+		goto fail;
+	}
+	for (unsigned int i = 0; i < c->count; i++) {
+		struct v4l2_buffer b = { .type = type, .memory = V4L2_MEMORY_MMAP, .index = i };
+		if (bridge_ioctl(c->fd, VIDIOC_QUERYBUF, &b) || b.length < c->min_size ||
+		    b.length > MAX_FRAME_BYTES)
+			goto fail;
+		c->buffers[i].length = b.length;
+		c->buffers[i].data = mmap(NULL, b.length, PROT_READ | PROT_WRITE,
+					  MAP_SHARED, c->fd, b.m.offset);
+		if (c->buffers[i].data == MAP_FAILED) {
+			c->buffers[i].data = NULL;
+			goto fail;
+		}
+		if (bridge_ioctl(c->fd, VIDIOC_QBUF, &b))
+			goto fail;
+	}
+	if (bridge_ioctl(c->fd, VIDIOC_STREAMON, &type)) {
+		perror("start IPU6 capture");
+		goto fail;
+	}
+	c->streaming = 1;
+	return 0;
+fail:
+	capture_release(c);
+	return -1;
+}
+
+/*
+ * Restart after an idle stop: queue the kept buffers and stream on. If that fails (or the pause
+ * already released them), release everything and start from REQBUFS. 0 on success.
+ */
+static int capture_resume(struct capture *c)
+{
+	enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	unsigned int i;
+
+	if (c->streaming)
+		return 0;
+	if (c->count) {
+		for (i = 0; i < c->count; i++) {
+			struct v4l2_buffer b = { .type = type, .memory = V4L2_MEMORY_MMAP, .index = i };
+			if (bridge_ioctl(c->fd, VIDIOC_QBUF, &b)) {
+				perror("idle restart: VIDIOC_QBUF");
+				break;
+			}
+		}
+		if (i == c->count && bridge_ioctl(c->fd, VIDIOC_STREAMON, &type) == 0) {
+			c->streaming = 1;
+			return 0;
+		}
+		if (i == c->count)
+			perror("idle restart: VIDIOC_STREAMON");
+		fprintf(stderr, "idle restart: kept buffers failed; requesting new ones\n");
+		capture_release(c);
+	}
+	return capture_start(c);
+}
+
+/* v4l2loopback's private event: a capture client started or stopped streaming. */
+#define LOOPBACK_EVENT_CLIENT_USAGE (V4L2_EVENT_PRIVATE_START + 0x08E00000 + 1)
+
+static int loopback_subscribe_usage(int fd)
+{
+	struct v4l2_event_subscription sub = { .type = LOOPBACK_EVENT_CLIENT_USAGE };
+
+	return ioctl(fd, VIDIOC_SUBSCRIBE_EVENT, &sub) == 0;
+}
+
+/*
+ * Dequeue pending client-usage events without ever waiting. The loopback node is opened
+ * without O_NONBLOCK, and there VIDIOC_DQEVENT sleeps until the next event: on boot-13 that is
+ * where both bridges hung right after the idle stop (no "stream stopped" line; each app open
+ * woke the call for one event, and it went back to sleep). So only dequeue while poll() says an
+ * event is pending. Returns the number dequeued.
+ */
+static int loopback_drain_events(int fd)
+{
+	struct v4l2_event ev;
+	int n = 0;
+
+	while (n < 16) {
+		struct pollfd p = { .fd = fd, .events = POLLPRI };
+		if (bridge_poll(&p, 1, 0) <= 0 || !(p.revents & POLLPRI) ||
+		    bridge_ioctl(fd, VIDIOC_DQEVENT, &ev))
+			break;
+		n++;
+	}
+	return n;
+}
+
+static void write_black(int fd, unsigned char *frame)
+{
+	for (size_t i = 0; i < OUT_FRAME_BYTES; i += 4) {
+		frame[i] = 16;
+		frame[i + 1] = 128;
+		frame[i + 2] = 16;
+		frame[i + 3] = 128;
+	}
+	if (fd >= 0 && write(fd, frame, OUT_FRAME_BYTES) != (ssize_t)OUT_FRAME_BYTES)
+		perror("write black loopback frame");
 }
 
 /*
@@ -1417,6 +2000,50 @@ static int find_lens(const struct graph *g, const struct media_v2_topology *t, _
 	return -1;
 }
 
+/*
+ * The idle stop, one watched and logged step at a time: STREAMOFF (buffers kept), close the lens
+ * (the VCM powers down), drain the loopback's usage events without waiting. Returns 0 when
+ * STREAMOFF worked; on -1 the buffers were released and the restart requests new ones.
+ */
+static int idle_pause_stream(struct capture *cap, struct af_state *af, int outfd)
+{
+	double t0 = monotonic_s();
+
+	idle_watchdog("stop: STREAMOFF", idle_step_timeout_s);
+	int r = capture_pause(cap);
+	printf("bridge: idle stop: STREAMOFF %s in %.2f s\n",
+	       r ? "failed, buffers released" : "done, buffers kept", monotonic_s() - t0);
+	if (monotonic_s() - t0 > 3.0)
+		printf("bridge: idle stop: slow STREAMOFF (IPU6 firmware stop/close timeouts?)\n");
+	if (af->fd >= 0) {
+		idle_watchdog("stop: close lens", idle_step_timeout_s);
+		close(af->fd);
+	}
+	af->fd = -1;
+	af->present = 0;
+	af->phase = 0;
+	idle_watchdog("stop: drain loopback events", idle_step_timeout_s);
+	int events = loopback_drain_events(outfd);
+	idle_watchdog("", 0);
+	printf("bridge: idle stop: %d usage event%s drained; total %.2f s\n", events,
+	       events == 1 ? "" : "s", monotonic_s() - t0);
+	fflush(stdout);
+	return r;
+}
+
+/* The restart, watched and logged: QBUF the kept buffers and STREAMON (or start over). */
+static int idle_resume_stream(struct capture *cap)
+{
+	double t0 = monotonic_s();
+
+	idle_watchdog("restart: QBUF and STREAMON", idle_step_timeout_s);
+	int r = capture_resume(cap);
+	idle_watchdog("", 0);
+	printf("bridge: idle restart: stream %s in %.2f s\n", r ? "failed" : "on", monotonic_s() - t0);
+	fflush(stdout);
+	return r;
+}
+
 static int capture_to_loopback(const char *media_dev, const char *out_dev,
 			       const struct sensor_profile *profile)
 {
@@ -1429,19 +2056,20 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev,
 	struct path path;
 	char sensor_path[128], csi_path[128], capture_path[128];
 	int mfd = -1, sfd = -1, cfd = -1, vfd = -1, outfd = -1;
-	int linked = 0, streaming = 0, result = 1;
-	struct bridge_buffer buffers[3] = { 0 };
+	int linked = 0, result = 1, have_lens = 0;
+	struct capture cap = { .fd = -1 };
+	struct bridge_buffer *buffers = cap.buffers;
 	struct v4l2_subdev_format sensor = { 0 }, saved_sink = { 0 }, set;
 	struct v4l2_format video = { .type = V4L2_BUF_TYPE_VIDEO_CAPTURE };
 	struct v4l2_format saved_video = { .type = V4L2_BUF_TYPE_VIDEO_CAPTURE };
-	struct v4l2_requestbuffers request = {
-		.count = 3, .type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
-		.memory = V4L2_MEMORY_MMAP
-	};
-	unsigned int buffer_count = 0, frame_count = 0;
+	unsigned int frame_count = 0;
 	int last_readers = -2;
 	unsigned char *output = NULL;
 	enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	struct idle_state idle;
+	double woke_at = -1;	/* consumer appeared while stopped; cleared at the first good frame */
+
+	idle_reset(&idle);
 
 	mfd = open(media_dev, O_RDWR | O_CLOEXEC);
 	if (mfd < 0 || ioctl(mfd, MEDIA_IOC_DEVICE_INFO, &info) ||
@@ -1503,35 +2131,10 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev,
 	       video.fmt.pix.bytesperline, video.fmt.pix.sizeimage);
 	if (video.fmt.pix.sizeimage > MAX_FRAME_BYTES)
 		goto done;
-	if (ioctl(vfd, VIDIOC_REQBUFS, &request)) {
-		perror("VIDIOC_REQBUFS");
+	cap.fd = vfd;
+	cap.min_size = video.fmt.pix.sizeimage;
+	if (capture_start(&cap))
 		goto done;
-	}
-	if (request.count < 2 || request.count > 3) {
-		fprintf(stderr, "unexpected IPU6 buffer count %u\n", request.count);
-		goto done;
-	}
-	buffer_count = request.count;
-	for (unsigned int i = 0; i < buffer_count; i++) {
-		struct v4l2_buffer b = { .type = type, .memory = V4L2_MEMORY_MMAP, .index = i };
-		if (ioctl(vfd, VIDIOC_QUERYBUF, &b) || b.length < video.fmt.pix.sizeimage ||
-		    b.length > MAX_FRAME_BYTES)
-			goto done;
-		buffers[i].length = b.length;
-		buffers[i].data = mmap(NULL, b.length, PROT_READ | PROT_WRITE,
-				       MAP_SHARED, vfd, b.m.offset);
-		if (buffers[i].data == MAP_FAILED) {
-			buffers[i].data = NULL;
-			goto done;
-		}
-		if (ioctl(vfd, VIDIOC_QBUF, &b))
-			goto done;
-	}
-	if (ioctl(vfd, VIDIOC_STREAMON, &type)) {
-		perror("start IPU6 capture");
-		goto done;
-	}
-	streaming = 1;
 	struct v4l2_format outfmt = { .type = V4L2_BUF_TYPE_VIDEO_OUTPUT };
 	outfmt.fmt.pix.width = OUT_WIDTH;
 	outfmt.fmt.pix.height = OUT_HEIGHT;
@@ -1562,24 +2165,79 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev,
 		goto done;
 	}
 	ae_init(&ae, sfd, (int)sensor.format.height);
-	af_init(&af, find_lens(&graph, &topology, path.sensor->id, lens_path, sizeof(lens_path)) ?
-		NULL : lens_path);
+	have_lens = !find_lens(&graph, &topology, path.sensor->id, lens_path, sizeof(lens_path));
+	af_init(&af, have_lens ? lens_path : NULL);
 	signal(SIGINT, stop_bridge);
 	signal(SIGTERM, stop_bridge);
-	printf("bridge active: %ux%u %s to %ux%u YUYV%s; sensor remains streaming until stop\n",
-	       video.fmt.pix.width, video.fmt.pix.height, profile->rgbir ? "RGB-IR" : "Bayer",
-	       OUT_WIDTH, OUT_HEIGHT, output_rotate180 ? ", rotated 180" : "");
+	int usage_events = loopback_subscribe_usage(outfd);
+	printf("bridge active: %ux%u %s to %ux%u YUYV%s; ", video.fmt.pix.width, video.fmt.pix.height,
+	       profile->rgbir ? "RGB-IR" : "Bayer", OUT_WIDTH, OUT_HEIGHT,
+	       output_rotate180 ? ", rotated 180" : "");
+	if (idle_stop_s > 0)
+		printf("sensor stops after %.0f s without a consumer (wake-up: %s)\n", idle_stop_s,
+		       usage_events ? "client-usage event" : "polling readers_active");
+	else
+		printf("sensor remains streaming until stop\n");
 	result = 0;
 	struct frame_health health;
 	int have_output = 0;
 	frame_health_start(&health, monotonic_s());
 	while (running) {
+		if (idle.stopped) {
+			/*
+			 * Stream stopped: wait for a consumer on the loopback side. The client-usage
+			 * event wakes us at once; readers_active is checked on every wake-up and
+			 * at least every second (every 250 ms without the event).
+			 */
+			struct pollfd ofd = { .fd = outfd, .events = POLLPRI };
+			int r = poll(&ofd, 1, usage_events ? 1000 : 250);
+			if (r < 0 && errno != EINTR) {
+				perror("poll loopback");
+				result = 1;
+				break;
+			}
+			if (r > 0 && (ofd.revents & POLLPRI))
+				loopback_drain_events(outfd);
+			int readers = loopback_readers(outfd);
+			double now = monotonic_s();
+			if (idle_decide(&idle, readers, now, idle_stop_s) != IDLE_START)
+				continue;
+			woke_at = now;
+			printf("bridge: consumer streaming; restarting the sensor stream (start %u)\n",
+			       idle.starts + 1);
+			fflush(stdout);
+			/* A frame at once, so the consumer is not left waiting; real ones follow. */
+			have_output = 0;
+			write_black(outfd, output);
+			idle_watchdog("restart: active frame controls", idle_step_timeout_s);
+			ae_set_idle(&ae, 0);	/* the planned frame, before the sensor powers up */
+			if (idle_resume_stream(&cap)) {
+				fprintf(stderr, "ipu6: sensor stream restart failed; exiting so the launcher "
+					"restarts the bridge without idle stops\n");
+				result = EXIT_IDLE_FAILED;
+				break;
+			}
+			idle.stopped = 0;
+			idle.starts++;
+			if (have_lens)
+				af_init(&af, lens_path);
+			last_readers = -2;	/* redo the consumer transition: TNR reset, AF scan */
+			frame_health_start(&health, monotonic_s());
+			continue;
+		}
 		struct pollfd pfd = { .fd = vfd, .events = POLLIN | POLLPRI };
 		int ready = poll(&pfd, 1, 1000);
 		if (ready < 0) {
 			if (errno == EINTR) continue;
 			perror("poll IPU6");
 			result = 1;
+			break;
+		}
+		if (idle_restart_overdue(woke_at, monotonic_s())) {
+			fprintf(stderr, "ipu6: no good sensor frame %.1f s after the idle restart; exiting so "
+				"the launcher restarts the bridge without idle stops\n",
+				monotonic_s() - woke_at);
+			result = EXIT_IDLE_FAILED;
 			break;
 		}
 		if (!ready) {
@@ -1596,7 +2254,7 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev,
 			result = 1;
 			break;
 		}
-		if (b.index >= buffer_count) {
+		if (b.index >= cap.count) {
 			fprintf(stderr, "invalid IPU6 buffer index %u\n", b.index);
 			result = 1;
 			break;
@@ -1605,12 +2263,26 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev,
 		if (readers != last_readers) {
 			printf("bridge: %s\n", readers < 0 ? "readers_active unavailable; converting every frame" :
 			       readers ? "consumer streaming; converting frames" :
+			       idle_stop_s > 0 ? "no consumer; idle (sensor and auto-exposure keep running until the idle stop)" :
 			       "no consumer; idle (sensor and auto-exposure keep running)");
 			last_readers = readers;
 			tnr_reset();	/* the scene may have changed while idle */
 			ae_set_idle(&ae, !bridge_should_convert(readers));
 			if (bridge_should_convert(readers))
 				af_start(&af);
+		}
+		if (idle_decide(&idle, readers, monotonic_s(), idle_stop_s) == IDLE_STOP) {
+			double t0 = monotonic_s();
+			printf("bridge: no consumer for %.0f s; stopping the sensor stream (stop %u)\n",
+			       idle_stop_s, idle.stops + 1);
+			fflush(stdout);
+			idle_pause_stream(&cap, &af, outfd);	/* the dequeued buffer is requeued on restart */
+			idle.stopped = 1;
+			idle.stops++;
+			printf("bridge: sensor stream stopped in %.1f s; sensor%s powered down, waiting for a consumer\n",
+			       monotonic_s() - t0, have_lens ? " and lens" : "");
+			fflush(stdout);
+			continue;
 		}
 		const char *bad = (b.flags & V4L2_BUF_FLAG_ERROR) ? "error-marked" :
 			b.bytesused < (uint64_t)video.fmt.pix.bytesperline * video.fmt.pix.height ||
@@ -1632,6 +2304,12 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev,
 			continue;
 		}
 		frame_health_good(&health, monotonic_s());
+		if (woke_at >= 0) {
+			printf("bridge: first sensor frame %.2f s after the consumer appeared\n",
+			       monotonic_s() - woke_at);
+			fflush(stdout);
+			woke_at = -1;
+		}
 		double mean_green = 0;
 		if (!bridge_should_convert(readers)) {
 			/* Idle: only the cheap sampled statistics, so exposure is right on resume. */
@@ -1665,18 +2343,13 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev,
 		}
 	}
 done:
-	if (streaming && ioctl(vfd, VIDIOC_STREAMOFF, &type))
-		perror("VIDIOC_STREAMOFF");
+	if (cap.fd >= 0)
+		capture_stop(&cap);
 	if (af.fd >= 0)
 		close(af.fd);
 	if (ae.fd >= 0)
 		ae_restore(&ae);
-	for (unsigned int i = 0; i < buffer_count; i++)
-		if (buffers[i].data) munmap(buffers[i].data, buffers[i].length);
 	if (vfd >= 0) {
-		request.count = 0;
-		if (ioctl(vfd, VIDIOC_REQBUFS, &request))
-			perror("release IPU6 buffers");
 		if (saved_video.fmt.pix.width) {
 			if (ioctl(vfd, VIDIOC_S_FMT, &saved_video))
 				perror("restore IPU6 video format");
@@ -1729,12 +2402,14 @@ static void load_calibration(const char *arg, const char *prefix)
 struct bridge_options {
 	const struct sensor_profile *profile;
 	int rotate180;
+	double idle_stop;	/* seconds without a consumer before the stream stops; 0 = never */
+	int idle_stop_given;
 	const char *media, *output, *calibration;
 };
 
 /*
- * [--sensor ov5675|ov8856] [--rotate 0|180] /dev/mediaN /dev/videoN [calibration].
- * Without options: the front sensor, unrotated, as before the rear camera existed.
+ * [--sensor ov5675|ov8856] [--rotate 0|180] [--idle-stop SECONDS] /dev/mediaN /dev/videoN
+ * [calibration]. Without options: the front sensor, unrotated, idle stop after 15 s.
  */
 static int parse_bridge_args(int argc, char **argv, struct bridge_options *o)
 {
@@ -1742,6 +2417,7 @@ static int parse_bridge_args(int argc, char **argv, struct bridge_options *o)
 
 	memset(o, 0, sizeof(*o));
 	o->profile = &sensor_profiles[0];
+	o->idle_stop = IDLE_STOP_S_DEFAULT;
 	for (; i + 1 < argc && !strncmp(argv[i], "--", 2); i += 2) {
 		if (!strcmp(argv[i], "--sensor")) {
 			o->profile = find_sensor_profile(argv[i + 1]);
@@ -1752,6 +2428,13 @@ static int parse_bridge_args(int argc, char **argv, struct bridge_options *o)
 				o->rotate180 = 1;
 			else if (strcmp(argv[i + 1], "0"))
 				return -1;
+		} else if (!strcmp(argv[i], "--idle-stop")) {
+			char *end;
+			long v = strtol(argv[i + 1], &end, 10);
+			if (end == argv[i + 1] || *end || v < 0 || v > 86400)
+				return -1;
+			o->idle_stop = (double)v;
+			o->idle_stop_given = 1;
 		} else {
 			return -1;
 		}
@@ -1764,6 +2447,26 @@ static int parse_bridge_args(int argc, char **argv, struct bridge_options *o)
 	return 0;
 }
 
+/*
+ * The launcher passes gbos.cfg's CAMERA_IDLE_STOP as IPU6_IDLE_STOP (0 = stream forever, as
+ * before); --idle-stop on the command line wins. Returns 0 when the value was taken.
+ */
+static int idle_stop_from_env(const char *env, double *seconds)
+{
+	char *end;
+	long v;
+
+	if (!env || !*env)
+		return -1;
+	v = strtol(env, &end, 10);
+	if (*end || v < 0 || v > 86400) {
+		fprintf(stderr, "ignoring IPU6_IDLE_STOP=%s (seconds expected)\n", env);
+		return -1;
+	}
+	*seconds = (double)v;
+	return 0;
+}
+
 #ifndef CAMERA_BRIDGE_TEST
 int main(int argc, char **argv)
 {
@@ -1771,12 +2474,15 @@ int main(int argc, char **argv)
 
 	(void)probe;
 	if (parse_bridge_args(argc, argv, &o)) {
-		fprintf(stderr, "usage: %s [--sensor ov5675|ov8856] [--rotate 0|180] "
+		fprintf(stderr, "usage: %s [--sensor ov5675|ov8856] [--rotate 0|180] [--idle-stop SECONDS] "
 			"/dev/mediaN /dev/videoN [calibration dir or colour-matrix table]\n", argv[0]);
 		return 2;
 	}
 	setvbuf(stdout, NULL, _IOLBF, 0);
 	output_rotate180 = o.rotate180;
+	idle_stop_s = o.idle_stop;
+	if (!o.idle_stop_given)
+		idle_stop_from_env(getenv("IPU6_IDLE_STOP"), &idle_stop_s);
 	printf("sensor: %s (calibration prefix %s)%s\n", o.profile->label, o.profile->cal_prefix,
 	       o.rotate180 ? "; output rotated 180" : "");
 	if (o.calibration)

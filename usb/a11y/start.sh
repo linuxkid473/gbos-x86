@@ -66,10 +66,14 @@ a11y_start() {
     case "$_k" in *Capture*|*Mic*|*Beep*|*Boost*|*Auto-Mute*) continue;; esac
     asr $A/bin/amixer -q -c $_c sset "$_k" 85% unmute > /dev/null 2>&1
   done
-  # Kernel messages must not be read aloud: the command line has ignore_loglevel, which beats the console level, so switch it off.
-  # The log on the stick is unaffected (it reads /dev/kmsg).
-  echo 0 > /sys/module/printk/parameters/ignore_loglevel 2>/dev/null
-  dmesg -n 1 2>/dev/null
+  # Kernel messages must not be read aloud: switch ignore_loglevel off (the debug command line has it; it beats the console level)
+  # and set the console level to 1. stop.sh restores both. The log on the stick is unaffected (it reads /dev/kmsg).
+  if [ -f $A/printk.sh ]; then
+    . $A/printk.sh && a11y_console_quiet $A/printk.saved
+  else
+    echo 0 > /sys/module/printk/parameters/ignore_loglevel 2>/dev/null
+    dmesg -n 1 2>/dev/null
+  fi
   # This espeakup has no working -P: it daemonizes and writes /var/run/espeakup.pid.
   mkdir -p /var/run
   asr $A/bin/espeakup -V en > $A/espeakup.log 2>&1

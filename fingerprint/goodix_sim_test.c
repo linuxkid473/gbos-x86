@@ -61,6 +61,13 @@ static struct {
 	int delete_mode;
 	int deletes;			/* a7 commands received */
 	int deletes_04;			/* of them a7:04, which deletes nothing */
+	/* touches (used when ntouches > 0): each puts touches[i] on the sensor until b0:02 lifts it; a capture
+	 * with no finger and no touch left never answers */
+	int touches[8], ntouches, next_touch, finger_on;
+	int bad_quality;		/* this many captures report quality 0 */
+	int capture_mode;		/* the last a2's first parameter: 0 enroll, 1 verify */
+	int captures, identifies;
+	int cancel_after_ack;		/* the framework cancels as soon as this command's acknowledgement is read */
 	/* packets to send, in order */
 	uint8_t q[32][PKT_MAX];
 	size_t qlen[32];
@@ -161,7 +168,7 @@ static void respond(uint8_t cmd0, uint8_t cmd1, const uint8_t *in, size_t in_len
 	size_t declared;
 	int i, dup = -1;
 	bool hold_ack = sim.cancel_cmd == cmd0 && sim.cancel_at == 0;
-	bool hold_resp = sim.cancel_cmd == cmd0;
+	bool hold_resp = sim.cancel_cmd == cmd0, no_resp = false;
 
 	memset(r, 0, sizeof(r));
 	r[0] = GOODIX_SUCCESS;
@@ -223,14 +230,42 @@ static void respond(uint8_t cmd0, uint8_t cmd1, const uint8_t *in, size_t in_len
 		len = 1 + GOODIX_TEMPLATE_ID_SIZE;
 		break;
 	case GOODIX_CMD_CAPTURE:
-		r[1] = 0xff;
+		assert(in_len == 3);
+		sim.capture_mode = in[0];
+		if (sim.ntouches && !sim.finger_on) {
+			if (sim.next_touch == sim.ntouches) {
+				no_resp = true;	/* waits for a finger that never comes */
+				break;
+			}
+			sim.finger_on = sim.touches[sim.next_touch++];
+		}
+		sim.captures++;
+		r[1] = sim.bad_quality ? 0 : 0xff;
 		r[2] = 0xff;
+		if (sim.bad_quality)
+			sim.bad_quality--;
 		len = 3;
 		break;
 	case GOODIX_CMD_ENROLL:
 		len = 3;	/* r[2] = 0: within config[3] */
 		break;
 	case GOODIX_CMD_FINGER_MODE:
+		if (cmd1 == GOODIX_CMD_FINGER_UP)
+			sim.finger_on = 0;
+		break;
+	case GOODIX_CMD_IDENTIFY:
+		/* matches only an image captured for verification (libfprint's a2 {1, config[10], config[11]}) */
+		sim.identifies++;
+		for (i = 0; i < sim.n && sim.capture_mode == 1; i++)
+			if (sim.db[i].finger == (sim.ntouches ? sim.finger_on : sim.finger))
+				dup = i;
+		if (dup < 0) {
+			r[0] = 0x01;	/* any nonzero status is "no match" (libfprint) */
+			break;
+		}
+		r[3] = 0xb0;	/* score 1200 */
+		r[4] = 0x04;
+		len = 8 + put_record(r + 8, &sim.db[dup]);
 		break;
 	case GOODIX_CMD_DUPLICATE:
 		for (i = 0; i < sim.n; i++)
@@ -263,6 +298,8 @@ static void respond(uint8_t cmd0, uint8_t cmd1, const uint8_t *in, size_t in_len
 		emit(sim.late, sim.latelen, &sim.laten, GOODIX_CMD_RESPONSE, 0, ack, 2);
 	else
 		emit(sim.q, sim.qlen, &sim.qn, GOODIX_CMD_RESPONSE, 0, ack, 2);
+	if (no_resp)
+		return;
 	if (hold_resp)
 		emit(sim.late, sim.latelen, &sim.laten, cmd0, cmd1, r, len);
 	else
@@ -307,6 +344,11 @@ static int sim_ioctl(int fd, unsigned long request, ...)
 	}
 	assert(sim.qlen[0] <= bulk->len);
 	memcpy(bulk->data, sim.q[0], sim.qlen[0]);
+	if (sim.cancel_after_ack > 0 && sim.q[0][0] == GOODIX_CMD_RESPONSE &&
+	    sim.q[0][GOODIX_HEADER_SIZE + 1] == sim.cancel_after_ack) {
+		goodix_request_cancel(sim.dev);
+		sim.cancel_after_ack = -1;
+	}
 	{
 		int n = (int)sim.qlen[0];
 
@@ -812,6 +854,99 @@ static void test_delete_collateral(void)
 	goodix_close(&s);
 }
 
+/*
+ * Boot-13: the enrolled finger never matched (identify after an enroll-mode capture) and one touch was five
+ * failures (no finger-up wait), so the first touch of every unlock locked the sensor out.
+ */
+static void test_identify_touches(void)
+{
+	static const char *const mine[] = { "GBOS-L-aaaaaaaa-u10-00000011", "GBOS-L-aaaaaaaa-u10-00000022" };
+	char matched[GOODIX_MAX_UID + 1];
+	struct goodix s;
+	int fail;
+
+	/* the enrolled finger, one touch: captured for verification, matched, logged with its score */
+	sim_reset();
+	store("GBOS-L-aaaaaaaa-u10-00000011", 1);
+	store("GBOS-L-aaaaaaaa-u10-00000022", 3);
+	sim.touches[0] = 3;
+	sim.ntouches = 1;
+	open_dev(&s);
+	assert(goodix_identify(&s, mine, 2, NULL, matched, &fail) == GOODIX_OK);
+	assert(strcmp(matched, "GBOS-L-aaaaaaaa-u10-00000022") == 0 && sim.capture_mode == 1);
+	assert(logged("identify: capture quality 255, coverage 255"));
+	assert(logged("identify: status 0x00, score 1200, study 0, template GBOS-L-aaaaaaaa-u10-00000022"));
+	assert(!sim.shield);
+	goodix_close(&s);
+
+	/* a wrong finger, then the right one: the no-match waits for the lift, the next attempt is the new touch */
+	sim_reset();
+	store("GBOS-L-aaaaaaaa-u10-00000011", 1);
+	sim.touches[0] = 2;
+	sim.touches[1] = 1;
+	sim.ntouches = 2;
+	open_dev(&s);
+	assert(goodix_identify(&s, mine, 2, NULL, matched, &fail) == GOODIX_NOMATCH);
+	assert(sim.finger_on == 0 && logged("identify: status 0x01: no match"));
+	assert(goodix_identify(&s, mine, 2, NULL, matched, &fail) == GOODIX_OK);
+	assert(sim.captures == 2 && sim.identifies == 2);
+	goodix_close(&s);
+
+	/* one touch of a wrong finger is one failure: the next attempt waits for a new touch (here: cancelled) */
+	sim_reset();
+	store("GBOS-L-aaaaaaaa-u10-00000011", 1);
+	sim.touches[0] = 2;
+	sim.ntouches = 1;
+	open_dev(&s);
+	assert(goodix_identify(&s, mine, 2, NULL, matched, &fail) == GOODIX_NOMATCH);
+	assert(goodix_identify(&s, mine, 2, NULL, matched, &fail) == -ECANCELED);
+	assert(sim.captures == 1 && sim.identifies == 1);
+	goodix_close(&s);
+
+	/* an unusable image: retried after the lift, not identified, not a failure */
+	sim_reset();
+	store("GBOS-L-aaaaaaaa-u10-00000011", 1);
+	sim.touches[0] = 1;
+	sim.touches[1] = 1;
+	sim.ntouches = 2;
+	sim.bad_quality = 1;
+	open_dev(&s);
+	assert(goodix_identify(&s, mine, 2, NULL, matched, &fail) == GOODIX_RETRY && sim.identifies == 0);
+	assert(sim.finger_on == 0 && logged("identify: capture quality 0, coverage 255"));
+	assert(goodix_identify(&s, mine, 2, NULL, matched, &fail) == GOODIX_OK && sim.next_touch == 2);
+	goodix_close(&s);
+
+	/* another user's template matched: a no-match here, and said so */
+	sim_reset();
+	store("GBOS-L-aaaaaaaa-u0-00000033", 1);
+	sim.touches[0] = 1;
+	sim.ntouches = 1;
+	open_dev(&s);
+	assert(goodix_identify(&s, mine, 2, NULL, matched, &fail) == GOODIX_NOMATCH);
+	assert(logged("template GBOS-L-aaaaaaaa-u0-00000033 (not one of this user's)") && sim.finger_on == 0);
+	goodix_close(&s);
+}
+
+/*
+ * Boot-13: keyguard cancelled an authentication while the sensor was being opened. The open's d0:00 response
+ * was left unread ("sensor open failed: -125", then "discarding stale packet d0:00" at the next open). A
+ * command that cannot be cancelled now finishes; the cancel ends the open at the next command.
+ */
+static void test_cancel_during_open(void)
+{
+	struct goodix s;
+
+	sim_reset();
+	goodix_init(&s);
+	snprintf(s.path, sizeof(s.path), "%s", node);
+	sim.dev = &s;
+	sim.cancel_after_ack = GOODIX_CMD_VERSION;
+	assert(goodix_open(&s) == -ECANCELED && s.fd < 0);
+	assert(sim.qn == 0);	/* nothing left in the pipe */
+	assert(goodix_open(&s) == 0 && !logged("discarding stale packet"));
+	goodix_close(&s);
+}
+
 /* boot-11 again: after the verified delete, the enrollment starts over instead of failing */
 static void test_boot11_restart(void)
 {
@@ -908,6 +1043,8 @@ int main(void)
 	test_delete_verified();
 	test_boot11_restart();
 	test_delete_collateral();
+	test_identify_touches();
+	test_cancel_during_open();
 	unlink(node);
 	puts("GOODIX_SIM_TEST_PASS");
 	return 0;

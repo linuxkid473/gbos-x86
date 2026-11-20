@@ -117,8 +117,9 @@ FILES="super.img super.layout hook.sh stick_fat.sh aidiag.sh native_zygote.sh ea
 DIRS="firmware patched audio installer kmod modules surface ksu"
 # Optional, used at boot when present: sensors/, camera/ (calibration extracted from the Windows tuning files,
 # stick only, never in git: read by installer/bin/ipu6-camera-bridge.sh), thermal/ (hook.sh's Latitude 7320
-# thermal config). Without camera/ and thermal/ an installed system silently booted without them.
-for d in sensors camera thermal; do [ ! -d "$G/$d" ] || DIRS="$DIRS $d"; done
+# thermal config), display/ (hook.sh's Latitude 7320 adaptive-brightness overlay and panel curve). Without camera/
+# and thermal/ an installed system silently booted without them.
+for d in sensors camera thermal display; do [ ! -d "$G/$d" ] || DIRS="$DIRS $d"; done
 for f in $FILES; do [ -f $G/$f ] || die "missing gbos/$f on the stick"; done
 for d in $DIRS; do [ -d $G/$d ] || die "missing gbos/$d/ on the stick"; done
 tool sfdisk --version > /dev/null 2>&1 || die "partitioning tools in gbos/installer/ don't run"

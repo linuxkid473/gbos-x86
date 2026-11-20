@@ -48,6 +48,18 @@ if sed -n '/^while \[ -n "$BRIDGE_PID$REAR_PID_RUN" \]; do/,/^done/p' "$BRIDGE" 
     echo "bridge supervision must not exit or kill" >&2
     exit 1
 fi
+# Idle stop: the bridges stop their sensors themselves and keep running, so the supervisor
+# never sees an idle stop; CAMERA_IDLE_STOP reaches them as IPU6_IDLE_STOP.
+grep -Fq 'IDLE_STOP=$(cfg CAMERA_IDLE_STOP)' "$BRIDGE"
+grep -Fq 'export IPU6_IDLE_STOP="$IDLE_STOP"' "$BRIDGE"
+grep -Fq 'BRIDGE_HEALTHY_S=300' "$BRIDGE"
+# A bridge that ran long before exiting gets its restarts back (one check per sensor).
+[ "$(sed -n '/^while \[ -n "$BRIDGE_PID$REAR_PID_RUN" \]; do/,/^done/p' "$BRIDGE" |
+    grep -c 'if ran_long "$\(FRONT\|REAR\)_SINCE"; then')" = 2 ]
+[ "$(grep -c '_SINCE=$(date +%s)$' "$BRIDGE")" = 3 ]
+for who in FRONT REAR; do
+    grep -A1 "if ran_long \"\$${who}_SINCE\"; then" "$BRIDGE" | tail -n 1 | grep -Eq "^ +${who}_RESTARTS=0$"
+done
 # A rear failure is a warning, never an exit: the front keeps running.
 grep -Fq 'WARNING: rear bridge did not reach streaming state; front camera only' "$BRIDGE"
 if sed -n "${rear_start},${hal_restart}p" "$BRIDGE" | grep -q 'exit'; then
@@ -61,7 +73,7 @@ grep -Fq 'expose_uvc 64 /postinstall/gbos/surface/latitude_fake_uvc_desc.bin "$F
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 # Pull the launcher's own helper functions out and run them here.
-for fn in strip_zeros uvc_uevent cfg add_rear_facing; do
+for fn in strip_zeros uvc_uevent cfg add_rear_facing ran_long; do
     # A function ends at the first "}" line outside a here-document (the facing entry has some).
     awk -v fn="$fn" '$0 ~ "^" fn "\\(\\) \\{" { on = 1 }
         on { print }
@@ -69,8 +81,52 @@ for fn in strip_zeros uvc_uevent cfg add_rear_facing; do
         doc && /^EOF$/ { doc = 0; next }
         on && !doc && /^}/ { exit }' "$BRIDGE"
 done > "$tmp/functions.sh"
-[ "$(grep -c '^[a-z_]*() {' "$tmp/functions.sh")" -eq 4 ]
+[ "$(grep -c '^[a-z_]*() {' "$tmp/functions.sh")" -eq 5 ]
 . "$tmp/functions.sh"
+
+# ran_long: 300 s or more since the start counts as healthy; less does not.
+eval "$(grep -E '^BRIDGE_HEALTHY_S=' "$BRIDGE")"
+now=$(date +%s)
+ran_long $((now - 301))
+if ran_long $((now - 20)); then
+    echo "a bridge that ran 20 s must not get its restarts back" >&2
+    exit 1
+fi
+
+# The idle-stop setting: digits are exported; empty or anything else means 0 (off), because the first idle
+# stop on boot-13 left the bridge unable to restart.
+idle_block=$(awk '/^IDLE_STOP=\$\(cfg CAMERA_IDLE_STOP\)/ { on = 1 } on { print } on && /^export IPU6_IDLE_STOP=/ { exit }' "$BRIDGE")
+for value in 0 30 '' 1x; do
+    out=$(cfg() { printf '%s' "$value"; }; unset IPU6_IDLE_STOP; eval "$idle_block"; echo "[${IPU6_IDLE_STOP-unset}]")
+    case "$value" in
+        0|30) echo "$out" | grep -qx "\[$value\]" ;;
+        *) echo "$out" | grep -qx '\[0\]' ;;
+    esac
+done
+
+# Supervisor, run for real with a fake bridge: a failed idle stop (status 4) restarts that bridge at once
+# with --idle-stop 0 without using up a restart; later exits (even 4 again) are ordinary restarts, so the
+# loop still ends after BRIDGE_RESTARTS.
+supervisor=$(awk '/^BRIDGE_RESTARTS=/ { on = 1 } on { print } on && /^exit "\$status"$/ { exit }' "$BRIDGE")
+echo "$supervisor" | grep -q 'EXIT_IDLE_FAILED=4'
+printf '#!/bin/sh\necho "$*" >> "$FAKE_ARGS"\nexit 4\n' > "$tmp/fake-bridge"
+chmod +x "$tmp/fake-bridge"
+sup_out=$(
+    set +e  # as in the launcher (set -u only)
+    sleep() { :; }
+    FAKE_ARGS=$tmp/args; export FAKE_ARGS
+    BRIDGE=$tmp/fake-bridge LOGDIR=$tmp REAR_LOG=$tmp/rear.log CAL= REAR_ROTATION=0 IDLE_STOP=15
+    sh -c 'exit 4' & BRIDGE_PID=$!
+    REAR_PID_RUN=
+    eval "$supervisor"
+) || true
+[ "$(echo "$sup_out" | grep -c 'front idle stop failed; restarted front bridge pid=[0-9]* with idle stop off for this boot')" = 1 ]
+echo "$sup_out" | grep -q 'ERROR: front bridge out of restarts'
+[ "$(wc -l < "$tmp/args")" = 4 ]
+[ "$(grep -c '^--idle-stop 0 /dev/media0 /dev/video64' "$tmp/args")" = 4 ]
+# The rear gets its own switch; the front's setting is untouched by it.
+grep -Fq '"$BRIDGE" --sensor ov8856 --rotate "$REAR_ROTATION" --idle-stop "$REAR_IDLE_STOP"' "$BRIDGE"
+grep -Fq 'REAR_IDLE_STOP=0' "$BRIDGE"
 
 # Front uevent: byte-identical to the one the launcher wrote before the rear camera existed.
 cat > "$tmp/front.expected" <<'EOF'

@@ -28,7 +28,7 @@ if [ -n "${GBOS_ROTATION_POLICY_OVERLAY:-}" ]; then
   [ -s "$GBOS_ROTATION_POLICY_OVERLAY" ] || { echo "missing or empty rotation policy overlay: $GBOS_ROTATION_POLICY_OVERLAY" >&2; exit 1; }
   put "$GBOS_ROTATION_POLICY_OVERLAY" "sensors/gbos-latitude7320-rotation-policy.apk"
 fi
-for d in patched audio installer kmod ksu a11y surface thermal; do
+for d in patched audio installer kmod ksu a11y surface thermal camera display; do
   [ -d "$U/$d" ] || continue
   (cd "$U" && find "$d" -type f ! -name '.DS_Store') | while read -r f; do put "$U/$f" "$f"; done
 done

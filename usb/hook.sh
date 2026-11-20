@@ -259,6 +259,53 @@ gbos_enable_latitude7320_sensors() {
 }
 gbos_enable_latitude7320_sensors
 
+# Adaptive brightness on the Latitude 7320 (needs the sensor HAL above for its "als" light sensor, and its writable
+# vendor overlay). framework-res and Google's Lapis vendor overlay set config_automatic_brightness_available=false,
+# so Android opened no light sensor (boot-13: mLightSensor=null, every BrightnessEvent lux=-1.0). Adds a signed
+# static overlay that sets the flag to true (usb/display/gbos-latitude7320-brightness.apk, tools/build_brightness_overlay.sh)
+# and a display config with the lux curve for the built-in panel (display port 0; Google ships ports 1-10 only).
+# Google's own display_port_0.xml, should a build add one, is left alone. ADAPTIVE_BRIGHTNESS=0 in gbos.cfg skips both.
+# The Settings toggle (screen_brightness_mode) keeps the user's choice; Google's desktop default is on.
+gbos_enable_latitude7320_brightness() {
+  GBOS_BRIGHTNESS_SELECTED=0
+  _br_vendor=${NEWROOT:-/new}/vendor
+  _br_apk=gbos-latitude7320-brightness.apk
+  _br_apk_src=$G/display/$_br_apk
+  _br_apk_dst=$_br_vendor/overlay/$_br_apk
+  _br_ddc_src=$G/display/latitude7320_display_port_0.xml
+  _br_ddc_dst=$_br_vendor/etc/displayconfig/display_port_0.xml
+  if [ "${ADAPTIVE_BRIGHTNESS:-1}" = 0 ]; then
+    log "hook: Latitude 7320 adaptive brightness disabled (ADAPTIVE_BRIGHTNESS=0)"
+    return 0
+  fi
+  [ "${GBOS_SENSOR_HAL_SELECTED:-0}" = 1 ] || return 0   # not a Latitude 7320, or no light sensor: nothing to do
+  if [ ! -s "$_br_apk_src" ] || [ ! -s "$_br_ddc_src" ]; then
+    log "hook: Latitude 7320 adaptive brightness unavailable (missing $_br_apk_src or $_br_ddc_src)"
+    return 0
+  fi
+  if ! cmp -s "$_br_apk_src" "$_br_apk_dst" &&
+     { ! mkdir -p "$_br_vendor/overlay" || ! cp "$_br_apk_src" "$_br_apk_dst.part" ||
+       ! chmod 0644 "$_br_apk_dst.part" || ! mv -f "$_br_apk_dst.part" "$_br_apk_dst"; }; then
+    rm -f "$_br_apk_dst.part"
+    log "hook: Latitude 7320 adaptive brightness NOT enabled (cannot stage $_br_apk in /vendor/overlay)"
+    return 1
+  fi
+  GBOS_BRIGHTNESS_SELECTED=1
+  if [ -e "$_br_ddc_dst" ] && ! cmp -s "$_br_ddc_src" "$_br_ddc_dst"; then
+    log "hook: Latitude 7320 adaptive brightness enabled; Google's own display_port_0.xml kept (its curve applies)"
+    return 0
+  fi
+  if ! cmp -s "$_br_ddc_src" "$_br_ddc_dst" &&
+     { ! cp "$_br_ddc_src" "$_br_ddc_dst.part" || ! chmod 0644 "$_br_ddc_dst.part" ||
+       ! mv -f "$_br_ddc_dst.part" "$_br_ddc_dst"; }; then
+    rm -f "$_br_ddc_dst.part"
+    log "hook: Latitude 7320 adaptive brightness enabled with Google's desktop curve (cannot stage display_port_0.xml)"
+    return 0
+  fi
+  log "hook: Latitude 7320 adaptive brightness enabled (overlay $_br_apk, panel curve display_port_0.xml)"
+}
+gbos_enable_latitude7320_brightness
+
 gbos_sensor_ueventd
 
 # Google's vendor modules are built for Google's kernel and cannot be loaded by the gbOS86 kernel.
@@ -764,7 +811,7 @@ fi
           FPARGS=" --no-gbos-install"
         fi
         FPRC="# Experimental Goodix MOC HAL for the exact USB sensor $FPDEV.
-service gbos_fp /postinstall/gbos/gbos_fp$FPARGS
+service gbos_fp /postinstall/gbos/gbos_fp$FPARGS --log /postinstall/gbos/logs/boot-$N/fingerprint.txt
     class hal
     user system
     group system usb
@@ -772,17 +819,9 @@ service gbos_fp /postinstall/gbos/gbos_fp$FPARGS
     interface aidl android.hardware.biometrics.fingerprint.IFingerprint/default
     disabled
     oneshot
-# gbos_fp's own lines only, from its start: the full logcat rotates its startup and session cleanup away
-# within minutes (boot-11). A few KB, so it is always on, like crash.txt.
-service gbos_fp_log /system/bin/logcat -b main -v threadtime -s gbos_fp -f /postinstall/gbos/logs/boot-$N/fingerprint.txt
-    user root
-    group root log
-    seclabel u:r:shell:s0
-    disabled
 on post-fs-data
     mkdir /data/vendor/crosfp 0770 system system
     mkdir /data/vendor/crosfp/gbos_fp 0770 system system
-    start gbos_fp_log
     start gbos_fp"
         log "hook: fingerprint: starting Goodix HAL for $FPDEV${FPARGS:+ ($FPARGS)}"
       else

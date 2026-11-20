@@ -27,14 +27,18 @@ case "${1:-}" in
     clang=${4:-/build/inputs/clang-r584948b/bin/clang++}
     temp="$output_dir/$output_name.part.$$"
     trap 'rm -f "$temp"' EXIT HUP INT TERM
+    # Mount the parent too, at the same relative place: prepared inputs link into their siblings
+    # (build/sensor-hal-inputs/INPUTS/ndk -> ../ndk), which would dangle with only INPUTS mounted.
+    inputs_parent=$(dirname "$inputs")
     docker run --rm --pull=never \
+      -v "$inputs_parent:/inputs-root:ro" \
       -v "$inputs:/inputs:ro" \
       -v "$ROOT:/src:ro" \
       -v gbos-ksrc:/build:ro \
       -v "$output_dir:/out" \
       --entrypoint python3 gbos-kbuild \
       /src/sensors/trogdor/build_compact.py \
-      --inputs /inputs --clang "$clang" --output "/out/$(basename "$temp")"
+      --inputs "/inputs-root/$(basename "$inputs")" --clang "$clang" --output "/out/$(basename "$temp")"
     [ -s "$temp" ] || { echo "sensor build produced no library" >&2; exit 1; }
     mv -f "$temp" "$output_dir/$output_name"
     ;;
