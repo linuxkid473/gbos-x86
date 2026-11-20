@@ -1114,3 +1114,8 @@ SHA-NI, 256-bit VAES/VPCLMULQDQ, AVX-IFMA and AVX-512; the lapis binaries use th
   - *Tests:* `test_system_update.sh` 116 checks; `test_updater_core.sh` (feed, RSA vs openssl, resume, tar, Java vs make_super.py, Google-like
     zip64 with split/out-of-order/zero extents and a dropped connection). By hand: the real 16693588 partitions in a 3.2 GB zip64 test zip
     -> the Java code rebuilt the identical 3.7 GB `super.img` in 29 s. Never run: GitHub redirects, Google's real zip, the app on Android.
+- 2026-11-20 **Updater app: the "Modified system" warning now also covers unknown systems (PC only, not on hardware).** Before, the app
+  asked "Install anyway" only for changed files or a `-dirty` build. A laptop installed from a stick deployed with local changes has no
+  `system.manifest` (deploy_stick.sh deletes it), and a commit not on GitHub only got a line of text, so an update could replace local
+  work without asking. Now any system that is not exactly a published set needs the confirmation (codes in `Updater.warningCodes`), and the
+  accepted reasons go to `gbos/update/history.txt` through the request's new `accepted_warning` line.

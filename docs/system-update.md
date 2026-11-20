@@ -144,10 +144,15 @@ The app's default update source is this checkout's GitHub `origin` (or `REPO=OWN
   `gbos/system.manifest` (changed, missing, and files added to the set's folders; `gbos.cfg` and logs never count; files over 64 MiB,
   i.e. `super.img`, by size unless you tap **Full check**). It also looks at the set's commit: `-dirty` means it was built from changed
   sources, and a clean commit is looked up on GitHub (`api.github.com/repos/OWNER/NAME/commits/<sha>`) to tell the project's published
-  sources from a local or forked build. **When there are modifications** (local changes, or a set built from changed sources) the app
-  shows a warning, and asks again before installing: an update replaces changed files, deletes files added to its folders, and was not
-  tested with your changes, so it could break things. A laptop with no `system.manifest` (installed from a stick without one) cannot be
-  checked; the first update from the app installs every file and writes one.
+  sources from a local or forked build. **Unless the system is exactly a published set**, the app shows an orange warning and asks
+  again (**Install anyway** / **Copy anyway**) before installing. It warns when: the files differ from the record; the set was built
+  from changed sources (`-dirty`); its commit is not in the project's sources on GitHub (unpushed or forked); the record names no
+  commit; the laptop has no `system.manifest` or an unreadable one (installed from a stick with changes: `tools/deploy_stick.sh`
+  deletes the stick's record when it copies changed files), so changes cannot be ruled out; or the check could not run. The warning
+  says that the update replaces every system file with the published version, deletes files added to its folders, and was not tested
+  with your changes. When the user goes ahead, the root service writes a line to `gbos/update/history.txt` (and the kernel log) with
+  the reasons, e.g. `... after the app warned that this system is modified (norecord,unpublished); the user chose "Install anyway"`.
+  The first update from the app installs every file and writes a `system.manifest`, so later checks are exact.
 * **Settings**, on two tabs. **General:** check when the laptop starts (on), check once a day (on), delete old boot logs when GBOSSYS is
   short of space (off), the update source. **Experimental features:** "Download new Google builds directly from Google" (off).
 * **Permissions:** internet, network state (the check waits for a network), notifications (granted by the boot service when it first

@@ -26,6 +26,7 @@ import java.io.BufferedReader;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 
 /**
  * gbOS86 Updater. Not a trust anchor: it never installs anything itself. It finds updates (the signed feed on the project's GitHub
@@ -240,15 +241,19 @@ public class MainActivity extends Activity {
     private void confirmInstall() {
         final Updater.Decision d = decision;
         if (d == null || d.kind != Updater.Kind.AVAILABLE) return;
-        String w = Updater.warning(audit);
+        final Updater.Audit a = audit;
+        String w = Updater.warning(a);
         if (w != null) {
             new AlertDialog.Builder(this)
                     .setTitle("⚠ Modified system")
                     .setMessage(w + "\n\nInstall the update anyway?")
-                    .setPositiveButton("Install anyway", (x, y) -> confirmDownload(d))
+                    .setPositiveButton("Install anyway", (x, y) -> { Prefs.setAcceptedWarning(this, Updater.warningCodes(a)); confirmDownload(d); })
                     .setNegativeButton("Cancel", null)
                     .show();
-        } else confirmDownload(d);
+        } else {
+            Prefs.setAcceptedWarning(this, null);
+            confirmDownload(d);
+        }
     }
 
     private void confirmDownload(Updater.Decision d) {
@@ -348,17 +353,18 @@ public class MainActivity extends Activity {
 
     private void confirmStageFolder() {
         if (relPath == null) return;
+        final List<String> codes = Updater.warningCodes(audit);
         String w = Updater.warning(audit);
         new AlertDialog.Builder(this)
-                .setTitle("Copy this update?")
-                .setMessage((w != null ? "⚠ " + w + "\n\n" : "") + "It is copied to the system partition now and installed at the next restart. "
+                .setTitle(w != null ? "⚠ Modified system" : "Copy this update?")
+                .setMessage((w != null ? w + "\n\n" : "") + "It is copied to the system partition now and installed at the next restart. "
                         + "Your apps and data are kept.")
-                .setPositiveButton("Copy", (x, y) -> stageFolder())
+                .setPositiveButton(w != null ? "Copy anyway" : "Copy", (x, y) -> stageFolder(codes.isEmpty() ? null : String.join(",", codes)))
                 .setNegativeButton("Cancel", null)
                 .show();
     }
 
-    private void stageFolder() {
+    private void stageFolder(final String accepted) {
         if (busy) return;
         busy = true;
         final String rel = relPath;
@@ -366,7 +372,8 @@ public class MainActivity extends Activity {
         new Thread(() -> {
             String r;
             try {
-                Root.Result res = Root.call(this, "stage", Root.extra("path", rel, "where", "shared", "prune_logs", Prefs.pruneLogs(this) ? "1" : null),
+                Root.Result res = Root.call(this, "stage", Root.extra("path", rel, "where", "shared", "prune_logs", Prefs.pruneLogs(this) ? "1" : null,
+                        "accepted_warning", accepted),
                         body -> ui.post(() -> progressView.setText(body)));
                 r = (res.ok ? "" : "Failed:\n") + res.body;
             } catch (Exception e) {

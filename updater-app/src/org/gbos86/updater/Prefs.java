@@ -1,6 +1,7 @@
 package org.gbos86.updater;
 
 import android.content.Context;
+import java.util.List;
 import android.content.SharedPreferences;
 
 /** Settings (Settings screen) and small caches. */
@@ -16,6 +17,11 @@ final class Prefs {
     static boolean checkDaily(Context c) { return get(c).getBoolean(CHECK_DAILY, true); }
     static boolean pruneLogs(Context c) { return get(c).getBoolean(PRUNE_LOGS, false); }
     /** Experimental: rebuild super.img from Google's own download. Off unless the user turns it on. */
+    /** The warning codes the user accepted with "Install anyway" for the download in progress (null: there was no warning). */
+    static String acceptedWarning(Context c) { return get(c).getString("accepted_warning", null); }
+    static void setAcceptedWarning(Context c, List<String> codes) {
+        get(c).edit().putString("accepted_warning", codes == null || codes.isEmpty() ? null : String.join(",", codes)).apply();
+    }
     static boolean googleDirect(Context c) { return get(c).getBoolean(EXP_GOOGLE, false); }
 
     /** OWNER/NAME of the GitHub repository whose releases hold the feed. Default: the repository the app was built from. */

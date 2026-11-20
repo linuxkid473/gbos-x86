@@ -129,12 +129,41 @@ final class Updater {
         return sb.toString();
     }
 
+    /** Why an install needs the "Install anyway" confirmation, as short codes (also written to the laptop's update history when the
+     *  user accepts): unchecked (no check result), norecord / unreadable (no usable record of the files), dirty (built from changed
+     *  sources), changed (files differ from the record), unpublished (its commit is not in the project's sources), noorigin (the record
+     *  names no commit). Empty: the system is exactly a published set. */
+    static List<String> warningCodes(Audit a) {
+        List<String> w = new ArrayList<>();
+        if (a == null) { w.add("unchecked"); return w; }
+        if (!a.known()) { w.add("none".equals(a.manifest) ? "norecord" : "unreadable"); return w; }
+        if ("dirty".equals(a.source)) w.add("dirty");
+        if ("yes".equals(a.modified)) w.add("changed");
+        if ("unpublished".equals(a.published)) w.add("unpublished");
+        if ("unknown".equals(a.source)) w.add("noorigin");
+        return w;
+    }
+
     static String warning(Audit a) {
-        if (a == null || !a.modified()) return null;
-        return "This system has modifications that are not part of gbOS86's published sources"
-                + ("dirty".equals(a.source) ? " (it was built from changed sources)" : "")
-                + ". Installing an update could break things: the update replaces changed files, deletes files added to its folders, "
-                + "and was not tested with your changes.";
+        List<String> codes = warningCodes(a);
+        if (codes.isEmpty()) return null;
+        List<String> why = new ArrayList<>();
+        for (String k : codes) {
+            switch (k) {
+                case "unchecked": why.add("its files could not be checked"); break;
+                case "norecord": why.add("the laptop has no record of its files (it was installed from a USB stick with changes), so changes cannot be ruled out"); break;
+                case "unreadable": why.add("the laptop's record of its files is unreadable"); break;
+                case "dirty": why.add("it was built from changed sources"); break;
+                case "changed": why.add("some of its files were changed, removed or added"); break;
+                case "unpublished": why.add("it was built from a version that is not in gbOS86's published sources (a local or forked build)"); break;
+                case "noorigin": why.add("its origin is unknown"); break;
+                default: why.add(k);
+            }
+        }
+        return "This system may not be the one gbOS86 published: " + String.join("; ", why) + ".\n\n"
+                + "The update replaces every system file with the published version, so any changes on this laptop are lost, and files added "
+                + "to its folders are deleted. It was tested only with the published version and could break things here. "
+                + "If you continue, the laptop's update history records that you were warned.";
     }
 
     // ------------------------------------------------------------------------------------------------ the feed
@@ -256,7 +285,8 @@ final class Updater {
             }
             if (p != null) p.update("Copying the update to the system partition ...", 0, -1);
             Root.Result r = Root.call(c, "stage", Root.extra("where", "app", "path", "updates/" + f.seq + "/bundle/" + f.name,
-                    "prune_logs", Prefs.pruneLogs(c) ? "1" : null), body -> { if (p != null) p.update(body, 0, -1); });
+                    "prune_logs", Prefs.pruneLogs(c) ? "1" : null,
+                    "accepted_warning", Prefs.acceptedWarning(c)), body -> { if (p != null) p.update(body, 0, -1); });
             if (d.needsSuper) new File(bundle, "files/super.img").renameTo(superImg);   // keep it for a retry until staged
             if (r.ok) { result = r.body; break; }
             if (delta && r.body.contains("NEEDS-FILES")) {   // the laptop lacks files the delta does not carry: take the full bundle

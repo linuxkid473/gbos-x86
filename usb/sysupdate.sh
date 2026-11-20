@@ -847,6 +847,8 @@ cmd_request() {
   _pr=$(sed -n 's/^prune_logs \([01]\)$/\1/p' "$W/req" | head -n 1)
   _wh=$(sed -En 's/^where (app|shared)$/\1/p' "$W/req" | head -n 1)
   _dp=$(sed -n 's/^deep \([01]\)$/\1/p' "$W/req" | head -n 1)
+  # the app's modification warning the user accepted with "Install anyway" (codes: Updater.warningCodes), kept in update/history.txt
+  _aw=$(sed -n 's/^accepted_warning \([a-z,]\{1,100\}\)$/\1/p' "$W/req" | head -n 1)
   SU_STATUSF=$W/progress
   respond() { { echo "gbos86-sysupdate-response 1"; echo "id $_id"; echo "state $1"; shift; cat; } > "$_rs.part"; chown "$_uid:$_uid" "$_rs.part"; chmod 600 "$_rs.part"; mv -f "$_rs.part" "$_rs"; }
   echo "working" | respond running
@@ -866,6 +868,13 @@ cmd_request() {
       ( while sleep 1; do [ -f "$W/progress" ] && respond running < "$W/progress"; done ) & _pp=$!
       _o=$( ( set -- stage "$_real" --status "$W/progress"; [ "$_pr" = 1 ] && set -- "$@" --prune-logs; if [ -n "${SU_BB:-}" ]; then "$SU_BB" sh "$0" "$@"; else sh "$0" "$@"; fi ) 2>&1); _r=$?
       kill "$_pp" 2>/dev/null; wait "$_pp" 2>/dev/null
+      if [ $_r = 0 ] && [ -n "$_aw" ]; then
+        su_log "staged although the app warned that the system is modified ($_aw); the user chose to install anyway"
+        mkdir -p "$U"
+        { tail -n 199 "$U/history.txt" 2>/dev/null
+          echo "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) app: update staged from $(basename "$_real") after the app warned that this system is modified ($_aw); the user chose \"Install anyway\""
+        } > "$U/history.part" && mv -f "$U/history.part" "$U/history.txt"; sync
+      fi
       if [ $_r = 0 ]; then echo "$_o" | tail -n 3 | respond done; else echo "$_o" | tail -n 5 | respond failed; fi;;
     *) echo "unknown action '$_act'" | respond failed;;
   esac
