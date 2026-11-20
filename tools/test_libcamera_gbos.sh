@@ -17,13 +17,17 @@ fi
 OUT=$ROOT/usb/installer/lib/libcamera-pipeline
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
-cp -r "$OUT" "$tmp/committed"
-sh "$ROOT/tools/build_libcamera_gbos.sh" >/dev/null
+# Rebuild into a temporary directory (never over the tracked files) and compare.
+GBOS_LIBCAMERA_OUT=$tmp/rebuilt sh "$ROOT/tools/build_libcamera_gbos.sh" >/dev/null
 for f in "$OUT"/*.so; do
-	cmp -s "$f" "$tmp/committed/$(basename "$f")" || {
+	cmp -s "$f" "$tmp/rebuilt/$(basename "$f")" || {
 		echo "$(basename "$f") differs from a rebuild: run tools/build_libcamera_gbos.sh" >&2
 		exit 1
 	}
+	if strings -n 6 "$f" | grep -q -e /home/ -e "$MAIN"; then
+		echo "$(basename "$f") embeds a local path" >&2
+		exit 1
+	fi
 done
 # vtable sizes: the derived classes against the vendor's base classes.
 VLIB=$MAIN/build/libcamera-vendor/camera.libcamera_hal_base.so

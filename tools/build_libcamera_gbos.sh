@@ -21,7 +21,8 @@ GEN=${LIBCAMERA_GEN:-$MAIN/build/src/libcamera-gen}
 VLIB=$MAIN/build/libcamera-vendor
 NDK=${ANDROID_NDK:-$HOME/Android/Sdk/ndk/27.3.13750724}
 TC=$NDK/toolchains/llvm/prebuilt/linux-x86_64
-OUT=$ROOT/usb/installer/lib/libcamera-pipeline
+# GBOS_LIBCAMERA_OUT: build somewhere else (the test compares against the committed files).
+OUT=${GBOS_LIBCAMERA_OUT:-$ROOT/usb/installer/lib/libcamera-pipeline}
 [ -f "$SRC/include/libcamera/internal/pipeline_handler.h" ] || { echo "missing libcamera source at $SRC" >&2; exit 1; }
 
 # Generated headers, as Android.bp's genrules make them.
@@ -56,15 +57,24 @@ sed 's/^#define _LIBCPP_ABI_NAMESPACE __ndk1$/#define _LIBCPP_ABI_NAMESPACE __1/
 	"$TC/sysroot/usr/include/c++/v1/__config_site" > "$CFG/__config_site"
 grep -q '_LIBCPP_ABI_NAMESPACE __1$' "$CFG/__config_site"
 
+# Reproducible and free of local paths (__FILE__ is embedded by libcamera's LOG and ASSERT
+# macros): compile the relative source path from $ROOT, and map the absolute include paths.
 mkdir -p "$OUT"
-for src in "$ROOT"/kernel/libcamera-gbos/*.cpp; do
+cd "$ROOT"
+for src in kernel/libcamera-gbos/*.cpp; do
 	name=$(basename "$src" .cpp)
 	"$TC/bin/clang++" --target=x86_64-linux-android30 -std=c++20 -O2 -fPIC -shared \
+		-ffile-prefix-map="$MAIN/build/src/=" -ffile-prefix-map="$MAIN/build/=" \
+		-ffile-prefix-map="$NDK/=ndk/" -ffile-prefix-map="$ROOT/=" \
 		-fno-exceptions -frtti -Wall -Wextra -Werror -Wno-unused-parameter \
 		-DLIBCAMERA_BASE_PRIVATE -DHAVE_LOCALE_T=1 -DHAVE_ANDROID_OS \
 		-isystem "$CFG" -I "$GEN/include" -I "$SRC/include" -I "$SRC/src/libcamera" \
 		-nostdlib++ -Wl,--no-undefined -Wl,-soname,"$name.so" \
 		-o "$OUT/$name.so" "$src" "$VLIB/libc++.so" "$VLIB/camera.libcamera_hal_base.so" -llog
 	"$TC/bin/llvm-strip" --strip-unneeded "$OUT/$name.so"
+	if strings -n 6 "$OUT/$name.so" | grep -q -e "$HOME" -e "$MAIN"; then
+		echo "$name.so embeds a local path" >&2
+		exit 1
+	fi
 	echo "$OUT/$name.so"
 done
