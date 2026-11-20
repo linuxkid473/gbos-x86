@@ -906,3 +906,23 @@ SHA-NI, 256-bit VAES/VPCLMULQDQ, AVX-IFMA and AVX-512; the lapis binaries use th
   - *Only libfprint's payload* is sent while the sensor holds any template not named `GBOS-` (logged as `holds templates not named GBOS-, so only libfprint's payload is sent`).
   - *Simulator:* the default a7:00 model now matches on the tid, so libfprint's payload works, as fprintd's delete does. New `DELETE_WILDCARD`: libfprint's payload answers 0x00 and deletes nothing, while any whole-record payload deletes every template. Its tests check three cases. With two GBOS templates, the loss is detected and deletes stay blocked across a close and reopen. With a Windows print stored, only one a7:00 goes out and the print survives. With a working firmware and a Windows print stored, the target goes and the Windows print stays. Mutants without the block, or without the non-GBOS rule, fail.
   - *Built:* `usb/gbos_fp` SHA-256 `78f3fb8c7a4ca9eeab452b6a4e6b9d29874d508a5b5df76a0e45e37a6a8287ae`. Not deployed (the stick has `8602ca7b…`).
+- 2026-11-20 **System updates without the stick (built and tested on the PC, not on hardware; not deployed).** `docs/system-update.md`.
+  - *What:* a signed bundle (`gbos86-update-<seq>-<id>/`: manifest, manifest.sig, changed files) copied into `gbos/update.inbox/` on GBOSSYS
+    (from Windows, `sysupdate.sh stage` as root, or the new gbOS86 Updater app) is checked and switched in by stage0 at the next start, from
+    `early_patch.sh` (works on today's kernel; `stage0_init.sh` has a 4-line fallback that needs a kernel build). Rollback after 3 starts that
+    do not reach `sys.boot_completed`; held instead for a new Google build that Android already ran (`/data` may be upgraded).
+  - *Signature:* RSA-3072 PKCS#1 v1.5 / SHA-256 checked in busybox `bc` (0.37 s here), whole encoded block compared. `usb/sysupdate.pub` is a
+    placeholder: laptops refuse every bundle until the project's public key is committed there (`tools/make_system_update.sh keygen`, offline).
+  - *Safety details:* the kernel is replaced by a rename over `BOOTX64.EFI` (never missing) and backed up on GBOSSYS, not the EFI partition;
+    a journal undoes a power cut at any step (tested at every step, kernel switch included); the code that undoes it is the copy that wrote it
+    (`update/engine.sh`); only `EFI/gbos86` or `EFI/BOOT` on a `GBOS_EFI` partition is written, never a shared ESP's fallback loader.
+  - *Menu 1:* shows both sets, refuses an older Google build unless `DOWNGRADE` is typed, trusts `.stamps` only for the same
+    `system.manifest`, never skips `super.img` when `super.layout`/`libkm_compat.so`/`system_ext_manifest.xml`/`patched/MANIFEST` changed.
+  - *App:* `updater-app/` (no permissions; a root init service does the copy, from the app's private request file only). Built with JDK 17,
+    platform 35, build-tools 35.0.0 (downloaded with the user's approval into `~/Android/Sdk`): 16.8 KB, test key, not committed.
+  - *Stick check:* a read-only listing of the stick's firmware/modules/... (5,724 entries) has only names the manifest rules accept.
+  - *Tests:* `tools/test_system_update.sh` (96 checks, `SYSTEM_UPDATE_TEST_PASS`). Untested on hardware: the erofs loop-mount build check,
+    the EFI partition lookup with `sfdisk`, the restart after a kernel change, the tty1 messages, the app and its init service.
+  - *First hardware test:* commit the real public key, deploy, menu 1 once (puts `sysupdate.sh` and the key on the laptop), boot the
+    laptop, copy a small delta bundle into `update.inbox` from Windows, restart. Read `gbos/update/status.txt` and `kmsg.log`'s
+    `gbos-sysupdate:` lines (menu 1's `nvme-logs`). Then try one that changes the kernel.

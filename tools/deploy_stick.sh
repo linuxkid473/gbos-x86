@@ -44,6 +44,9 @@ if [ -d "$MODS" ]; then
 fi
 # the stick's files that this project no longer ships (the removed AI stand-in)
 [ -d "$G/localai" ] && { printf '  removing localai/\n'; rm -rf "$G/localai"; }
+# gbos/system.manifest names the stick's exact set (docs/system-update.md); after a change it no longer does, and menu 1 would copy a
+# wrong one to the laptop. Remake it with tools/make_system_update.sh manifest if you want the laptop to know its set.
+if [ -s "$CHANGED" ] && [ -f "$G/system.manifest" ]; then printf '  removing system.manifest (it described the stick before this deploy)\n'; rm -f "$G/system.manifest"; fi
 [ -s "$CHANGED" ] || echo "  nothing to copy: the stick already matches usb/"
 sync
 

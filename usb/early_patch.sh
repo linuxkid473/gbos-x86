@@ -19,7 +19,7 @@ unset _cfg
 # The engine runs as its own process with a clean environment (env -i): nothing leaks in from the kernel command line, and nothing it
 # does can change stage0's variables. While an update is pending, the copy of the engine that started it (update/engine.sh) runs, so
 # the code that undoes a switch is the code that wrote its journal. Exit 10 = the kernel changed: restart at once, so the new kernel
-# never runs with the old modules (or the reverse). stage0_init.sh (kernel #47+) has the same call as a fallback, guarded by
+# never runs with the old modules (or the reverse). stage0_init.sh has the same call as a fallback (in kernels built after 2026-11-20), guarded by
 # GBOS_SYSUPDATE_RAN, for a gbos.cfg that does not source this file.
 gbos_sysupdate_run() { # ENGINE
   env -i PATH=/bin:/sbin sh "$1" boot "$G" "$L" "$N" --dev "$DEV"
