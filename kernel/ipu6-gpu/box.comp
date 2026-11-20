@@ -1,0 +1,26 @@
+#version 450
+// Chroma neighbourhood average (box_filter_plane): horizontal pass lin -> tmp, vertical pass
+// tmp -> avg, edges clamped, each output the window sum divided by 2r + 1 as the CPU's
+// running sum gives.
+layout(local_size_x = 16, local_size_y = 16) in;
+#include "common.glsl"
+
+layout(push_constant) uniform Pass { int vertical; } pass;
+
+void main()
+{
+	int x = int(gl_GlobalInvocationID.x), y = int(gl_GlobalInvocationID.y);
+	int p = int(gl_GlobalInvocationID.z);
+	if (x >= P.col_w || y >= P.col_h || p >= 3)
+		return;
+	int r = P.radius, base = p * P.col_w * P.col_h, sum = 0;
+	if (pass.vertical == 0) {
+		for (int k = -r; k <= r; k++)
+			sum += lin[base + y * P.col_w + clamp(x + k, 0, P.col_w - 1)];
+		tmp[base + y * P.col_w + x] = sum / (2 * r + 1);
+	} else {
+		for (int k = -r; k <= r; k++)
+			sum += tmp[base + clamp(y + k, 0, P.col_h - 1) * P.col_w + x];
+		avg[base + y * P.col_w + x] = sum / (2 * r + 1);
+	}
+}

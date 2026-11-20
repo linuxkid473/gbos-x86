@@ -1153,3 +1153,23 @@ SHA-NI, 256-bit VAES/VPCLMULQDQ, AVX-IFMA and AVX-512; the lapis binaries use th
     - fringes on the real blinds;
     - frame rate with both cameras;
     - the higher memory (bridge planes ~16 MB, loopback 2.4 MB per buffer).
+- 2026-11-20 **Camera converter on the GPU (Vulkan compute; host-tested on lavapipe, not yet on the laptop's GPU, not deployed).**
+  - *Why:* the CPU converter needs about 27 ms of CPU per 1280×960 frame (2 threads), which caps resolution and costs battery. The image's graphics stack is Mesa's Vulkan driver for this GPU (logcat: `ANGLE ... Vulkan 1.4.348 (Intel(R) Iris(R) Xe Graphics (TGL GT2))`); GLES runs on ANGLE over it.
+  - *How:*
+    - `kernel/ipu6-gpu.c` (included by `ipu6-loopback.c` with `-DIPU6_GPU`) runs the four per-pixel stages as compute shaders (`kernel/ipu6-gpu/*.comp`): colour grid, chroma box average, colour mix to Y′U′V′, and the output pass (detail, temporal filter, YUYV, rotation). They use the CPU code's integer arithmetic (every intermediate fits 32 bits).
+    - The CPU keeps the sparse work: white-balance/AE statistics, AF, choosing the colour matrix and lens shading.
+    - SPIR-V is compiled by `tools/build_ipu6_gpu_shaders.sh` (NDK glslc) into the committed `kernel/ipu6-gpu/spirv.h`.
+    - libvulkan is dlopen'ed: without it, or on any Vulkan error, the bridge logs `gpu: ... converting on the CPU` and carries on.
+    - Every 300 frames it logs `gpu: N ms per frame on <device>`.
+  - *Build:* `tools/build_ipu6_loopback_gpu.sh` (Android NDK r27d, installed in `~/Android/Sdk/ndk/27.3.13750724` on the build machine, downloaded with the user's OK). Output: a bionic PIE `usb/installer/bin/vulkan/ipu6-loopback`, which needs only libc/libm/libdl. The static CPU build `usb/installer/bin/ipu6-loopback` stays and is the fallback.
+  - *Launcher:*
+    - Probes `vulkan/ipu6-loopback --probe-gpu` (10 s limit) and uses it if that works. `CAMERA_GPU=0` in gbos.cfg forces the CPU build.
+    - If the GPU bridge doesn't reach streaming, the CPU build is started instead. If a GPU bridge exits later, its restarts use the CPU build.
+    - Log: `camera converter: GPU (gpu: Vulkan compute on ...)` or `CPU (...)` in camera-bridge-setup.txt.
+  - *Tests:*
+    - `tools/test_ipu6_gpu.sh` runs 8 cases (front/rear, lens shading, stripes, NIR, highlights at 20x, 40x rotated) through both paths on lavapipe. Outputs are identical except ≤ 27 of 2.46 M bytes per frame, which differ by 1 (the two float spots).
+    - Negative control: the GPU path without the fringe guard is detected. It also passes under ASan/UBSan.
+    - Launcher: the converter choice runs with fake GPU builds (ok, failing probe, missing, `CAMERA_GPU=0`), and the supervisor switches to the CPU build after a GPU bridge exits.
+  - *Unverified on hardware:*
+    - that the bionic binary runs from the stick (linker namespace, SELinux) and finds the Iris Xe Vulkan device;
+    - the real GPU time per frame. The CPU's remaining share is about 1 ms of statistics plus copying 10 MB in and 2.4 MB out per frame; a dma-buf import of the IPU6 buffer could remove the 10 MB copy later.

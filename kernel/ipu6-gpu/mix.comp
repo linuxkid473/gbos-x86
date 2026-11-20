@@ -1,0 +1,47 @@
+#version 450
+// Colour from the neighbourhood average in linear light, luminance per point, edges pulled to
+// grey at high gain; then gamma and Y', U, V (linear_colour_mix_rows).
+layout(local_size_x = 16, local_size_y = 16) in;
+#include "common.glsl"
+
+void main()
+{
+	int ox = int(gl_GlobalInvocationID.x), oy = int(gl_GlobalInvocationID.y);
+	if (ox >= P.col_w || oy >= P.col_h)
+		return;
+	int plane = P.col_w * P.col_h, idx = oy * P.col_w + ox, r = P.radius;
+	ivec3 l = ivec3(lin[idx], lin[plane + idx], lin[2 * plane + idx]);
+	ivec3 c;
+	if (r == 0) {
+		c = l;
+	} else {
+		ivec3 a = ivec3(avg[idx], avg[plane + idx], avg[2 * plane + idx]);
+		int ylin = 2126 * l.x + 7152 * l.y + 722 * l.z;	// x 10000
+		int yavg = 2126 * a.x + 7152 * a.y + 722 * a.z;
+		if (yavg <= 0) {
+			c = l;
+		} else {
+			float keep = 1.0;
+			if (P.edges != 0) {
+				int xl = max(ox - 1, 0), xr = min(ox + 1, P.col_w - 1);
+				int yu = max(oy - 1, 0), yd = min(oy + 1, P.col_h - 1);
+				float gx = abs(float(lin[plane + oy * P.col_w + xr] - lin[plane + oy * P.col_w + xl]));
+				float gy = abs(float(lin[plane + yd * P.col_w + ox] - lin[plane + yu * P.col_w + ox]));
+				float rel = (gx + gy) / (float(a.y) + 32.0);
+				float t = clamp(rel - 0.5, 0.0, 1.0);
+				keep = 1.0 - P.edge_desaturation * t;
+			}
+			for (int k = 0; k < 3; k++) {
+				float ratio = float(a[k]) * 10000.0 / float(yavg);
+				ratio = 1.0 + keep * (ratio - 1.0);
+				float v = float(ylin) / 10000.0 * ratio;
+				c[k] = v < 0.0 ? 0 : v > 4.0 * float(LINEAR_MAX) ? 4 * LINEAR_MAX : int(v + 0.5);
+			}
+			soft_clip(c);
+		}
+	}
+	ivec3 g = ivec3(int(lut_gamma[c.x]), int(lut_gamma[c.y]), int(lut_gamma[c.z]));
+	yuv[idx] = (77 * g.x + 150 * g.y + 29 * g.z + 128) >> 8;
+	yuv[plane + idx] = (-43 * g.x - 85 * g.y + 128 * g.z) >> 8;
+	yuv[2 * plane + idx] = (128 * g.x - 107 * g.y - 21 * g.z) >> 8;
+}

@@ -1887,6 +1887,7 @@ static int test_idle_restart_deadline(void)
 	return EXIT_IDLE_FAILED == 4 && EXIT_IDLE_FAILED != 3 ? 0 : 4;
 }
 
+#ifndef IPU6_LOOPBACK_TEST_LIB	/* tools/test_ipu6_gpu.c reuses the helpers above */
 int main(void)
 {
 	(void)capture_to_loopback;
@@ -2044,3 +2045,4 @@ int main(void)
 	puts("IPU6_LOOPBACK_TEST_PASS");
 	return 0;
 }
+#endif

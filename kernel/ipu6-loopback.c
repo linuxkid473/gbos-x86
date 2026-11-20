@@ -540,6 +540,7 @@ static int lsc_count, lsc_active, lsc_pick[2] = { -1, -1 };
 static double lsc_weight, lsc_strength = 1.0, sensor_total_gain = 1.0;
 static uint16_t lsc_map[3][COL_HEIGHT][COL_WIDTH];	/* per colour-grid point */
 static struct { int pick[2]; double weight, strength; unsigned int w, h; } lsc_built = { { -2, -2 }, 0, 0, 0, 0 };
+static unsigned int lsc_generation;	/* counts lsc_map rebuilds (the GPU copy follows it) */
 
 static int load_lsc_table(const char *path)
 {
@@ -636,6 +637,7 @@ static void update_lsc(double rg, double bg, unsigned int width, unsigned int he
 	lsc_built.pick[0] = a; lsc_built.pick[1] = b;
 	lsc_built.weight = wa; lsc_built.strength = lsc_strength;
 	lsc_built.w = width; lsc_built.h = height;
+	lsc_generation++;
 }
 
 static void calculate_white_balance(const uint16_t *raw, unsigned int width,
@@ -1402,6 +1404,11 @@ static void output_rows(void *ctx, unsigned int row0, unsigned int row1)
 	}
 }
 
+#ifdef IPU6_GPU
+static double monotonic_s(void);
+#include "ipu6-gpu.c"
+#endif
+
 static int convert_bayer_yuyv(const uint16_t *raw, unsigned int width,
 			      unsigned int height, unsigned int stride,
 			      unsigned char *out, size_t out_size, double *mean_green)
@@ -1419,6 +1426,18 @@ static int convert_bayer_yuyv(const uint16_t *raw, unsigned int width,
 	calculate_white_balance(raw, width, height, stride, gain_q12, mean_green);
 	if (wb_last_mean[1] > 0)
 		update_lsc(wb_white_rg, wb_white_bg, width, height);
+#ifdef IPU6_GPU
+	if (gpu.ok) {
+		if (gpu_convert(raw, width, height, stride, gain_q12, chroma_radius_for_gain(sensor_total_gain),
+				sensor_total_gain, out) == 0) {
+			tnr_have_previous = 1;
+			return 0;
+		}
+		gpu.ok = 0;
+		tnr_have_previous = 0;	/* the CPU's previous-frame plane is stale */
+		fprintf(stderr, "gpu: disabled for the rest of this run; converting on the CPU\n");
+	}
+#endif
 
 	struct frame_job job = {
 		raw, width, height, stride, gain_q12,
@@ -2761,6 +2780,15 @@ int main(int argc, char **argv)
 	struct bridge_options o;
 
 	(void)probe;
+#ifdef IPU6_GPU
+	/* --probe-gpu: can this build convert on the GPU here? (the launcher asks before using it) */
+	if (argc == 2 && !strcmp(argv[1], "--probe-gpu")) {
+		if (gpu_init())
+			return 1;
+		printf("gpu: Vulkan compute on %s\n", gpu.name);
+		return 0;
+	}
+#endif
 	if (parse_bridge_args(argc, argv, &o)) {
 		fprintf(stderr, "usage: %s [--sensor ov5675|ov8856] [--rotate 0|180] [--idle-stop SECONDS] "
 			"/dev/mediaN /dev/videoN [calibration dir or colour-matrix table]\n", argv[0]);
@@ -2775,6 +2803,16 @@ int main(int argc, char **argv)
 	       o.rotate180 ? "; output rotated 180" : "");
 	if (o.calibration)
 		load_calibration(o.calibration, o.profile->cal_prefix);
+#ifdef IPU6_GPU
+	/* IPU6_GPU=0 (gbos.cfg CAMERA_GPU=0, via the launcher) keeps this build on the CPU. */
+	const char *use_gpu = getenv("IPU6_GPU");
+	if (use_gpu && !strcmp(use_gpu, "0"))
+		printf("gpu: off (IPU6_GPU=0); converting on the CPU\n");
+	else if (gpu_init() == 0)
+		printf("gpu: converting on %s (Vulkan compute)\n", gpu.name);
+#else
+	printf("gpu: not in this build; converting on the CPU\n");
+#endif
 	return capture_to_loopback(o.media, o.output, o.profile);
 }
 #endif

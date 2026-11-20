@@ -33,7 +33,7 @@ grep -Fq '"$BRIDGE" --sensor ov8856 --rotate "$REAR_ROTATION" /dev/media0 /dev/v
 grep -Fq '"$BRIDGE" /dev/media0 /dev/video64 ${CAL:+"$CAL"}' "$BRIDGE"
 grep -Fq 'REAR_LOG=$LOGDIR/camera-bridge-rear-runtime.txt' "$BRIDGE"
 # Order: the rear starts only after the front streams, and the HAL restart comes after both.
-front_ready=$(grep -n 'wait_active "$LOGDIR/camera-bridge-runtime.txt" "$BRIDGE_PID"' "$BRIDGE" | cut -d: -f1)
+front_ready=$(grep -n 'wait_active "$LOGDIR/camera-bridge-runtime.txt" "$BRIDGE_PID"' "$BRIDGE" | tail -n 1 | cut -d: -f1)
 rear_start=$(grep -n '"$BRIDGE" --sensor ov8856' "$BRIDGE" | head -n 1 | cut -d: -f1)
 rear_ready=$(grep -n 'wait_active "$REAR_LOG" "$REAR_PID_RUN"' "$BRIDGE" | cut -d: -f1)
 hal_restart=$(grep -n 'killall -9 android.hardware.camera.provider-usb-service' "$BRIDGE" | cut -d: -f1)
@@ -43,7 +43,8 @@ hal_restart=$(grep -n 'killall -9 android.hardware.camera.provider-usb-service' 
 # and the script only ends once neither runs.
 grep -Fq 'BRIDGE_RESTARTS=3' "$BRIDGE"
 grep -Fq 'while [ -n "$BRIDGE_PID$REAR_PID_RUN" ]; do' "$BRIDGE"
-[ "$(grep -c '>> "$LOGDIR/camera-bridge-runtime.txt" 2>&1 &\|>> "$REAR_LOG" 2>&1 &' "$BRIDGE")" = 2 ]
+# (front and rear restarts, and the front's CPU fallback when the GPU bridge doesn't start)
+[ "$(grep -c '>> "$LOGDIR/camera-bridge-runtime.txt" 2>&1 &\|>> "$REAR_LOG" 2>&1 &' "$BRIDGE")" = 3 ]
 if sed -n '/^while \[ -n "$BRIDGE_PID$REAR_PID_RUN" \]; do/,/^done/p' "$BRIDGE" | grep -Eq '(^|[^a-z])exit( |$)|killall|kill [^-]'; then
     echo "bridge supervision must not exit or kill" >&2
     exit 1
@@ -116,6 +117,7 @@ sup_out=$(
     sleep() { :; }
     FAKE_ARGS=$tmp/args; export FAKE_ARGS
     BRIDGE=$tmp/fake-bridge LOGDIR=$tmp REAR_LOG=$tmp/rear.log CAL= REAR_ROTATION=0 IDLE_STOP=15
+    BRIDGE_CPU=$tmp/fake-bridge BRIDGE_GPU=$tmp/no-gpu-build
     sh -c 'exit 4' & BRIDGE_PID=$!
     REAR_PID_RUN=
     eval "$supervisor"
@@ -124,9 +126,50 @@ sup_out=$(
 echo "$sup_out" | grep -q 'ERROR: front bridge out of restarts'
 [ "$(wc -l < "$tmp/args")" = 4 ]
 [ "$(grep -c '^--idle-stop 0 /dev/media0 /dev/video64' "$tmp/args")" = 4 ]
+# A GPU bridge that exits is restarted with the CPU build.
+printf '#!/bin/sh\necho "GPU $*" >> "$FAKE_ARGS"\nexit 1\n' > "$tmp/fake-gpu"
+chmod +x "$tmp/fake-gpu"
+: > "$tmp/args"
+sup_out=$(
+    set +e
+    sleep() { :; }
+    FAKE_ARGS=$tmp/args; export FAKE_ARGS
+    LOGDIR=$tmp REAR_LOG=$tmp/rear.log CAL= REAR_ROTATION=0 IDLE_STOP=0
+    BRIDGE_CPU=$tmp/fake-bridge BRIDGE_GPU=$tmp/fake-gpu BRIDGE=$tmp/fake-gpu
+    sh -c 'exit 1' & BRIDGE_PID=$!
+    REAR_PID_RUN=
+    eval "$supervisor"
+) || true
+echo "$sup_out" | grep -q 'GPU bridge exited; restarts use the CPU converter'
+! grep -q '^GPU' "$tmp/args"
+[ "$(grep -c '^--idle-stop 0 /dev/media0 /dev/video64' "$tmp/args")" = 3 ]
 # The rear gets its own switch; the front's setting is untouched by it.
 grep -Fq '"$BRIDGE" --sensor ov8856 --rotate "$REAR_ROTATION" --idle-stop "$REAR_IDLE_STOP"' "$BRIDGE"
 grep -Fq 'REAR_IDLE_STOP=0' "$BRIDGE"
+
+# Converter choice, run for real: the GPU build only when --probe-gpu succeeds and CAMERA_GPU is
+# not 0; otherwise (missing, failing probe) the static CPU build.
+choice=$(awk '/^# --- converter choice/ { on = 1; next } /^# --- end of converter choice/ { exit } on { print }' "$BRIDGE")
+echo "$choice" | grep -q 'probe=$(timeout 10 "$BRIDGE_GPU" --probe-gpu 2>&1)'
+printf '#!/bin/sh\necho "gpu: Vulkan compute on Fake GPU"\n' > "$tmp/gpu-ok"
+printf '#!/bin/sh\necho "gpu: no libvulkan" >&2\nexit 1\n' > "$tmp/gpu-bad"
+chmod +x "$tmp/gpu-ok" "$tmp/gpu-bad"
+choose() {	# CAMERA_GPU value, GPU binary -> chosen binary
+    (
+        cfg() { [ "$1" = CAMERA_GPU ] && printf '%s' "$cfg_gpu"; }
+        cfg_gpu=$1 BRIDGE_CPU=/cpu BRIDGE_GPU=$2
+        eval "$choice" >/dev/null
+        echo "$BRIDGE"
+    )
+}
+[ "$(choose '' "$tmp/gpu-ok")" = "$tmp/gpu-ok" ]
+[ "$(choose 1 "$tmp/gpu-ok")" = "$tmp/gpu-ok" ]
+[ "$(choose 0 "$tmp/gpu-ok")" = /cpu ]
+[ "$(choose '' "$tmp/gpu-bad")" = /cpu ]
+[ "$(choose '' "$tmp/missing")" = /cpu ]
+# A GPU bridge that fails to start, or exits later, is replaced by the CPU build.
+grep -Fq 'WARNING: GPU bridge did not reach streaming state; using the CPU converter' "$BRIDGE"
+[ "$(grep -c 'GPU bridge exited; restarts use the CPU converter' "$BRIDGE")" = 2 ]
 
 # Front uevent: byte-identical to the one the launcher wrote before the rear camera existed.
 cat > "$tmp/front.expected" <<'EOF'

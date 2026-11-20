@@ -271,11 +271,30 @@ elif [ -e "$WINISP" ]; then
     echo "OV5678 Windows ISP values: off"
 fi
 
-BRIDGE=/postinstall/gbos/installer/bin/ipu6-loopback
-if [ ! -x "$BRIDGE" ]; then
+BRIDGE_CPU=/postinstall/gbos/installer/bin/ipu6-loopback
+BRIDGE_GPU=/postinstall/gbos/installer/bin/vulkan/ipu6-loopback
+if [ ! -x "$BRIDGE_CPU" ]; then
     echo "ERROR: missing IPU6 loopback bridge binary"
     exit 1
 fi
+# Converter: the Android-native build does the per-pixel work on the GPU (Vulkan compute; same
+# picture as the CPU converter). It is used only when it starts and finds a Vulkan GPU
+# (--probe-gpu); CAMERA_GPU=0 in gbos.cfg keeps the static CPU build. A GPU bridge that fails to
+# start, or exits later, is replaced by the CPU build (start_bridge below, and the supervisor).
+# --- converter choice (tools/test_ipu6_camera_bridge.sh runs this block) ---
+BRIDGE=$BRIDGE_CPU
+probe=
+if [ "$(cfg CAMERA_GPU)" = 0 ]; then
+    echo "camera converter: CPU (CAMERA_GPU=0)"
+elif [ ! -x "$BRIDGE_GPU" ]; then
+    echo "camera converter: CPU (no GPU build at $BRIDGE_GPU)"
+elif probe=$(timeout 10 "$BRIDGE_GPU" --probe-gpu 2>&1); then
+    BRIDGE=$BRIDGE_GPU
+    echo "camera converter: GPU ($probe)"
+else
+    echo "camera converter: CPU (GPU build unusable: $(echo "$probe" | tail -n 1))"
+fi
+# --- end of converter choice ---
 # Optional colour matrices and lens shading extracted from each module's Windows tuning file
 # (tools/extract_aiqb_ccm.py): ov5678_* (front) and ov8856_* (rear). Proprietary data: only ever
 # on the stick, never in git.
@@ -288,13 +307,23 @@ else
     "$BRIDGE" /dev/media0 /dev/video64 ${CAL:+"$CAL"} \
         > "$LOGDIR/camera-bridge-runtime.txt" 2>&1 &
     BRIDGE_PID=$!
-    echo "Started bridge pid=$BRIDGE_PID"
+    echo "Started bridge pid=$BRIDGE_PID ($BRIDGE)"
 fi
 
-if ! wait_active "$LOGDIR/camera-bridge-runtime.txt" "$BRIDGE_PID"; then
-    echo "ERROR: IPU6 loopback bridge did not reach streaming state"
+if ! wait_active "$LOGDIR/camera-bridge-runtime.txt" "$BRIDGE_PID" && [ "$BRIDGE" = "$BRIDGE_GPU" ]; then
+    echo "WARNING: GPU bridge did not reach streaming state; using the CPU converter"
     kill "$BRIDGE_PID" 2>/dev/null || true
     wait "$BRIDGE_PID" 2>/dev/null || true
+    BRIDGE=$BRIDGE_CPU
+    "$BRIDGE" /dev/media0 /dev/video64 ${CAL:+"$CAL"} \
+        >> "$LOGDIR/camera-bridge-runtime.txt" 2>&1 &
+    BRIDGE_PID=$!
+    echo "Started bridge pid=$BRIDGE_PID ($BRIDGE)"
+    wait_active "$LOGDIR/camera-bridge-runtime.txt" "$BRIDGE_PID" || BRIDGE_PID=
+fi
+if [ -z "$BRIDGE_PID" ] || ! kill -0 "$BRIDGE_PID" 2>/dev/null; then
+    echo "ERROR: IPU6 loopback bridge did not reach streaming state"
+    [ -n "$BRIDGE_PID" ] && kill "$BRIDGE_PID" 2>/dev/null || true
     exit 1
 fi
 
@@ -375,6 +404,10 @@ while [ -n "$BRIDGE_PID$REAR_PID_RUN" ]; do
         if ran_long "$FRONT_SINCE"; then
             FRONT_RESTARTS=0
         fi
+        if [ "$BRIDGE" = "$BRIDGE_GPU" ]; then
+            BRIDGE=$BRIDGE_CPU
+            echo "$(date +%T) GPU bridge exited; restarts use the CPU converter"
+        fi
         if [ "$status" = "$EXIT_IDLE_FAILED" ] && [ "$FRONT_IDLE_STOP" != 0 ]; then
             FRONT_IDLE_STOP=0
             start_front
@@ -395,6 +428,10 @@ while [ -n "$BRIDGE_PID$REAR_PID_RUN" ]; do
         REAR_PID_RUN=
         if ran_long "$REAR_SINCE"; then
             REAR_RESTARTS=0
+        fi
+        if [ "$BRIDGE" = "$BRIDGE_GPU" ]; then
+            BRIDGE=$BRIDGE_CPU
+            echo "$(date +%T) GPU bridge exited; restarts use the CPU converter"
         fi
         if [ "$rear_status" = "$EXIT_IDLE_FAILED" ] && [ "$REAR_IDLE_STOP" != 0 ]; then
             REAR_IDLE_STOP=0
