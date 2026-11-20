@@ -12,8 +12,10 @@
 I=$G/installer
 tool() { $I/lib/ld-musl-x86_64.so.1 --library-path $I/lib $I/bin/"$@"; }
 TTY=/dev/tty1
+SPEECH=0; [ -f /a11y/active ] && SPEECH=1   # stage0's screen reader (usb/a11y/) is running: keep the text short and speakable
 say() {
-  echo "$*" > $TTY
+  # Rulers like "=====" are read out character by character; leave them out when it speaks (they stay in the log).
+  case "$*" in ======*) [ $SPEECH = 1 ] || echo "$*" > $TTY;; *) echo "$*" > $TTY;; esac
   _uptime_s=$(cut -d. -f1 /proc/uptime 2>/dev/null || echo 0)
   echo "[${_uptime_s}s] $*" >> $L/install.log
 }
@@ -86,7 +88,7 @@ done
 # Cache the kernel in RAM and unmount the EFI partition so it does not keep the target disk busy
 mkdir -p /tmp && cp "$KERNEL" /tmp/BOOTX64.EFI && KERNEL=/tmp/BOOTX64.EFI
 umount /mnt/stickefi 2>/dev/null || true
-FILES="super.img super.layout hook.sh aidiag.sh early_patch.sh hwdetect.sh apex_patch.sh crossystem bootdisk.img libkm_compat.so system_ext_manifest.xml soft_gk"
+FILES="super.img super.layout hook.sh aidiag.sh native_zygote.sh early_patch.sh hwdetect.sh apex_patch.sh crossystem bootdisk.img libkm_compat.so system_ext_manifest.xml soft_gk"
 DIRS="firmware patched audio installer kmod modules surface ksu"
 for f in $FILES; do [ -f $G/$f ] || die "missing gbos/$f on the stick"; done
 for d in $DIRS; do [ -d $G/$d ] || die "missing gbos/$d/ on the stick"; done
@@ -302,6 +304,7 @@ say "=============================================================="
 say " Target Disk: $TD ($KIND)"
 say "   Model:  $MODEL"
 say "   Serial: $SERIAL"
+[ $SPEECH = 1 ] && say "   Serial, one character at a time: $(printf '%s' "$SERIAL" | sed 's/./&, /g')"
 say "   Size:   ${GB} GB"
 say "=============================================================="
 
@@ -506,10 +509,15 @@ copy_large_file() {
   [ $_tot_mb -eq 0 ] && _tot_mb=1
   dd if="$_src" of="$_dst" bs=4M conv=fsync 2>/dev/null &
   _pid=$!
+  _lastq=
   while kill -0 $_pid 2>/dev/null; do
     _cur=$(stat -c %s "$_dst" 2>/dev/null || echo 0)
     _pct=$(( _cur * 100 / _tot ))
     _cur_mb=$(( _cur / 1048576 ))
+    if [ $SPEECH = 1 ]; then   # screen reader: one short line per 10 percent instead of a redrawn bar
+      [ "$((_pct / 10))" != "$_lastq" ] && { _lastq=$((_pct / 10)); echo "  $_label: $((_lastq * 10)) percent" > $TTY; }
+      sleep 1; continue
+    fi
     _bars=$(( _pct / 4 ))
     _spaces=$(( 25 - _bars ))
     _pbar=""
@@ -520,7 +528,8 @@ copy_large_file() {
     sleep 1
   done
   wait $_pid || die "copy $_label failed"
-  printf "\r  %s: [=========================] 100%% (%d/%d MB) - OK\n" "$_label" "$_tot_mb" "$_tot_mb" > $TTY
+  if [ $SPEECH = 1 ]; then echo "  $_label: done" > $TTY
+  else printf "\r  %s: [=========================] 100%% (%d/%d MB) - OK\n" "$_label" "$_tot_mb" "$_tot_mb" > $TTY; fi
   echo "$_label: copied successfully" >> $L/install.log
 }
 
@@ -555,6 +564,7 @@ _start_used=$(df -k /mnt/nsys 2>/dev/null | awk 'NR>1 {print $3}')
 
 ( (cd "$G" && tar -cf - $DIRS) | (cd /mnt/nsys/gbos && tar -xf -) ) &
 _pid=$!
+_lastq=
 while kill -0 $_pid 2>/dev/null; do
   _cur_used=$(df -k /mnt/nsys 2>/dev/null | awk 'NR>1 {print $3}')
   _copied_kb=$(( _cur_used - _start_used ))
@@ -562,6 +572,10 @@ while kill -0 $_pid 2>/dev/null; do
   _cur_mb=$(( _copied_kb / 1024 ))
   [ $_cur_mb -gt $_tot_mb ] && _cur_mb=$_tot_mb
   _pct=$(( _cur_mb * 100 / _tot_mb ))
+  if [ $SPEECH = 1 ]; then
+    [ "$((_pct / 10))" != "$_lastq" ] && { _lastq=$((_pct / 10)); echo "  Drivers: $((_lastq * 10)) percent" > $TTY; }
+    sleep 1; continue
+  fi
   _bars=$(( _pct / 4 ))
   _spaces=$(( 25 - _bars ))
   _pbar=""
@@ -575,7 +589,8 @@ wait $_pid || {
   say "Fallback to copying directory by directory..."
   for d in $DIRS; do cp -r "$G/$d" /mnt/nsys/gbos/ || die "copy $d/ failed"; done
 }
-printf "\r  Drivers: [=========================] 100%% (%d/%d MB) - OK\n" "$_tot_mb" "$_tot_mb" > $TTY
+if [ $SPEECH = 1 ]; then echo "  Drivers: done" > $TTY
+else printf "\r  Drivers: [=========================] 100%% (%d/%d MB) - OK\n" "$_tot_mb" "$_tot_mb" > $TTY; fi
 echo "Drivers: copied successfully" >> $L/install.log
 
 cp /gbos/busybox /mnt/nsys/busybox 2>/dev/null
@@ -638,32 +653,13 @@ if [ "$INSTALL_MODE" = dualboot ]; then
     case "/dev/$_p" in "$TARGET_SYS"|"$TARGET_DATA"|"$TARGET_EFI") continue;; esac
     _mroot=$(mktemp -d)
     if mount /dev/$_p "$_mroot" 2>/dev/null || mount -t ext4 /dev/$_p "$_mroot" 2>/dev/null; then
-      # Dynamically probe GPU for Intel Xe / Meteor / Lunar Lake architectures
-      _gpu_flags=""
-      for _pci_dev in /sys/bus/pci/devices/*; do
-        _pci_class=$(cat "$_pci_dev/class" 2>/dev/null)
-        case "$_pci_class" in
-          0x03*)
-            _pci_vendor=$(cat "$_pci_dev/vendor" 2>/dev/null)
-            _pci_id=$(cat "$_pci_dev/device" 2>/dev/null | sed 's/^0x//')
-            if [ "$_pci_vendor" = "0x8086" ]; then
-              # Meteor Lake (7d4x-7d6x), Lunar Lake (64xx), Arrow Lake (b6xx), Arc Alchemist (56xx), Battlemage (e2xx)
-              case "$_pci_id" in
-                7d[0-9a-f][0-9a-f]|64[0-9a-f][0-9a-f]|b6[0-9a-f][0-9a-f]|56[0-9a-f][0-9a-f]|e2[0-9a-f][0-9a-f])
-                  _gpu_flags="module_blacklist=i915 i915.force_probe=!$_pci_id xe.force_probe=$_pci_id "
-                  ;;
-              esac
-            fi
-            ;;
-        esac
-      done
       _grub_entry="
 # Googlebook OS (gbOS86) Persistent
 menuentry \"Googlebook OS (gbOS86)\" --class android --class os {
     insmod part_gpt
     insmod fat
     search --no-floppy --fs-uuid --set=root $_esp_uuid
-    linux /EFI/gbos86/BOOTX64.EFI ibt=off i8042.nopnp ${_gpu_flags}androidboot.setupwizard.mode=DISABLED usbcore.autosuspend=-1
+    linux /EFI/gbos86/BOOTX64.EFI ibt=off i8042.nopnp androidboot.setupwizard.mode=DISABLED usbcore.autosuspend=-1
 }"
       _added=0
       _custom_sourced=0

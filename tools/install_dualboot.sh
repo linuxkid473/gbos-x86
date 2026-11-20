@@ -195,7 +195,7 @@ mkdir -p "$MNT_SYS/EFI/BOOT" "$MNT_SYS/gbos/logs"
 [ -f "$U/out/BOOTX64.EFI" ] && cp "$U/out/BOOTX64.EFI" "$MNT_SYS/EFI/BOOT/BOOTX64.EFI"
 [ -f "$ROOT/kernel/out/busybox" ] && cp "$ROOT/kernel/out/busybox" "$MNT_SYS/busybox"
 
-for f in hook.sh optimize.sh aidiag.sh early_patch.sh hwdetect.sh install.sh apex_patch.sh gbos.cfg \
+for f in hook.sh optimize.sh aidiag.sh native_zygote.sh early_patch.sh hwdetect.sh install.sh apex_patch.sh gbos.cfg \
          crossystem bootdisk.img libkm_compat.so system_ext_manifest.xml soft_gk; do
   [ -f "$U/$f" ] && cp "$U/$f" "$MNT_SYS/gbos/$f"
 done

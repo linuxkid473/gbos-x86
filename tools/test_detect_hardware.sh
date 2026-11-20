@@ -42,6 +42,7 @@ test_dmi() {
 test_dmi "LENOVO" "IdeaPad Slim 5 14IMH9" "IdeaPad Slim 5 14IMH9" "83DA" "Lenovo IdeaPad Slim 5 14IMH9"
 test_dmi "Dell Inc." "Latitude" "None" "Latitude 5300" "Dell Latitude 5300"
 test_dmi "HP" "HP ENVY Laptop" "System Version" "HP ENVY Laptop 13-aq0xxx" "HP ENVY Laptop 13-aq0xxx"
+test_dmi "HP" "103C_5335KV G=N L=CON B=HP S=PAV X=Null " "Type1ProductConfigId" "HP Pavilion Notebook " "HP Pavilion Notebook"
 test_dmi "Microsoft Corporation" "Surface Laptop" "1.0" "Surface Laptop 7" "Microsoft Surface Laptop 7"
 
 # 2. Test Display Resolution & Density Calculation

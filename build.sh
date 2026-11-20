@@ -169,7 +169,7 @@ REL_KSU=https://github.com/tiann/KernelSU/releases/download/v3.3.1
 KSU_APK=KernelSU_v3.3.1_32680-release.apk;                  KSU_APK_SHA=b4a059ace71de2fa65cc7f12b1c58d55fc23ab25e057ee4230ce779742abe450
 KSUD=ksud-x86_64-linux-android;                             KSUD_SHA=5324a1e8f2f3c74dc69624c4cd973fb9bc1d5da3614a2f2e694583f73bd13cbd
 # SwiftShader as an Android Vulkan HAL (tools/swiftshader-android/build.sh): hook.sh binds it over Google's Intel Vulkan driver on
-# laptops without an Intel GPU (AMD). Release v38 (tag to be created); tar contains patched/vulkan.swiftshader.so.
+# laptops without an Intel GPU (AMD, NVIDIA) or on older Intel laptops (Gen <= 8 Broadwell/Haswell) lacking hardware Vulkan in Google's image.
 REL_SWR=https://github.com/linuxkid473/gbos-x86/releases/download/v38
 SWR=gbos86-swr-r1.tar.xz;                                  SWR_SHA=7faaa84e3453523ae80d3792983e13d88324e6ce66367a93260e53541147f66a
 # The Google build comes from lapis/BUILD (one place to change when moving to a new build: see porting.md)

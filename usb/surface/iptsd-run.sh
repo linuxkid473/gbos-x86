@@ -17,6 +17,11 @@ L=$G/logs/boot-$N
 LOG=$L/iptsd.txt
 [ -x $S/iptsd ] && [ -x $S/iptsd-check-device ] || exit 0
 export IPTSD_CONFIG_FILE=$S/iptsd.conf
+if [ -f $S/Vendor_045e_Product_0c9f.idc ] && [ ! -f /data/system/devices/idc/Vendor_045e_Product_0c9f.idc ]; then
+  mkdir -p /data/system/devices/idc 2>/dev/null
+  cp $S/Vendor_045e_Product_0c9f.idc /data/system/devices/idc/ 2>/dev/null
+  chmod 0644 /data/system/devices/idc/Vendor_045e_Product_0c9f.idc 2>/dev/null
+fi
 echo "$(date +%T) iptsd-run started (config $IPTSD_CONFIG_FILE)" >> $LOG
 ( sleep 25; echo "== input devices (25 s after start)"; cat /proc/bus/input/devices ) >> $LOG 2>&1 &
 seen=0; waited=0

@@ -23,9 +23,11 @@ kernel/drivers/hid/hid-uclogic-test.ko
 kernel/drivers/i2c/algos/i2c-algo-bit.ko
 kernel/drivers/iio/test/iio-test-format.ko
 kernel/drivers/input/tests/input_test.ko
+kernel/drivers/misc/cardreader/rtsx_pci.ko
 kernel/drivers/misc/open-dice.ko
 kernel/drivers/misc/vcpu_stall_detector.ko
 kernel/drivers/mmc/host/cqhci.ko
+kernel/drivers/mmc/host/rtsx_pci_sdmmc.ko
 kernel/drivers/mmc/host/sdhci-pci.ko
 kernel/drivers/mmc/host/sdhci-uhs2.ko
 kernel/drivers/mmc/host/sdhci.ko

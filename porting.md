@@ -1,6 +1,6 @@
 # Porting gbOS86 to a new Google build
 
-Google's lapis build is pinned in [`lapis/BUILD`](lapis/BUILD) (currently `16658739`, `CL3B.260622.276.R4`). A new build changes the
+Google's lapis build is pinned in [`lapis/BUILD`](lapis/BUILD) (currently `16693588`, `CL3B.260622.276.R5`). A new build changes the
 files our patches were made from. This page is the whole procedure; the tools do the mechanical parts and say what a person
 has to look at.
 
@@ -43,7 +43,7 @@ hook: PATCH-STATUS 4 applied, 1 not applied
 ## Reading the `port_build` output
 
 * `OK ... identical to the shipped file`: the patcher reproduces what is already in `usb/` (the proof that the tool, not a
-  lucky hand edit, makes our patches; on builds 16452207 and 16658739 all six patches and the VINTF manifest match byte for byte).
+  lucky hand edit, makes our patches; on builds 16452207, 16658739 and 16693588 all six patches and the VINTF manifest match byte for byte).
 * `FAIL ...`: a patch could not be made. Nothing is written. Fix the patcher's pattern (the table above), run again.
 * `WARN anchor GONE: ...`: a file, line or property the boot scripts assume has moved or been renamed. Each line says what
   breaks and lists similar paths. Typical case: Google renames a Trusty-backed service's VINTF fragment, so `hook.sh` no longer hides
@@ -54,7 +54,7 @@ hook: PATCH-STATUS 4 applied, 1 not applied
 * `FAIL isa ...: NOT emulated`: the build uses an instruction family the kernel emulator lacks (AVX-512, AMX, ...). It needs an
   emulator addition (`kernel/isa_emu_patch/`, kernel rebuild) or a CPU-feature gate, as for the existing ones. Instructions listed
   `OK ... emulated` need nothing.
-* `INFO other APEX libcrypto ...`: libcrypto copies that contain SHA-NI but are not patched today (builds 16452207 and 16658739: the
+* `INFO other APEX libcrypto ...`: libcrypto copies that contain SHA-NI but are not patched today (builds 16452207, 16658739 and 16693588: the
   clearkey, crosfp and StrongBox APEXes). They are rarely used here; to patch one, add an `apex` target to `port_build.py`.
 
 ## What no tool can check (needs the laptop)
