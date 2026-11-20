@@ -40,9 +40,9 @@ su_die() { su_say "ERROR: $*"; su_cleanup_tmp; exit 1; }
 # ---------------------------------------------------------------------------------------------------------------- environment
 su_tmp() {
   [ -n "${W:-}" ] && return 0
-  _b=${TMPDIR:-/tmp}; [ -d "$_b" ] && [ -w "$_b" ] || _b=/data/local/tmp
-  [ -d "$_b" ] || { _b=/tmp; mkdir -p "$_b"; }
-  W=$(mktemp -d "$_b/sysupdate.XXXXXX") || { echo "sysupdate: cannot make a temporary folder" >&2; exit 1; }
+  _tb=${TMPDIR:-/tmp}; [ -d "$_tb" ] && [ -w "$_tb" ] || _tb=/data/local/tmp
+  [ -d "$_tb" ] || { _tb=/tmp; mkdir -p "$_tb"; }
+  W=$(mktemp -d "$_tb/sysupdate.XXXXXX") || { echo "sysupdate: cannot make a temporary folder" >&2; exit 1; }
   # Inside Android /system/bin has toybox applets (no bc, a different awk): use the stick's busybox for every applet.
   [ -z "${SU_BB:-}" ] && [ -x /postinstall/busybox ] && [ -d /system/bin ] && [ ! -d /new ] && SU_BB=/postinstall/busybox
   if [ -n "${SU_BB:-}" ]; then
@@ -391,8 +391,8 @@ su_kernel_forward() {
   sync; SU_REBOOT=1; su_log "kernel replaced ($KREL/BOOTX64.EFI)"
 }
 su_kernel_undo() {
-  [ -f "$U/kernel.prev" ] || return 0
   _kd=$EFIMNT/$KREL
+  [ -f "$U/kernel.prev" ] || { rm -f "$_kd/BOOTX64.NEW"; return 0; }   # the switch never got to the kernel: drop the prepared copy
   _kh=$(su_sha "$U/kernel.prev")
   [ "$(su_sha "$_kd/BOOTX64.EFI")" = "$_kh" ] && { rm -f "$_kd/BOOTX64.NEW"; return 0; }
   cp "$U/kernel.prev" "$_kd/BOOTX64.NEW" && su_dropcache && [ "$(su_sha "$_kd/BOOTX64.NEW")" = "$_kh" ] || { SU_ERR="could not restore the previous kernel"; return 1; }

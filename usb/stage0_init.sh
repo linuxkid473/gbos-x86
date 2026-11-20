@@ -132,6 +132,11 @@ SHELL_AT=none; LOAD_I915=auto; LOAD_WIFI=0; EXTRA_SLEEP=0; MODE=boot
 [ "$FROM" = stick ] && [ -f $G/gbos.cfg ] && grep -q '^MODE=live' $G/gbos.cfg 2>/dev/null && sed -i 's/^MODE=live/MODE=ask/' $G/gbos.cfg 2>/dev/null || true
 case "$MODE" in install) ;; *) MODE=boot;; esac
 [ $FROM = nvme ] && MODE=boot
+# System updates (docs/system-update.md): early_patch.sh, sourced by gbos.cfg above, normally did this already (GBOS_SYSUPDATE_RAN).
+# Fallback for a gbos.cfg without that line: the same function from early_patch.sh, before hwdetect and super.img.
+if [ $FROM = nvme ] && [ -z "$GBOS_SYSUPDATE_RAN" ] && [ -f $G/early_patch.sh ] && sh -n $G/early_patch.sh 2>/dev/null; then
+  . $G/early_patch.sh
+fi
 
 # Hardware inventory
 {

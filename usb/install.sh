@@ -59,8 +59,24 @@ check() { cmp -s "$1" "$2" || die "verify failed: $2"; echo "ok $2" >> $L/instal
 # missing stamp, forces the full compare, copy and verify.
 STAMPED="super.img firmware modules"
 stamp_of() { _l=$(find "$G/$1" -type f -exec stat -c '%n %s %Y' {} + 2>/dev/null | sort); [ -n "$_l" ] || return 1; printf '%s\n' "$_l" | sha256sum | cut -d' ' -f1; }
-stamp_same() { [ -z "$UPDATE_FULL" ] && [ -f /mnt/nsys/gbos/.stamps/$1 ] && _s=$(stamp_of $1) && [ "$(cat /mnt/nsys/gbos/.stamps/$1)" = "$_s" ]; }
+# Stamps are only trusted while the installed set is the one they were saved for (.stamps/set = sha256 of its system.manifest, written
+# by sysupdate.sh stamp-set): a system update made without the stick changes system.manifest (and deletes .stamps), so a stale stamp can
+# never pair the stick's scripts with the update's super.img. super.img is never skipped when a file tied to its Google build differs
+# (M1_PAIR_CHANGED, from sysupdate.sh menu1-check).
+stamp_same() {
+  [ -z "$UPDATE_FULL" ] && [ "${M1_STAMPS_TRUSTED:-0}" = 1 ] || return 1
+  [ "$1" = super.img ] && [ "${M1_PAIR_CHANGED:-1}" != 0 ] && return 1
+  [ -f /mnt/nsys/gbos/.stamps/$1 ] && _s=$(stamp_of $1) && [ "$(cat /mnt/nsys/gbos/.stamps/$1)" = "$_s" ]
+}
 stamp_save() { _s=$(stamp_of $1) && mkdir -p /mnt/nsys/gbos/.stamps && printf '%s\n' "$_s" > /mnt/nsys/gbos/.stamps/$1; }
+# The system set (usb/sysupdate.sh, docs/system-update.md): after a copy, the installed system.manifest is the stick's only when it matches
+# the stick's files; an update's leftovers (state, backups, kernel copy) are dropped; then the stamps are tied to that set.
+m1_finish() {
+  [ -f $G/sysupdate.sh ] && sh $G/sysupdate.sh menu1-finish $G /mnt/nsys/gbos >> $L/install.log 2>&1
+  for i in $STAMPED; do stamp_save $i || say "  (could not save the update stamp for $i; the next update will do a full compare)"; done
+  [ -f $G/sysupdate.sh ] && sh $G/sysupdate.sh stamp-set /mnt/nsys/gbos >> $L/install.log 2>&1
+  return 0
+}
 is_skipped() { case " $SKIP " in *" $1 "*) return 0;; esac; return 1; }
 
 # Write the installed system's gbos.cfg from the stick's: it boots normally.
@@ -165,6 +181,26 @@ if [ "${ACTION:-install}" = update ]; then
   [ "$NEFI" = "$(findfs LABEL=GBOS_EFI 2>/dev/null)" ] || [ $SHARED_EFI = 1 ] || die "$NEFI is not a gbOS86 EFI partition (no EFI/gbos86/BOOTX64.EFI); nothing was changed"
   say "Saving the installed system's logs to the stick (gbos/logs/boot-$N/nvme-logs) ..."
   save_logs /mnt/nsys/gbos 3
+  # Which system sets: the stick's and the installed one (seq, Google build, commit). Refuse an older Google build over a newer one:
+  # Android's /data was upgraded by the newer build and may not start on the older (a Reinstall wipes it).
+  M1_STAMPS_TRUSTED=0; M1_PAIR_CHANGED=1
+  if [ -f $G/sysupdate.sh ]; then
+    sh $G/sysupdate.sh menu1-check $G /mnt/nsys/gbos > /tmp/menu1-check 2>> $L/install.log
+    cat /tmp/menu1-check >> $L/install.log
+    m1() { sed -n "s/^$1=//p" /tmp/menu1-check | head -n 1; }
+    M1_STAMPS_TRUSTED=$(m1 stamps_trusted); M1_PAIR_CHANGED=$(m1 pairing_changed)
+    say "  installed: Google build $(m1 nvme_build), $(m1 nvme_set)"
+    say "  stick:     Google build $(m1 stick_build), $(m1 stick_set)"
+    [ "$(m1 update_pending)" = 1 ] && say "  A system update made without the stick is pending on the laptop; the stick's system replaces it."
+    [ "$(m1 inbox)" != 0 ] && say "  Note: an update is waiting in update.inbox on the laptop; it is checked at the next start."
+    if [ "$(m1 downgrade)" = 1 ]; then
+      say ""
+      say "The stick has an OLDER Google build ($(m1 stick_build)) than the laptop ($(m1 nvme_build))."
+      say "Android's data was upgraded by the newer build and may not start on the older one. Reinstall (menu 2) is the safe way back."
+      ask "Type DOWNGRADE to install the older build anyway, anything else cancels: "
+      [ "$REPLY" = DOWNGRADE ] || { umount /mnt/nefi /mnt/nsys 2>/dev/null; halt_here "Cancelled. Nothing was changed."; }
+    fi
+  fi
   say "Updating the installed system (data is not touched) ..."
   SKIP=""
   for f in $FILES; do
@@ -187,7 +223,7 @@ if [ "${ACTION:-install}" = update ]; then
   if [ $SHARED_EFI = 1 ]; then check $KERNEL /mnt/nefi/EFI/gbos86/BOOTX64.EFI; else check $KERNEL /mnt/nefi/EFI/BOOT/BOOTX64.EFI; fi
   for f in $FILES; do is_skipped $f || check $G/$f /mnt/nsys/gbos/$f; done
   for d in $DIRS; do is_skipped $d && continue; (cd $G && find $d -type f) | while read f; do check $G/$f /mnt/nsys/gbos/$f; done || exit 1; done || die "verify failed"
-  for i in $STAMPED; do stamp_save $i || say "  (could not save the update stamp for $i; the next update will do a full compare)"; done
+  m1_finish
   umount /mnt/nefi /mnt/nsys /mnt/stickefi 2>/dev/null || true; sync
   say ""
   say "Update done. Remove the USB stick and turn the laptop back on."
@@ -631,7 +667,7 @@ for d in $DIRS; do
   [ "$_cnt_src" = "$_cnt_dst" ] || die "verify failed: $d file count mismatch"
   echo "ok $d ($_cnt_dst files)" >> $L/install.log
 done
-for i in $STAMPED; do stamp_save $i || true; done
+m1_finish
 say "Verification passed!"
 
 # Register Googlebook OS in motherboard UEFI NVRAM if efivarfs is supported
