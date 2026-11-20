@@ -75,6 +75,6 @@ else
 fi
 echo "== apksigner"
 # shellcheck disable=SC2086
-"$BT/apksigner" sign $SIGN --ks-key-alias updater --out "$APK" "$OUT/aligned.apk"
+"$BT/apksigner" sign $SIGN --ks-key-alias updater --v4-signing-enabled false --out "$APK" "$OUT/aligned.apk"
 "$BT/apksigner" verify --print-certs "$APK" | head -n 3
 echo "built $APK ($(stat -c %s "$APK") bytes). Copy it to the stick's gbos/ folder (it is in install.sh's FILES when present)."

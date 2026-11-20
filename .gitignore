@@ -86,3 +86,4 @@ ov5678_lsc.txt
 # The gbOS86 Updater app, built by updater-app/build.sh (a test-key build must never be committed: Android only updates an app
 # signed with the same key). Whether release builds are committed is the maintainer's call.
 /usb/gbos86-updater.apk
+/usb/gbos86-updater.apk.idsig
