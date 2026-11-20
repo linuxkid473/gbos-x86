@@ -6,7 +6,8 @@
 #   2. kernel (privileged docker, image gbos-kbuild, stage0's busybox): the same function with the real busybox mount on a loop vfat mounted as
 #      stage0 mounts it, then writes and execs as root, as uid 1000 (system: gbos_fp, soft_gk), and as an app uid (10123). Also checks that a
 #      root process gets write access in a mount namespace of its own without it reaching anyone else (toybox-style unshare, shared mounts),
-#      and that stick_fat.sh's superblock read-only remount at shutdown still works with these mounts.
+#      and that stick_fat.sh's superblock read-only remount at shutdown still works with these mounts. gbos_fp (uid system) appends
+#      logs/boot-N/fingerprint.txt through /dev/gbos-system-log (gbos_system_log), after stage0's mount --move of /dev.
 # Run: sh tools/test_postinstall_ro.sh      (BUSYBOX=path, default kernel/out/busybox of this or the main checkout; SKIP_KERNEL=1 = host only)
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -25,7 +26,6 @@ if [ "${1:-}" = --inner ]; then
   DEV=$(losetup -f --show $W/fat.img) || { bad "losetup (privileged container?)"; exit 1; }
   trap 'cd /; umount -R /new 2>/dev/null; umount /gbos 2>/dev/null; losetup -d $DEV 2>/dev/null' EXIT
   mkdir -p /gbos /new/postinstall
-  mount --make-rshared / 2>/dev/null   # Android init makes / rshared: a flag change must still not travel to peers
   $BB mount -t vfat -o rw,flush,umask=000 $DEV /gbos || { bad "mount vfat as stage0 does"; exit 1; }
   G=/gbos/gbos; N=7; L=$G/logs/boot-$N
   mkdir -p $L $G/logs/boot-6 && echo 'MODE=ask' > $G/gbos.cfg && printf '#!/bin/sh\necho fp-ok\n' > $G/gbos_fp && echo old > $G/logs/boot-6/logcat.txt
@@ -35,7 +35,13 @@ if [ "${1:-}" = --inner ]; then
   mount() { $BB mount "$@"; }; umount() { $BB umount "$@"; }; log() { echo "$*" >> $W/hook.log; }
   eval "$(fn gbos_postinstall_lockdown /repo/usb/hook.sh)"
   mount --bind /gbos /new/postinstall && gbos_postinstall_lockdown /new/postinstall "$L" "$N"; rc=$?
+  # gbos_fp (uid system) gets logs/boot-7/fingerprint.txt through stage0's /dev, which then moves into Android as stage0 moves it
+  eval "$(fn gbos_system_log /repo/usb/hook.sh)"
+  mkdir -p /stage0dev /new/dev && $BB mount -t tmpfs -o mode=0755 tmpfs /stage0dev
+  FPLOG=$(GBOS_DEV=/stage0dev gbos_system_log fingerprint.txt)
+  $BB mount --move /stage0dev /new/dev
   unset -f mount umount
+  mount --make-rshared / 2>/dev/null   # then switch_root, and Android init makes / rshared: a flag change must still not travel to peers
   P=/new/postinstall/gbos
   [ $rc = 0 ] && [ "$GBOS_LOGS_PRIVATE" = 1 ] && ok "lockdown with the real busybox mount: rc 0, logs private" || bad "lockdown rc=$rc private=$GBOS_LOGS_PRIVATE: $(cat $W/hook.log)"
   grep -q 'POSTINSTALL: /postinstall read-only' $W/hook.log && ! grep -q POSTINSTALL-RW $W/hook.log && ok "logged: read-only, logs root-only" || bad "log: $(cat $W/hook.log)"
@@ -55,6 +61,14 @@ if [ "${1:-}" = --inner ]; then
     as $u "cat $P/logs/boot-6/logcat.txt" && bad "uid $u can read an older boot's logcat" || ok "uid $u cannot read older boots' logs"
     as $u "$P/gbos_fp | grep -q fp-ok" && ok "uid $u can still exec gbos/gbos_fp (gbos_fp, soft_gk run as system)" || bad "uid $u cannot exec gbos_fp"
   done
+  [ "$FPLOG" = /dev/gbos-system-log/fingerprint.txt ] && ok "gbos_fp gets --log $FPLOG" || bad "gbos_system_log printed [$FPLOG]: $(cat $W/hook.log)"
+  F=/new$FPLOG
+  as 1000 "echo fp-line >> $F" && [ "$(cat $L/fingerprint.txt)" = fp-line ] && ok "uid 1000 appends fingerprint.txt after the /dev move; it lands in logs/boot-7" || bad "uid 1000 cannot append fingerprint.txt"
+  as 1000 "echo x > /new/dev/gbos-system-log/other" && bad "uid 1000 can create other files in /dev/gbos-system-log" || ok "uid 1000 cannot create other files there (mode 0500)"
+  as 1000 "rm -f $F; test ! -e $F" && bad "uid 1000 can remove the log file" || ok "uid 1000 cannot remove it"
+  as 10123 "echo pwn >> $F" && bad "an app can write fingerprint.txt" || ok "an app cannot write fingerprint.txt"
+  as 10123 "ls /new/dev/gbos-system-log" && bad "an app can list /dev/gbos-system-log" || ok "an app cannot list /dev/gbos-system-log"
+  [ "$(cat $L/fingerprint.txt)" = fp-line ] && ok "fingerprint.txt holds only the HAL's line" || bad "fingerprint.txt: $(cat $L/fingerprint.txt)"
   grep -q '^MODE=ask$' $G/gbos.cfg && [ ! -e $G/hook.sh ] && [ ! -e $G/run.sh ] && [ ! -e $L/run.sh ] && ok "nothing changed on the volume" || bad "the volume changed"
   # root services
   echo line > $P/logs/boot-7/logcat.txt && [ "$(cat $L/logcat.txt)" = line ] && ok "root writes logs/boot-7, it lands on the volume" || bad "root cannot write logs/boot-7"
@@ -130,7 +144,7 @@ grep -qx 'rc=0 private=1' "$W/result" && grep -q 'stays exec' "$W/log" && ok "no
 # call site: right after the bind, before anything reads GBOS_LOGS_PRIVATE or writes gbos.rc
 b=$(grep -n '^if mount --bind /gbos /new/postinstall; then$' "$H" | cut -d: -f1)
 c=$(grep -n '^  gbos_postinstall_lockdown /new/postinstall "\$L" "\$N"$' "$H" | cut -d: -f1)
-g=$(grep -n 'GBOS_LOGS_PRIVATE:-0' "$H" | head -1 | cut -d: -f1)
+g=$(grep -n '^  GBOS_RUN_SH=$' "$H" | head -1 | cut -d: -f1)
 [ -n "$b" ] && [ "$c" = $((b + 1)) ] && [ -n "$g" ] && [ "$g" -gt "$c" ] && ok "called right after the /postinstall bind (line $c), before the run.sh gate" || bad "call site: bind=$b call=$c gate=$g"
 [ "$(grep -c 'mount --bind /gbos /new/postinstall' "$H")" = 1 ] && ok "the only /postinstall bind is the locked-down one" || bad "another /postinstall bind in hook.sh"
 
@@ -154,6 +168,9 @@ grep -v '^[[:space:]]*#' "$H" | grep -oE '/postinstall/gbos/logs[^ ";]*' | grep 
 # ... and every service that writes there runs as root (the 0700 gateway keeps everyone else out)
 awk '/^service /{s=$0; w=0; u=""} /^service .*\/postinstall\/gbos\/logs/{w=1} /^    user /{u=$2} /^$/{if (w && u != "root") print s; w=0}' "$H" > "$W/nonroot"
 [ ! -s "$W/nonroot" ] && ok "every gbos.rc service writing logs runs as user root" || bad "non-root service writes logs: $(cat "$W/nonroot")"
+# the one non-root writer, gbos_fp (user system), gets its log file through gbos_system_log (/dev/gbos-system-log)
+grep -q '^        FPLOG=$(gbos_system_log fingerprint.txt)$' "$H" && grep -q '^service gbos_fp /postinstall/gbos/gbos_fp$FPARGS --log $FPLOG$' "$H" \
+  && ok "gbos_fp's --log comes from gbos_system_log" || bad "gbos_fp --log is not from gbos_system_log"
 # the Android-side scripts' log variables point into logs/boot-N
 for d in 'ksu/install.sh:^LOG=\$G/logs/boot-\$N/' 'surface/iptsd-run.sh:^L=\$G/logs/boot-\$N$' 'audio/mixdiag.sh:^L=\${GBOS_AUDIO_DIAG_LOG_ROOT:-\$G/logs/boot-\$N}$' \
          'aidiag.sh:^L=/postinstall/gbos/logs/boot-\$N$' 'native_zygote.sh:^L=\${GBOS_NZ_LOGDIR:-/postinstall/gbos/logs/boot-\$N}$' \

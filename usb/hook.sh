@@ -727,6 +727,28 @@ gbos_postinstall_lockdown() { # PI LOGDIR N
   return 1
 }
 
+# Log file for a service that runs as uid system (gbos_fp appends fingerprint.txt itself; it is the only non-root writer). logs/boot-N is
+# root-only (above), and vfat has no per-file owner, so the service gets that one file through /dev/gbos-system-log (mode 0500, owner
+# system: it can open the file, O_CREAT included, but not create others): a bind of $L/NAME. Only system and root can reach it, nothing
+# else of the volume is writable for them, and the lines still land
+# in logs/boot-N/NAME. /dev moves into Android with its mounts (stage0's mount --move). Prints the path to give the service: the logs path
+# itself when the logs are not root-only (POSTINSTALL_RW=1 or a fallback) or when the bind fails (then the service logs to logcat only).
+# GBOS_DEV is only for tests.
+gbos_system_log() { # NAME
+  _sd=${GBOS_DEV:-/dev}/gbos-system-log
+  if [ "${GBOS_LOGS_PRIVATE:-0}" = 1 ]; then
+    if { [ -d "$_sd" ] || mkdir -m 0700 "$_sd"; } && : >> "$L/$1" && : >> "$_sd/$1" && mount --bind "$L/$1" "$_sd/$1" &&
+       chmod 0500 "$_sd" && chown 1000:1000 "$_sd"; then
+      mount -o remount,bind,nosuid,nodev,noexec "$_sd/$1" 2>/dev/null
+      log "hook: POSTINSTALL: logs/boot-$N/$1 writable by system through /dev/gbos-system-log/$1"
+      echo "/dev/gbos-system-log/$1"
+      return 0
+    fi
+    log "hook: POSTINSTALL: /dev/gbos-system-log/$1 bind FAILED: that service's file log stays empty (logcat only)"
+  fi
+  echo "/postinstall/gbos/logs/boot-$N/$1"
+}
+
 if mount --bind /gbos /new/postinstall; then
   gbos_postinstall_lockdown /new/postinstall "$L" "$N"
   mkdir -p /tmp/sysinit && cp -a /new/system/etc/init/. /tmp/sysinit/
@@ -807,8 +829,9 @@ fi
         elif [ -z "${SYS:-}" ] && [ -z "$(findfs LABEL=GBOSSYS 2>/dev/null)" ]; then
           FPARGS=" --no-gbos-install"
         fi
+        FPLOG=$(gbos_system_log fingerprint.txt)
         FPRC="# Experimental Goodix MOC HAL for the exact USB sensor $FPDEV.
-service gbos_fp /postinstall/gbos/gbos_fp$FPARGS --log /postinstall/gbos/logs/boot-$N/fingerprint.txt
+service gbos_fp /postinstall/gbos/gbos_fp$FPARGS --log $FPLOG
     class hal
     user system
     group system usb
