@@ -216,6 +216,9 @@ boot >/dev/null; boot >/dev/null; boot >/dev/null
 check "kernel update: rollback restores the old kernel and asks for a restart" "[ \$(boot) = 10 ] && cmp -s '$B1/files/EFI/BOOTX64.EFI' '$EFI/EFI/BOOT/BOOTX64.EFI' && [ \"\$(snap)\" = \"\$S1\" ]"
 install_set "$B1"; mkdir -p "$EFI/EFI/gbos86"; mv "$EFI/EFI/BOOT/BOOTX64.EFI" "$EFI/EFI/gbos86/"; echo other-os > "$EFI/EFI/BOOT/BOOTX64.EFI"; inbox "$Bk"
 check "dual-boot ESP: only EFI/gbos86 is replaced" "[ \$(boot) = 10 ] && cmp -s '$T/sk/usb/out/BOOTX64.EFI' '$EFI/EFI/gbos86/BOOTX64.EFI' && [ \"\$(cat '$EFI/EFI/BOOT/BOOTX64.EFI')\" = other-os ]"
+install_set "$B1"; _s=$(snap); inbox "$Bk"; mkdir -p "$G/logs/boot-$BOOTN"
+EB boot "$G" "$G/logs/boot-$BOOTN" "$BOOTN" --efi-dir "$EFI" --efi-label SYSTEM >/dev/null 2>&1; BOOTN=$((BOOTN + 1))
+check "a shared ESP without EFI/gbos86: EFI/BOOT (the other OS's loader) is never written" "[ \"\$(snap)\" = \"\$_s\" ] && grep -q 'no gbOS86 kernel' '$G/update/status.txt'"
 install_set "$B1"; X=$(rm -rf "$T/x" && mkdir -p "$T/x" && cp -r "$Bk" "$T/x/" && echo "$T/x/$(basename "$Bk")"); rm -rf "$X/files/EFI"; _s=$(snap); inbox "$X"
 check "refused: another kernel in the set but not in the bundle" "[ \$(boot) = 0 ] && [ \"\$(snap)\" = \"\$_s\" ]"
 

@@ -321,8 +321,8 @@ su_reject() { # DIR REASON: keep the manifest and the reason, delete the files (
 # The internal disk's EFI system partition (same disk as GBOSSYS, GPT type, as install.sh finds it) and the kernel's path in it:
 # EFI/gbos86/BOOTX64.EFI on a shared (dual-boot) ESP, EFI/BOOT/BOOTX64.EFI on our own GBOS_EFI.
 su_efi_mount() {
-  KREL=
-  if [ -n "${SU_EFI_DIR:-}" ]; then EFIMNT=$SU_EFI_DIR
+  KREL=; _ours=0
+  if [ -n "${SU_EFI_DIR:-}" ]; then EFIMNT=$SU_EFI_DIR; [ "${SU_EFI_LABEL:-GBOS_EFI}" = GBOS_EFI ] && _ours=1
   else
     _sd=/dev/$(basename "$(readlink -f /sys/class/block/$(basename "$SU_DEV")/.. 2>/dev/null)")
     _ins=$G/installer
@@ -330,13 +330,15 @@ su_efi_mount() {
       | awk 'toupper($0) ~ /TYPE=C12A7328-F81F-11D2-BA4B-00A0C93EC93B/ { print $1; exit }')
     [ -n "$_e" ] || _e=$(findfs LABEL=GBOS_EFI 2>/dev/null)
     [ -b "$_e" ] || { SU_ERR="cannot find this disk's EFI partition"; return 1; }
+    [ "$(findfs LABEL=GBOS_EFI 2>/dev/null)" = "$_e" ] && _ours=1
     EFIMNT=/mnt/su-efi; mkdir -p "$EFIMNT"
     awk -v m="$EFIMNT" '$2 == m { f = 1 } END { exit !f }' /proc/mounts 2>/dev/null || mount -t vfat -o rw,flush "$_e" "$EFIMNT" 2>/dev/null || { SU_ERR="cannot mount the EFI partition $_e"; return 1; }
     SU_EFI_MOUNTED=1
   fi
   if [ -f "$EFIMNT/EFI/gbos86/BOOTX64.EFI" ]; then KREL=EFI/gbos86
-  elif [ -f "$EFIMNT/EFI/BOOT/BOOTX64.EFI" ]; then KREL=EFI/BOOT
-  else SU_ERR="no gbOS86 kernel on the EFI partition"; return 1; fi
+  # EFI/BOOT/BOOTX64.EFI is ours only on our own GBOS_EFI partition: on a shared (dual-boot) one it is the other OS's fallback loader
+  elif [ -f "$EFIMNT/EFI/BOOT/BOOTX64.EFI" ] && [ $_ours = 1 ]; then KREL=EFI/BOOT
+  else SU_ERR="no gbOS86 kernel on the EFI partition (EFI/gbos86/BOOTX64.EFI, or EFI/BOOT on a GBOS_EFI partition)"; return 1; fi
   return 0
 }
 su_efi_umount() { [ "${SU_EFI_MOUNTED:-0}" = 1 ] && { sync; umount "$EFIMNT" 2>/dev/null; SU_EFI_MOUNTED=0; }; return 0; }
@@ -581,8 +583,8 @@ su_pick_inbox() { # newest bundle folder in the inbox -> $ST (others are rejecte
 
 cmd_boot() {
   G=$1; L=$2; BN=$3; shift 3
-  SU_EFI_DIR=; SU_DEV=
-  while [ $# -gt 0 ]; do case "$1" in --efi-dir) SU_EFI_DIR=$2; shift 2;; --dev) SU_DEV=$2; shift 2;; *) shift;; esac; done
+  SU_EFI_DIR=; SU_EFI_LABEL=; SU_DEV=
+  while [ $# -gt 0 ]; do case "$1" in --efi-dir) SU_EFI_DIR=$2; shift 2;; --efi-label) SU_EFI_LABEL=$2; shift 2;; --dev) SU_DEV=$2; shift 2;; *) shift;; esac; done
   [ -n "$SU_DEV" ] || SU_DEV=$(awk '$2 == "/gbos" { print $1; exit }' /proc/mounts 2>/dev/null)
   U=$G/update; INBOX=$G/update.inbox; ST=$G/update.staging; PREV=$G/update.prev; REJ=$G/update.rejected
   SU_SELF=$0
