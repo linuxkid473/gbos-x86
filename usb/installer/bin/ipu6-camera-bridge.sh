@@ -236,6 +236,56 @@ EOF
     echo "rear facing: $REAR_USB_VID:$REAR_USB_PID added to $CAMERA_INFO as FACING_BACK"
 }
 
+# libcamera plugins: Google's vendor image has a libcamera-based camera HAL (service
+# vendor.camera-provider-2-7-legacy-wrapper, ICameraProvider/legacy/0) that loads every .so in
+# /vendor/lib64/libcamera/pipeline as a pipeline handler; on this laptop it finds no camera. Our
+# plugins (installer/lib/libcamera-pipeline, tools/build_libcamera_gbos.sh) are added through a
+# copy of that directory (Google's own plugins included) bind-mounted over it, then the service
+# is restarted. Step 1 is gbos_test.so, an external test camera with moving colour bars.
+# CAMERA_LIBCAMERA=0 in gbos.cfg leaves the directory alone. The USB (loopback) cameras are a
+# separate service and are not affected either way.
+LIBCAMERA_PIPE=/vendor/lib64/libcamera/pipeline
+LIBCAMERA_PLUGINS=/postinstall/gbos/installer/lib/libcamera-pipeline
+LIBCAMERA_COPY=/data/local/tmp/gbos-libcamera-pipeline
+LIBCAMERA_SERVICE=vendor.camera-provider-2-7-legacy-wrapper
+add_libcamera_plugins() {
+    if [ "$(cfg CAMERA_LIBCAMERA)" = 0 ]; then
+        echo "libcamera plugins: off (CAMERA_LIBCAMERA=0)"
+        return 0
+    fi
+    set -- "$LIBCAMERA_PLUGINS"/*.so
+    if [ ! -f "$1" ]; then
+        echo "libcamera plugins: none in $LIBCAMERA_PLUGINS"
+        return 0
+    fi
+    if [ ! -d "$LIBCAMERA_PIPE" ]; then
+        echo "WARNING: $LIBCAMERA_PIPE missing; libcamera plugins not added"
+        return 1
+    fi
+    if grep -q " $LIBCAMERA_PIPE " /proc/mounts; then
+        echo "libcamera plugins: $LIBCAMERA_PIPE already replaced"
+    else
+        rm -rf "$LIBCAMERA_COPY"
+        mkdir -p "$LIBCAMERA_COPY" || return 1
+        cp -p "$LIBCAMERA_PIPE"/* "$LIBCAMERA_COPY"/ 2>/dev/null || true
+        cp "$@" "$LIBCAMERA_COPY"/ || return 1
+        chmod 755 "$LIBCAMERA_COPY"
+        chmod 644 "$LIBCAMERA_COPY"/*
+        dir_label=$(ls -Zd "$LIBCAMERA_PIPE" 2>/dev/null | awk '{print $1}')
+        file_label=$(ls -Z "$LIBCAMERA_PIPE" 2>/dev/null | awk 'NF > 1 {print $1; exit}')
+        [ -n "$dir_label" ] && chcon "$dir_label" "$LIBCAMERA_COPY" 2>/dev/null
+        [ -n "$file_label" ] && chcon "$file_label" "$LIBCAMERA_COPY"/* 2>/dev/null
+        mount -o bind "$LIBCAMERA_COPY" "$LIBCAMERA_PIPE" || {
+            echo "WARNING: could not bind-mount $LIBCAMERA_PIPE; libcamera plugins not added"
+            return 1
+        }
+        echo "libcamera plugins: $(ls "$LIBCAMERA_PIPE" | tr '\n' ' ')(labels ${dir_label:-?} / ${file_label:-?})"
+    fi
+    stop "$LIBCAMERA_SERVICE" 2>/dev/null
+    start "$LIBCAMERA_SERVICE" 2>/dev/null
+    echo "libcamera plugins: restarted $LIBCAMERA_SERVICE"
+}
+
 # wait_active LOGFILE PID: 0 once the bridge logs that it streams, 1 if it exits or times out.
 wait_active() {
     i=0
@@ -353,6 +403,7 @@ if [ "$REAR" = 1 ]; then
 fi
 
 # Rescan the new virtual UVC device after its node and sysfs identity exist.
+add_libcamera_plugins || true
 killall -9 android.hardware.camera.provider-usb-service.android-desktop 2>/dev/null || true
 killall -9 cameraserver 2>/dev/null || true
 echo "Bridge ready; supervising pid=$BRIDGE_PID${REAR_PID_RUN:+ and rear pid=$REAR_PID_RUN}"

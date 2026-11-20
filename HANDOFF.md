@@ -1174,3 +1174,27 @@ SHA-NI, 256-bit VAES/VPCLMULQDQ, AVX-IFMA and AVX-512; the lapis binaries use th
   - *Unverified on hardware:*
     - that the bionic binary runs from the stick (linker namespace, SELinux) and finds the Iris Xe Vulkan device;
     - the real GPU time per frame. The CPU's remaining share is about 1 ms of statistics plus copying 10 MB in and 2.4 MB out per frame; a dma-buf import of the IPU6 buffer could remove the 10 MB copy later.
+- 2026-11-20 **Full camera support, step 1: a test-camera plugin for Google's libcamera camera HAL (host-checked only, not deployed).**
+  - *What the image has:*
+    - `/vendor/lib64/hw/camera.libcamera_hal_base.so` is libcamera 0.2.5 (AOSP `external/libcamera`, a ChromeOS fork) with its Android HAL layer: all stream sizes, JPEG + EXIF, minigbm buffers, metadata.
+    - It runs on every boot as `vendor.camera-provider-2-7-legacy-wrapper` (AIDL `ICameraProvider/legacy/0`; boot-15 kmsg: started, pid 3916) and finds no camera here.
+    - It builds no pipeline handlers in. It `dlopen`s every `.so` in `/vendor/lib64/libcamera/pipeline` (`CameraManager::Private::loadPipelineHandlerFromLibrary`); Google ships only Intel's IPU7 handler there (`camera.libipu7_hal_fatcat.so`, Panther Lake).
+    - `/vendor/etc/camera/libcamera/camera_hal.yaml` already maps libcamera camera ids `camera0` → front and `camera1` → back. A camera reporting `Location = External` needs no entry.
+  - *Plan:* our own pipeline-handler plugin for the IPU6 sensors (raw capture + the bridge's ISP, then the GPU path), so Android gets real cameras: several sizes, full-resolution JPEG, video, controls, and sensors powered only while an app uses them. The USB loopback path stays as fallback until then.
+  - *Step 1 (this commit):* `kernel/libcamera-gbos/gbos_test.cpp`, an external "gbOS test camera" with moving colour bars, NV12 at 640×480–2560×1920, modelled on libcamera's virtual handler.
+    - Built by `tools/build_libcamera_gbos.sh`, with the NDK and the AOSP libcamera headers (android17-release, downloaded with the user's OK to `build/src/libcamera`; generated headers via its `utils/codegen` scripts).
+    - The platform libc++ ABI (`std::__1`, via an overriding `__config_site`) is used instead of the NDK's `std::__ndk1`.
+    - It links with `--no-undefined` against the vendor `libc++.so` and `camera.libcamera_hal_base.so`, copied locally from `lapis/parts`, never committed.
+    - Output: `usb/installer/lib/libcamera-pipeline/gbos_test.so`.
+  - *ABI evidence:*
+    - every symbol resolves in Google's binaries;
+    - vtable sizes match the vendor's base classes: `PipelineHandler` 120, `Camera::Private` 32, `CameraConfiguration` 40 (the same as Google's IPU7 plugin);
+    - checked by `tools/test_libcamera_gbos.sh`, which also checks the committed `.so` against a rebuild.
+  - *Launcher (`add_libcamera_plugins`):*
+    - Copies `/vendor/lib64/libcamera/pipeline` (Google's plugin included) plus our plugins to `/data/local/tmp/gbos-libcamera-pipeline`, with the original SELinux labels.
+    - Bind-mounts it over the vendor directory and restarts the legacy-wrapper service before the HAL/cameraserver restart. `CAMERA_LIBCAMERA=0` in gbos.cfg skips it.
+  - *What the test boot must show:*
+    - camera-bridge-setup.txt `libcamera plugins: camera.libipu7_hal_fatcat.so gbos_test.so (labels ...)`;
+    - logcat from the legacy wrapper: `gbos_test.so is found`, `dlopen ... successfully`, `gbOS test camera registered`;
+    - a third (external) camera in the camera app showing colour bars, and a photo taken with it.
+  - *Unverified:* class data layouts beyond vtables (same source revision, so expected identical), loading from `/data/local/tmp` through the bind mount, SELinux in permissive mode.

@@ -171,6 +171,41 @@ choose() {	# CAMERA_GPU value, GPU binary -> chosen binary
 grep -Fq 'WARNING: GPU bridge did not reach streaming state; using the CPU converter' "$BRIDGE"
 [ "$(grep -c 'GPU bridge exited; restarts use the CPU converter' "$BRIDGE")" = 2 ]
 
+# libcamera plugins: the vendor pipeline directory is copied with our plugins added, the copy
+# bind-mounted over it and the legacy-wrapper service restarted; CAMERA_LIBCAMERA=0 or no
+# plugins leave it alone. Run with stubs for mount/chcon/stop/start.
+plugin_fn=$(awk '/^add_libcamera_plugins\(\) \{/ { on = 1 } on { print } on && /^}/ { exit }' "$BRIDGE")
+echo "$plugin_fn" | grep -q 'mount -o bind "$LIBCAMERA_COPY" "$LIBCAMERA_PIPE"'
+grep -Fq 'add_libcamera_plugins || true' "$BRIDGE"
+[ "$(grep -n 'add_libcamera_plugins || true' "$BRIDGE" | cut -d: -f1)" -lt "$(grep -n 'killall -9 cameraserver' "$BRIDGE" | cut -d: -f1)" ]
+mkdir -p "$tmp/pipe" "$tmp/plugins"
+echo google > "$tmp/pipe/camera.libipu7_hal_fatcat.so"
+echo ours > "$tmp/plugins/gbos_test.so"
+run_plugins() {	# CAMERA_LIBCAMERA value -> calls made
+    (
+        cfg() { [ "$1" = CAMERA_LIBCAMERA ] && printf '%s' "$cfg_lc"; }
+        mount() { echo "mount $*"; }
+        chcon() { :; }
+        stop() { echo "stop $*"; }
+        start() { echo "start $*"; }
+        cfg_lc=$1
+        LIBCAMERA_PIPE=$tmp/pipe LIBCAMERA_PLUGINS=$tmp/plugins LIBCAMERA_COPY=$tmp/copy
+        LIBCAMERA_SERVICE=vendor.camera-provider-2-7-legacy-wrapper
+        eval "$plugin_fn"
+        add_libcamera_plugins
+    )
+}
+calls=$(run_plugins '')
+echo "$calls" | grep -qx "mount -o bind $tmp/copy $tmp/pipe"
+echo "$calls" | grep -qx 'stop vendor.camera-provider-2-7-legacy-wrapper'
+echo "$calls" | grep -qx 'start vendor.camera-provider-2-7-legacy-wrapper'
+[ "$(cat "$tmp/copy/camera.libipu7_hal_fatcat.so")" = google ] && [ "$(cat "$tmp/copy/gbos_test.so")" = ours ]
+calls=$(run_plugins 0)
+! echo "$calls" | grep -q '^mount\|^stop\|^start'
+rm -f "$tmp/plugins/gbos_test.so"
+calls=$(run_plugins '')
+! echo "$calls" | grep -q '^mount\|^stop\|^start'
+
 # Front uevent: byte-identical to the one the launcher wrote before the rear camera existed.
 cat > "$tmp/front.expected" <<'EOF'
 DRIVER=uvcvideo
