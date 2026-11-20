@@ -43,7 +43,7 @@ echo "== aapt2 link (manifest only, no resources)"
 "$BT/aapt2" link -o "$OUT/base.apk" -I "$JAR" --manifest "$HERE/AndroidManifest.xml" \
   --min-sdk-version $MIN_SDK --target-sdk-version $API --version-code "$VERSION_CODE" --version-name "$VERSION_NAME"
 echo "== javac"
-javac -encoding UTF-8 -source 1.8 -target 1.8 -Xlint:-options -bootclasspath "$JAR" -d "$OUT/classes" \
+javac -encoding UTF-8 -source 1.8 -target 1.8 -Xlint:-options -bootclasspath "$JAR" -classpath "$BT/core-lambda-stubs.jar" -d "$OUT/classes" \
   $(find "$HERE/src" -name '*.java')
 echo "== d8"
 "$BT/d8" --release --min-api $MIN_SDK --lib "$JAR" --output "$OUT/dex" $(find "$OUT/classes" -name '*.class')
