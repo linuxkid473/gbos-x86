@@ -15,6 +15,7 @@
 #   status [--gbos G]                      installed set, pending update, last result
 #   request                                init service for the app: one request from the app's private folder (docs/system-update.md)
 #   boot-ok [G]                            init service at boot_completed while an update is being tried: marks the boot good
+#   install-app [G] [BOOTN]                init service at boot_completed: install gbos86-updater.apk with pm when it changed
 #   setinfo DIR                            id/seq/google_build/commit of the set in a gbos folder (install.sh)
 #   menu1-check STICKG NVMEG / menu1-finish STICKG NVMEG    the stick's menu 1 (install.sh)
 #
@@ -679,6 +680,7 @@ cmd_stage() {
   P=$W/s/p
   _seq=$(su_mval "$P" seq); _name=gbos86-update-$(printf '%012d' "$_seq")-$(echo "$SU_ID" | cut -c1-12)
   # which listed files to copy: present in the bundle, and not already installed with the same hash
+  su_progress "comparing the bundle with the installed files (up to a minute)"
   : > "$W/copy"
   while read -r _h _s _p; do
     [ -e "$_src/files/$_p" ] || continue
@@ -764,11 +766,12 @@ cmd_request() {
   [ -f "$_rq" ] && [ ! -L "$_rq" ] && [ "$(stat -c %u "$_rq")" = "$_uid" ] || su_die "no request from the app"
   head -c 4096 "$_rq" > "$W/req"; rm -f "$_rq"
   [ "$(head -n 1 "$W/req")" = "gbos86-sysupdate-request 1" ] || su_die "bad request"
+  _id=$(sed -n 's/^id \([0-9]\{1,12\}\)$/\1/p' "$W/req" | head -n 1)
   _act=$(sed -n 's/^action \([a-z-]*\)$/\1/p' "$W/req" | head -n 1)
   _rel=$(sed -n 's/^path \([A-Za-z0-9._+,@=~/ -]*\)$/\1/p' "$W/req" | head -n 1)
   _pr=$(sed -n 's/^prune_logs \([01]\)$/\1/p' "$W/req" | head -n 1)
   SU_STATUSF=$W/progress
-  respond() { { echo "gbos86-sysupdate-response 1"; echo "state $1"; shift; cat; } > "$_rs.part"; chown "$_uid:$_uid" "$_rs.part"; chmod 600 "$_rs.part"; mv -f "$_rs.part" "$_rs"; }
+  respond() { { echo "gbos86-sysupdate-response 1"; echo "id $_id"; echo "state $1"; shift; cat; } > "$_rs.part"; chown "$_uid:$_uid" "$_rs.part"; chmod 600 "$_rs.part"; mv -f "$_rs.part" "$_rs"; }
   echo "working" | respond running
   case "$_act" in
     status) cmd_status 2>&1 | respond done;;
@@ -780,11 +783,26 @@ cmd_request() {
       _real=$(realpath "$_src" 2>/dev/null)
       case "$_real" in /data/media/$_u/*) ;; *) echo "the bundle must be in this user's shared storage" | respond failed; exit 1;; esac
       ( while sleep 1; do [ -f "$W/progress" ] && respond running < "$W/progress"; done ) & _pp=$!
-      _o=$( ( set -- stage "$_real" --status "$W/progress"; [ "$_pr" = 1 ] && set -- "$@" --prune-logs; sh "$0" "$@" ) 2>&1); _r=$?
+      _o=$( ( set -- stage "$_real" --status "$W/progress"; [ "$_pr" = 1 ] && set -- "$@" --prune-logs; if [ -n "${SU_BB:-}" ]; then "$SU_BB" sh "$0" "$@"; else sh "$0" "$@"; fi ) 2>&1); _r=$?
       kill "$_pp" 2>/dev/null; wait "$_pp" 2>/dev/null
       if [ $_r = 0 ]; then echo "$_o" | tail -n 3 | respond done; else echo "$_o" | tail -n 5 | respond failed; fi;;
     *) echo "unknown action '$_act'" | respond failed;;
   esac
+}
+
+# init, at boot_completed (hook.sh adds the service when gbos/gbos86-updater.apk exists): install or update the gbOS86 Updater app
+# with pm, like the KernelSU manager. Skipped when the same APK (by sha256) was installed before. Log: logs/boot-N/updater-app.txt.
+cmd_install_app() {
+  su_gbos "${1:-}"; _n=${2:-0}
+  _apk=$G/gbos86-updater.apk; _log=$G/logs/boot-$_n/updater-app.txt; _stamp=/data/local/tmp/.gbos86-updater.sha256
+  [ -f "$_apk" ] || exit 0
+  _h=$(su_sha "$_apk")
+  if pm path "$SU_PKG" >/dev/null 2>&1 && [ "$(cat "$_stamp" 2>/dev/null)" = "$_h" ]; then echo "updater app $_h already installed" >> "$_log"; exit 0; fi
+  cp "$_apk" /data/local/tmp/gbos86-updater.apk || exit 1
+  _o=$(pm install -r /data/local/tmp/gbos86-updater.apk 2>&1)
+  echo "pm install gbos86-updater.apk ($_h): $_o" >> "$_log"
+  rm -f /data/local/tmp/gbos86-updater.apk
+  case "$_o" in *Success*) echo "$_h" > "$_stamp";; esac
 }
 
 # init, at boot_completed, only while an update is being tried (hook.sh adds the service then): wait a minute so a crash loop right
@@ -855,6 +873,7 @@ case "$_cmd" in
   status) cmd_status "$@";;
   request) cmd_request "$@";;
   boot-ok) cmd_boot_ok "$@";;
+  install-app) su_tmp; cmd_install_app "$@";;
   setinfo) su_tmp; cmd_setinfo "$@";;
   menu1-check) su_tmp; cmd_menu1_check "$@";;
   menu1-finish) su_tmp; cmd_menu1_finish "$@";;

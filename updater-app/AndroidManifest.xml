@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- gbOS86 Updater: front end for usb/sysupdate.sh. It asks for no permissions: it only writes a request into its own private
+     folder and sets one property; a root service started by init (hook.sh) does the copying. See docs/system-update.md. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="org.gbos86.updater">
+    <application
+        android:label="gbOS86 Updater"
+        android:allowBackup="false"
+        android:theme="@android:style/Theme.DeviceDefault.DayNight">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="gbOS86 Updater">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

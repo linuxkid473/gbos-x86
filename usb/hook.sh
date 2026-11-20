@@ -611,6 +611,52 @@ gbos_tablet_mode_config() {
   log "hook: tablet mode helper queued (rotation=$_tm_rot keyboard=$_tm_kbd override_forced_orient=${ROTATION_OVERRIDE:-0})"
 }
 
+# System updater (usb/sysupdate.sh, docs/system-update.md). Two optional parts of gbos.rc:
+#  - while an update is being tried (gbos/update/state says phase=trying): mark that Android was reached (stage0 then never rolls a new
+#    Google build back on its own, /data may be upgraded) and, a minute after boot_completed, record the boot as good (update/boot-ok).
+#  - when gbos/gbos86-updater.apk is on the volume: install the app at boot_completed, and the root service the app talks to. The app
+#    sets sys.gbos86.sysupdate; the service reads the request from the app's private folder (sysupdate.sh request). Explicit seclabel
+#    (init refuses a service without one); no "$" in these lines (init would read it as a property).
+gbos_sysupdate_rc() {
+  GBOS_SYSUPDATE_RC=; GBOS_SYSUPDATE_START=
+  [ -f "$G/sysupdate.sh" ] || return 0
+  if [ -f "$G/update/state" ] && grep -qx 'phase=trying' "$G/update/state" 2>/dev/null; then
+    sed -n 's/^set=//p' "$G/update/state" > "$G/update/android-started" 2>/dev/null; sync
+    GBOS_SYSUPDATE_RC="service gbos_sysupdate_ok /postinstall/busybox sh /postinstall/gbos/sysupdate.sh boot-ok /postinstall/gbos
+    user root
+    group root
+    seclabel u:r:shell:s0
+    oneshot
+    disabled
+"
+    GBOS_SYSUPDATE_START="    start gbos_sysupdate_ok"
+    log "hook: sysupdate: trying set $(sed -n 's/^seq=//p' "$G/update/state") (try $(sed -n 's/^tries=//p' "$G/update/state")); boot-ok service queued"
+  fi
+  if [ -f "$G/gbos86-updater.apk" ]; then
+    GBOS_SYSUPDATE_RC="$GBOS_SYSUPDATE_RC
+service gbos_updater_install /postinstall/busybox sh /postinstall/gbos/sysupdate.sh install-app /postinstall/gbos $N
+    user root
+    group root
+    seclabel u:r:shell:s0
+    oneshot
+    disabled
+
+service gbos_sysupdate_req /postinstall/busybox sh /postinstall/gbos/sysupdate.sh request
+    user root
+    group root
+    seclabel u:r:shell:s0
+    oneshot
+    disabled
+
+on property:sys.gbos86.sysupdate=*
+    start gbos_sysupdate_req
+"
+    GBOS_SYSUPDATE_START="$GBOS_SYSUPDATE_START
+    start gbos_updater_install"
+    log "hook: sysupdate: updater app service queued (gbos86-updater.apk)"
+  fi
+}
+
 # Logcat to the stick: expose the USB volume inside Android at /postinstall, and overlay
 # /system/etc/init with a copy plus gbos.rc (a logcat service writing to this boot's log dir).
 # "vid:pid" (lower-case hex, as in Android's IDC file names) of every touchpad that is not on USB, from /proc/bus/input/devices.
@@ -700,6 +746,7 @@ fi
     GBOS_SENSOR_TRIAL_START="    start gbos_sensor_trial"
   fi
   gbos_tablet_mode_config
+  gbos_sysupdate_rc
   FPRC=
   if [ "${FINGERPRINT:-1}" != 0 ]; then
     if [ -x "$G/gbos_fp" ]; then
@@ -792,6 +839,8 @@ service gbos_sensor_trial /system/bin/sh /postinstall/gbos/sensor_trial_diag.sh 
 
 $GBOS_TABLET_MODE_SERVICE
 
+$GBOS_SYSUPDATE_RC
+
 # Capture camera probe state as soon as Android finishes booting.
 service gbos_cameradiag /system/bin/sh -c ". /postinstall/gbos/hwdetect.sh; ( date; gbos_report_camera_bus_devices; gbos_report_camera_media_graph; gbos_report_camera_debug ) > /postinstall/gbos/logs/boot-$N/camera.txt 2>&1"
     user root
@@ -834,6 +883,7 @@ $GBOS_KVM_TRACE_STOP
     start gbos_optimize
     start gbos_sensordiag
 $GBOS_TABLET_MODE_START
+$GBOS_SYSUPDATE_START
 $GBOS_SENSOR_TRIAL_START
     start gbos_cameradiag
 $GBOS_CAMERA_CAPTURE_START

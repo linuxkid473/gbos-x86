@@ -23,7 +23,7 @@ put() {  # put SRC DST(relative to gbos/): copy when different
 }
 
 echo "deploying to $VOL"
-for f in hook.sh stick_fat.sh install.sh aidiag.sh native_zygote.sh early_patch.sh sensor_vendor_overlay.sh sensor_trial_diag.sh tablet_mode.sh sensordiag.sh hwdetect.sh mask_vendor_modules.sh apex_patch.sh crossystem libkm_compat.so system_ext_manifest.xml soft_gk gbos_fp; do put "$U/$f" "$f"; done
+for f in hook.sh stick_fat.sh install.sh aidiag.sh native_zygote.sh early_patch.sh sensor_vendor_overlay.sh sensor_trial_diag.sh tablet_mode.sh sensordiag.sh hwdetect.sh mask_vendor_modules.sh apex_patch.sh crossystem libkm_compat.so system_ext_manifest.xml soft_gk gbos_fp sysupdate.sh sysupdate.pub gbos86-updater.apk; do put "$U/$f" "$f"; done
 if [ -n "${GBOS_ROTATION_POLICY_OVERLAY:-}" ]; then
   [ -s "$GBOS_ROTATION_POLICY_OVERLAY" ] || { echo "missing or empty rotation policy overlay: $GBOS_ROTATION_POLICY_OVERLAY" >&2; exit 1; }
   put "$GBOS_ROTATION_POLICY_OVERLAY" "sensors/gbos-latitude7320-rotation-policy.apk"
