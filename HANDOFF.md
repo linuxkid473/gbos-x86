@@ -1253,3 +1253,18 @@ SHA-NI, 256-bit VAES/VPCLMULQDQ, AVX-IFMA and AVX-512; the lapis binaries use th
   - *Cost:* the CPU converter at 1920×1080 is 35 ms/frame (2 threads, ~28 fps); the GPU path (working since boot-17) is the default.
   - *Tests:* `test_sensor_crop` (aspect, centring, 4:3 untouched); the scene and lens-shading tests are now crop-aware. The host, docker and GPU suites run 1920×1080, 1280×720 and 640×480. The launcher size block is tested for '', 1920x1080, 1280x720, 640x480, 1280x960 and invalid values.
   - *Unverified:* that the app accepts the 16:9 FHD size, and the USB HAL's extra CPU at 1920×1080. `CAMERA_SIZE=640x480` (on the stick now) should work as on boot-15: the same builds as deployed, crop = full sensor.
+- 2026-11-20 **Boot-19 front green at 1920×1080: diagnostics and the speckle fix (host-tested only, not deployed).**
+  - *What the logs show:* the front's only colour lines were logged while idle (frame 900: grey-world 0.573/0.395, green side 0.141, 45 of 48 regions; frame 1800: 0.612/0.588, magenta side 0.010). The front logged nothing about colour while the app used it.
+  - *Checked, not the cause:*
+    - The crop keeps the CFA phase: sites are looked up in absolute sensor coordinates, and `crop_y` is even (242 for the front).
+    - CPU and GPU agree at 1920×1080 on every synthetic case.
+    - A synthetic kitchen (boot-14's white at 3x, yellow objects covering ¼–¾ of the frame, the module's real tables) keeps the white neutral (U −0.3..−0.7): the yellow regions are left out of the white point.
+    - The USB HAL's effects (studio relighting, retouch, auto-framing) only change colour when the user turns them on; the Quanta `0408:4052` entry adds only face detection.
+  - *Speckle fix:* `chroma_radius` was tuned on a 640-wide colour grid (about 4 sensor px per cell). At 1920×1080 the grid is 960 wide, so 2 cells covered ⅔ of the area. `chroma_radius_scaled()` now gives 3 cells at 960 and 1 at 320 (640×480 builds), so the averaging area is unchanged.
+  - *Diagnostics for the next boot:*
+    - Colour lines (cfa/wb/ccm/ir/lsc) about 1 s into each app session and every 300 frames while converting.
+    - `CAMERA_RAW_DUMP=N` in gbos.cfg: each bridge saves up to N raw frames about 1 s into an app session, with the YUYV picture it produced and its state (`raw-<sensor>-<n>.{raw,yuyv,txt}` in the boot's log dir, about 10/16 MB per frame).
+    - `tools/ipu6_raw_render.c` (`-DOUT_WIDTH/-DOUT_HEIGHT` = the dump's size; `-DRAW_RENDER_GPU --gpu` for lavapipe) renders a dump with the same converter, writes YUYV, and compares U/V with the laptop's picture. `tools/yuyv_to_png.py` turns either into a PNG. Round trip tested in `tools/test_ipu6_raw_render.sh`.
+  - *Decisive test:* a boot with `CAMERA_RAW_DUMP=2`, front then rear on the kitchen scene.
+    - If the dumped `.yuyv` is green, the cause is in the bridge, and the PC render of the same raw shows whether it's the GPU or the algorithm.
+    - If the dump looks right, the green is added after the bridge (HAL/app).

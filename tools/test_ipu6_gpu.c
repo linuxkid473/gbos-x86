@@ -86,9 +86,11 @@ static int compare(const char *name, const unsigned char *a, const unsigned char
 	}
 	printf("%-34s differing bytes %zu (%.4f%%), >1: %zu, worst %d, mean %.5f\n", name, differ,
 	       100.0 * differ / OUT_FRAME_BYTES, big, worst, sum / OUT_FRAME_BYTES);
-	/* Integer stages identical; the float spots one step in a few pixels (lavapipe: <= 27 bytes). */
-	(void)big;
-	return worst <= 1 && differ * 10000 < OUT_FRAME_BYTES ? 0 : 1;
+	/*
+	 * Integer stages identical; the float spots (colour guard, ratio mix) one step in a few pixels,
+	 * rarely two after gamma (lavapipe: <= 33 bytes differ, 1 by 2).
+	 */
+	return worst <= 2 && big * 100000 < OUT_FRAME_BYTES && differ * 10000 < OUT_FRAME_BYTES ? 0 : 1;
 }
 
 int main(void)

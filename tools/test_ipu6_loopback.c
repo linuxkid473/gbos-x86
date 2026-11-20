@@ -1005,8 +1005,12 @@ static int test_edge_colour(void)
 /* Gain-scaled denoise steps. */
 static int test_gain_denoise_steps(void)
 {
-	if (chroma_radius_for_gain(4) != 2 || chroma_radius_for_gain(10) != 3 ||
-	    chroma_radius_for_gain(40) != 4)
+	/* Base radius scaled to the colour grid (2 cells of a 640-wide grid): 3 at 960, 1 at 320. */
+	int base = chroma_radius_scaled();
+	if (base != (COL_WIDTH >= 960 ? 3 : COL_WIDTH >= 640 ? 2 : 1))
+		return 4;
+	if (chroma_radius_for_gain(4) != base || chroma_radius_for_gain(10) != base + 1 ||
+	    chroma_radius_for_gain(40) != base + 2)
 		return 1;
 	if (tnr_threshold_for_gain(4) != TNR_THRESHOLD || tnr_threshold_for_gain(32) != 2 * TNR_THRESHOLD ||
 	    tnr_threshold_for_gain(100) != 2 * TNR_THRESHOLD)

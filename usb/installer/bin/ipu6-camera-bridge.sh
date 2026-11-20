@@ -89,6 +89,16 @@ case "$IDLE_STOP" in
     *) echo "camera idle stop: $IDLE_STOP s (0 = never)" ;;
 esac
 export IPU6_IDLE_STOP="$IDLE_STOP"
+# CAMERA_RAW_DUMP=N in gbos.cfg: each bridge saves up to N raw frames, about one second into an app's
+# session, with the picture it made from it and its state, into this boot's log directory
+# (raw-<sensor>-<n>.{raw,yuyv,txt}, ~10-16 MB each; tools/ipu6_raw_render.c reads them). Off by default.
+RAW_DUMP=$(cfg CAMERA_RAW_DUMP)
+case "$RAW_DUMP" in
+    ''|0) ;;
+    *[!0-9]*) echo "WARNING: CAMERA_RAW_DUMP=$RAW_DUMP is not a number; no raw dumps" ;;
+    *) export IPU6_RAW_DUMP_DIR="$LOGDIR" IPU6_RAW_DUMP_MAX="$RAW_DUMP"
+       echo "camera raw dumps: up to $RAW_DUMP per camera into $LOGDIR" ;;
+esac
 
 if [ ! -e /dev/video64 ]; then
     # One module load creates both devices; the bounds are module-wide. Min = max = OUT_W x OUT_H (the

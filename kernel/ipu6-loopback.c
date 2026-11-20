@@ -924,11 +924,25 @@ static int chroma_radius = 2;		/* colour averaged over (2r+1)^2 output pixels; 0
 #define HIGH_GAIN_X 8.0
 #define EDGE_DESATURATION 0.7	/* most colour removed at the strongest edges */
 
+/*
+ * chroma_radius is in cells of a 640-wide colour grid (about 4 sensor pixels each), where it was
+ * tuned (boot-11..15). The grid is COL_WIDTH wide, so scale it to cover the same sensor area:
+ * 3 cells at 960 (1920x1080 output), 1 at 320 (640x480). Boot-19: unscaled at 960, the green and
+ * magenta speckle came back.
+ */
+static int chroma_radius_scaled(void)
+{
+	if (chroma_radius <= 0)
+		return 0;
+	int r = (chroma_radius * COL_WIDTH + 320) / 640;
+	return r < 1 ? 1 : r;
+}
+
 static int chroma_radius_for_gain(double gain)
 {
 	if (chroma_radius <= 0)
 		return 0;
-	return chroma_radius + (gain > HIGH_GAIN_X) + (gain > 2 * HIGH_GAIN_X);
+	return chroma_radius_scaled() + (gain > HIGH_GAIN_X) + (gain > 2 * HIGH_GAIN_X);
 }
 
 static int tnr_threshold_for_gain(double gain)
@@ -2387,6 +2401,59 @@ static int idle_resume_stream(struct capture *cap)
 	return r;
 }
 
+/*
+ * Raw dumps for tuning on the build machine (CAMERA_RAW_DUMP=N in gbos.cfg; the launcher passes
+ * IPU6_RAW_DUMP_DIR and IPU6_RAW_DUMP_MAX). About one second into an app's session the bridge
+ * writes the raw frame, the YUYV picture it made from it, and its state, as
+ * <dir>/raw-<sensor>-<n>.{raw,yuyv,txt}; tools/ipu6_raw_render.c renders a dump with the CPU
+ * (and GPU) path and compares it with the saved picture. At most IPU6_RAW_DUMP_MAX per run.
+ */
+static const char *raw_dump_dir;
+static int raw_dump_left;
+
+static void raw_dump(const char *sensor, const uint16_t *raw, unsigned int width, unsigned int height,
+		     unsigned int stride, const unsigned char *yuyv, const struct ae_state *ae)
+{
+	static int n;
+	char path[512];
+	FILE *f;
+
+	if (!raw_dump_dir || raw_dump_left <= 0)
+		return;
+	raw_dump_left--;
+	n++;
+	snprintf(path, sizeof(path), "%s/raw-%s-%d.raw", raw_dump_dir, sensor, n);
+	if ((f = fopen(path, "wb"))) {
+		fwrite(raw, 1, (size_t)stride * height, f);
+		fclose(f);
+	}
+	snprintf(path, sizeof(path), "%s/raw-%s-%d.yuyv", raw_dump_dir, sensor, n);
+	if ((f = fopen(path, "wb"))) {
+		fwrite(yuyv, 1, OUT_FRAME_BYTES, f);
+		fclose(f);
+	}
+	snprintf(path, sizeof(path), "%s/raw-%s-%d.txt", raw_dump_dir, sensor, n);
+	if (!(f = fopen(path, "w")))
+		return;
+	fprintf(f, "sensor %s\nwidth %u\nheight %u\nstride %u\nout %dx%d\nrotate %d\n", sensor, width,
+		height, stride, OUT_WIDTH, OUT_HEIGHT, output_rotate180);
+	fprintf(f, "gain %.4f\nexposure %d\nagain %d\ndgain %d\nvblank %d\n", sensor_total_gain,
+		ae->exposure.value, ae->again.value, ae->dgain.value, ae->vblank.value);
+	fprintf(f, "wb_white %.5f %.5f\nwb_mean %.2f %.2f %.2f\nwb_gain %u %u\nnir_ratio %.4f\n",
+		wb_white_rg, wb_white_bg, wb_last_mean[0], wb_last_mean[1], wb_last_mean[2],
+		wb_last_gain_q12[0], wb_last_gain_q12[2], wb_nir_ratio);
+	fprintf(f, "ccm_active %d\nccm_pick %d %d %.3f\nlsc_active %d\nlsc_pick %d %d %.3f %.3f\n",
+		ccm_active, ccm_pick[0], ccm_pick[1], ccm_weight, lsc_active, lsc_pick[0], lsc_pick[1],
+		lsc_weight, lsc_strength);
+#ifdef IPU6_GPU
+	fprintf(f, "converter %s\n", gpu.ok ? "gpu" : "cpu");
+#else
+	fprintf(f, "converter cpu\n");
+#endif
+	fclose(f);
+	printf("raw dump: %s/raw-%s-%d.{raw,yuyv,txt}\n", raw_dump_dir, sensor, n);
+}
+
 static int capture_to_loopback(const char *media_dev, const char *out_dev,
 			       const struct sensor_profile *profile)
 {
@@ -2405,7 +2472,7 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev,
 	struct v4l2_subdev_format sensor = { 0 }, saved_sink = { 0 }, set;
 	struct v4l2_format video = { .type = V4L2_BUF_TYPE_VIDEO_CAPTURE };
 	struct v4l2_format saved_video = { .type = V4L2_BUF_TYPE_VIDEO_CAPTURE };
-	unsigned int frame_count = 0;
+	unsigned int frame_count = 0, session_frames = 0;
 	int last_readers = -2;
 	unsigned char *output = NULL;
 	enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -2609,6 +2676,7 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev,
 			       idle_stop_s > 0 ? "no consumer; idle (sensor and auto-exposure keep running until the idle stop)" :
 			       "no consumer; idle (sensor and auto-exposure keep running)");
 			last_readers = readers;
+			session_frames = 0;
 			tnr_reset();	/* the scene may have changed while idle */
 			ae_set_idle(&ae, !bridge_should_convert(readers));
 			if (bridge_should_convert(readers))
@@ -2676,9 +2744,17 @@ static int capture_to_loopback(const char *media_dev, const char *out_dev,
 		if (!af_busy)
 			ae_frame(&ae, mean_green);
 		frame_count++;
-		if (frame_count == 30 || frame_count % 900 == 0)
+		/* Colour state while an app uses the camera: ~1 s in, then every 300 frames. */
+		int converting = bridge_should_convert(readers);
+		if (converting)
+			session_frames++;
+		if (frame_count == 30 || frame_count % 900 == 0 ||
+		    (converting && (session_frames == 30 || session_frames % 300 == 0)))
 			log_cfa_phases(buffers[b.index].data, video.fmt.pix.width,
 				       video.fmt.pix.height, video.fmt.pix.bytesperline, frame_count);
+		if (converting && session_frames == 30)
+			raw_dump(profile->cal_prefix, buffers[b.index].data, video.fmt.pix.width,
+				 video.fmt.pix.height, video.fmt.pix.bytesperline, output, &ae);
 		if (ioctl(vfd, VIDIOC_QBUF, &b)) {
 			perror("requeue IPU6 frame");
 			result = 1;
@@ -2839,6 +2915,11 @@ int main(int argc, char **argv)
 	       o.rotate180 ? "; output rotated 180" : "");
 	if (o.calibration)
 		load_calibration(o.calibration, o.profile->cal_prefix);
+	raw_dump_dir = getenv("IPU6_RAW_DUMP_DIR");
+	if (raw_dump_dir && getenv("IPU6_RAW_DUMP_MAX"))
+		raw_dump_left = atoi(getenv("IPU6_RAW_DUMP_MAX"));
+	if (raw_dump_dir && raw_dump_left > 0)
+		printf("raw dumps: up to %d into %s\n", raw_dump_left, raw_dump_dir);
 #ifdef IPU6_GPU
 	/* IPU6_GPU=0 (gbos.cfg CAMERA_GPU=0, via the launcher) keeps this build on the CPU. */
 	const char *use_gpu = getenv("IPU6_GPU");
