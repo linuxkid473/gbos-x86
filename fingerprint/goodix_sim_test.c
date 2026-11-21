@@ -403,7 +403,7 @@ static void test_names(void)
 		"", "GBOS", "GBOS-", "GBOS-0123ABCD-u0-00000001", "GBOS-0123abcd-u00-00000001",
 		"GBOS-0123abcd-u0-0000001", "GBOS-0123abcd-u0-000000011", "GBOS-0123abcd-0-00000001",
 		"GBOS-L0123abcd-u0-00000001", "GBOS-X-0123abcd-u0-00000001", "gbos-0123abcd-u0-00000001",
-		"FP1-20261117-7-3F2A9B11-david", "GBOS-0123abcd-u-00000001",
+		"FP1-20261117-7-3F2A9B11-user", "GBOS-0123abcd-u-00000001",
 	};
 	for (size_t i = 0; i < sizeof(not_ours) / sizeof(not_ours[0]); i++)
 		assert(!fp_name_parse(not_ours[i], &p));
@@ -422,7 +422,7 @@ static void test_policy(void)
 	assert(fp_classify(&live, "GBOS-L-aaaaaaaa-u0-00000012") == FP_KEEP_OTHER_USER);
 	assert(fp_classify(&live, "GBOS-L-cccccccc-u10-00000011") == FP_DELETE_OLD_LIVE);
 	assert(fp_classify(&live, "GBOS-cccccccc-u10-2ab7f1c0") == FP_DELETE_ORPHAN);	/* boot-10 */
-	assert(fp_classify(&live, "FP1-20261117-7-3F2A9B11-david") == FP_KEEP_NOT_GBOS);
+	assert(fp_classify(&live, "FP1-20261117-7-3F2A9B11-user") == FP_KEEP_NOT_GBOS);
 	assert(fp_classify(&live, "") == FP_KEEP_NOT_GBOS);
 	/* the same names on a live boot when an install exists: keep the old-style one */
 	p = live;
@@ -455,7 +455,7 @@ static void test_policy(void)
 	assert(fp_classify(&p, "GBOS-bbbbbbbb-u10-00000011") == FP_KEEP_ENROLLED);
 	assert(fp_classify(&p, "GBOS-bbbbbbbb-u0-00000011") == FP_KEEP_OTHER_USER);
 	assert(fp_classify(&p, "GBOS-bbbbbbbb-u10-00000012") == FP_DELETE_UNKNOWN);
-	assert(fp_classify(&p, "FP1-20261117-7-3F2A9B11-david") == FP_KEEP_NOT_GBOS);
+	assert(fp_classify(&p, "FP1-20261117-7-3F2A9B11-user") == FP_KEEP_NOT_GBOS);
 	/* an id Android still lists keeps its template even under another instance (lost instance file) */
 	assert(fp_classify(&p, "GBOS-cccccccc-u10-00000011") == FP_KEEP_ENROLLED);
 	p.ids_trusted = false;
@@ -483,12 +483,12 @@ static void test_reconcile_live(void)
 	store("GBOS-L-aaaaaaaa-u10-00000011", 3);	/* enrolled now */
 	store("GBOS-L-aaaaaaaa-u10-00000099", 4);	/* this boot's, Android does not know it */
 	store("GBOS-L-aaaaaaaa-u0-00000099", 5);	/* another user */
-	store("FP1-20261117-7-3F2A9B11-david", 6);	/* another OS */
+	store("FP1-20261117-7-3F2A9B11-user", 6);	/* another OS */
 	open_dev(&s);
 	assert(fp_reconcile(&s, &p, &deleted, &failed, &fail) == GOODIX_OK);
 	assert(deleted == 3 && failed == 0 && sim.n == 3);
 	assert(find("GBOS-L-aaaaaaaa-u10-00000011") >= 0 && find("GBOS-L-aaaaaaaa-u0-00000099") >= 0 &&
-	       find("FP1-20261117-7-3F2A9B11-david") >= 0);
+	       find("FP1-20261117-7-3F2A9B11-user") >= 0);
 	assert(fp_reconcile(&s, &p, &deleted, &failed, &fail) == GOODIX_OK && deleted == 0);
 	goodix_close(&s);
 }
@@ -609,7 +609,7 @@ static void test_duplicate_kept(void)
 	/* the finger is Windows Hello's: never deleted */
 	sim_reset();
 	sim.dup_status = 2;
-	store("FP1-20261117-7-3F2A9B11-david", 1);
+	store("FP1-20261117-7-3F2A9B11-user", 1);
 	sim.finger = 1;
 	open_dev(&s);
 	assert(enroll(&s, "GBOS-L-aaaaaaaa-u10-00000042", &fail, &dup) == GOODIX_DUPLICATE);
@@ -837,20 +837,20 @@ static void test_delete_collateral(void)
 	sim_reset();
 	sim.delete_mode = DELETE_WILDCARD;
 	store("GBOS-1c2ac773-u10-5cfb789b", 1);
-	store("FP1-20261117-7-3F2A9B11-david", 2);
+	store("FP1-20261117-7-3F2A9B11-user", 2);
 	open_dev(&s);
 	assert(goodix_delete(&s, "GBOS-1c2ac773-u10-5cfb789b", &fail) == GOODIX_FAILED);
-	assert(sim.deletes == 1 && sim.n == 2 && find("FP1-20261117-7-3F2A9B11-david") >= 0 && !s.delete_blocked);
+	assert(sim.deletes == 1 && sim.n == 2 && find("FP1-20261117-7-3F2A9B11-user") >= 0 && !s.delete_blocked);
 	assert(logged("holds templates not named GBOS-, so only libfprint's payload is sent"));
 	goodix_close(&s);
 
 	/* and with a working firmware, libfprint's payload removes the target and leaves Windows' print */
 	sim_reset();
 	store("GBOS-1c2ac773-u10-5cfb789b", 1);
-	store("FP1-20261117-7-3F2A9B11-david", 2);
+	store("FP1-20261117-7-3F2A9B11-user", 2);
 	open_dev(&s);
 	assert(goodix_delete(&s, "GBOS-1c2ac773-u10-5cfb789b", &fail) == GOODIX_OK);
-	assert(sim.deletes == 1 && sim.n == 1 && find("FP1-20261117-7-3F2A9B11-david") == 0);
+	assert(sim.deletes == 1 && sim.n == 1 && find("FP1-20261117-7-3F2A9B11-user") == 0);
 	goodix_close(&s);
 }
 
