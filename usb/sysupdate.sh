@@ -966,6 +966,16 @@ cmd_stamp_set() { # NVMEG: written with the stamps (install.sh stamp_save)
 
 # ---------------------------------------------------------------------------------------------------------------- main
 _cmd=${1:-}; [ $# -gt 0 ] && shift
+# /postinstall is read-only in Android (hook.sh gbos_postinstall_lockdown, 2026-11-20). The Android-side commands that write
+# GBOSSYS re-run themselves in a mount namespace of their own where /postinstall is writable, as audio/audio-profile.sh does;
+# apps never see it writable. stage0 (boot) writes /gbos directly and is not affected. SU_MOUNTS/SU_UNSHARE: tests only.
+case "$_cmd" in
+  stage|cancel|request|boot-ok|install-app)
+    if [ -z "${GBOS_STICK_RW:-}" ] && grep -q '^[^ ]* /postinstall [^ ]* ro[, ]' "${SU_MOUNTS:-/proc/mounts}" 2>/dev/null; then
+      exec env GBOS_STICK_RW=1 ${SU_UNSHARE:-unshare -m} /postinstall/busybox sh -c \
+        'mount -o remount,bind,rw /postinstall && exec /postinstall/busybox sh "$@"' sh "$0" "$_cmd" "$@"
+    fi;;
+esac
 case "$_cmd" in
   boot) [ $# -ge 3 ] || su_die "usage: boot G LOGDIR BOOTN [--efi-dir DIR] [--dev DEV]"; cmd_boot "$@";;
   verify) [ $# -ge 1 ] || su_die "usage: verify BUNDLE [--pub FILE] [--installed G]"; cmd_verify "$@";;

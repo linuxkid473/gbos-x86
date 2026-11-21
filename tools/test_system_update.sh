@@ -342,5 +342,19 @@ check "publish: Google's zip, each partition and super.img's hash are in the fee
 echo tampered >> "$T/parts/vendor_a.img"
 check "super_parts.py refuses partitions that are not the ones in super.img" "! python3 -I '$ROOT/tools/super_parts.py' '$T/t3/super.img' '$T/t3/super.layout' --parts '$T/parts' >/dev/null 2>&1"
 
+# Under the FAT lockdown (/postinstall read-only for Android) the Android-side writers re-run themselves in their own mount
+# namespace with /postinstall writable; read-only commands and stage0 do not, and the re-run does not loop.
+printf '/dev/block/sda2 /postinstall vfat ro,nosuid,nodev 0 0\n' > "$T/mounts-ro"
+printf '/dev/block/sda2 /postinstall vfat rw,nosuid,nodev 0 0\n' > "$T/mounts-rw"
+SU=$ROOT/usb/sysupdate.sh
+for c in stage cancel request boot-ok install-app; do
+  check "lockdown: $c re-runs with /postinstall writable" "SU_MOUNTS='$T/mounts-ro' SU_UNSHARE='echo UNSHARE' sh '$SU' $c 2>&1 | grep -q '^UNSHARE /postinstall/busybox sh -c mount -o remount,bind,rw /postinstall .* $c'"
+done
+for c in audit status info; do
+  check "lockdown: $c (read-only) does not re-run" "! SU_MOUNTS='$T/mounts-ro' SU_UNSHARE='echo UNSHARE' sh '$SU' $c '$T/none' 2>&1 | grep -q '^UNSHARE'"
+done
+check "lockdown: no re-run when /postinstall is writable" "! SU_MOUNTS='$T/mounts-rw' SU_UNSHARE='echo UNSHARE' sh '$SU' request 2>&1 | grep -q '^UNSHARE'"
+check "lockdown: no second re-run inside the namespace" "! GBOS_STICK_RW=1 SU_MOUNTS='$T/mounts-ro' SU_UNSHARE='echo UNSHARE' sh '$SU' boot-ok '$T/none' 2>&1 | grep -q '^UNSHARE'"
+
 [ $FAILS = 0 ] && { echo SYSTEM_UPDATE_TEST_PASS; exit 0; }
 echo "$FAILS FAILED"; exit 1
