@@ -55,8 +55,8 @@ static void gpu_scene(int id, uint16_t *f, unsigned int w, unsigned int h, doubl
 
 /*
  * Three frames through one path (TNR runs on frames 2 and 3), from the same state each time:
- * lens shading starts inactive (the first frame's statistics are unshaded) and the white point
- * neutral, as at stream start.
+ * lens shading starts inactive (the first frame's statistics are unshaded), the white point
+ * neutral and the green NIR estimate at 0, as at stream start.
  */
 static int run_path(int use_gpu, const uint16_t *f, unsigned int w, unsigned int h, unsigned char *out)
 {
@@ -64,6 +64,7 @@ static int run_path(int use_gpu, const uint16_t *f, unsigned int w, unsigned int
 	lsc_active = 0;
 	lsc_built.pick[0] = lsc_built.pick[1] = -2;
 	wb_white_rg = wb_white_bg = 1.0;
+	nir_green_reset();	/* the scene's green NIR estimate starts over too */
 	tnr_reset();
 	for (int k = 0; k < 3; k++)
 		if (convert_bayer_yuyv(f, w, h, w * 2, out, OUT_FRAME_BYTES, NULL))

@@ -31,7 +31,13 @@ if ! grep -qx 'Latitude 7320 Detachable' /sys/class/dmi/id/product_name 2>/dev/n
 fi
 
 # gbos.cfg is read for a few keys only (sourcing it would let its names clash with this script's).
+# GBOS_CAMERA_USB_FALLBACK=1 (set when this script restarts itself after the libcamera cameras
+# failed, see below): CAMERA_LIBCAMERA reads as 0 for the rest of the boot.
 cfg() {
+    if [ "$1" = CAMERA_LIBCAMERA ] && [ "${GBOS_CAMERA_USB_FALLBACK:-0}" = 1 ]; then
+        echo 0
+        return 0
+    fi
     sed -n "s/^$1=//p" /postinstall/gbos/gbos.cfg 2>/dev/null | tail -n 1 | tr -d '\r'
 }
 
@@ -53,21 +59,22 @@ FRONT_DESC=$SURFACE/latitude_fake_uvc_desc$DESC_SUFFIX.bin
 REAR_DESC=$SURFACE/latitude_rear_fake_uvc_desc$DESC_SUFFIX.bin
 # --- end of output size ---
 echo "camera output: ${OUT_W}x${OUT_H}"
-if [ ! -s "$FRONT_DESC" ]; then
+if [ ! -s "$FRONT_DESC" ] && [ "$(cfg CAMERA_LIBCAMERA)" != both ]; then
     echo "ERROR: missing UVC descriptor $FRONT_DESC"
     exit 1
 fi
 REAR=1
 [ "$(cfg CAMERA_REAR)" = 0 ] && REAR=0
-# CAMERA_LIBCAMERA=1: the rear is the libcamera camera "camera1" (gbos_ipu6.so), fed by its bridge
-# over the frame channel (LC_REAR); =test: the test camera (gbos_test.so) takes its place. Either
-# way the USB rear is not exposed: Google's adapter publishes the libcamera camera as public ID 1
-# (device@1.0/legacy/1), and CameraService then rejected the USB rear (device@1.0/usb/1, "ID 1 is
-# already in use") on boot-17.
+# CAMERA_LIBCAMERA=1 or both: the rear is the libcamera camera "camera1" (gbos_ipu6.so), fed by its
+# bridge over the frame channel (LC_REAR); =test: the test camera (gbos_test.so) takes its place.
+# Either way the USB rear is not exposed: Google's adapter publishes the libcamera camera as public
+# ID 1 (device@1.0/legacy/1), and CameraService then rejected the USB rear (device@1.0/usb/1, "ID 1
+# is already in use") on boot-17.
 LC_REAR=0
-if [ "$REAR" = 1 ] && { [ "$(cfg CAMERA_LIBCAMERA)" = 1 ] || [ "$(cfg CAMERA_LIBCAMERA)" = test ]; }; then
+LC_MODE=$(cfg CAMERA_LIBCAMERA)
+if [ "$REAR" = 1 ] && { [ "$LC_MODE" = 1 ] || [ "$LC_MODE" = both ] || [ "$LC_MODE" = test ]; }; then
     REAR=0
-    [ "$(cfg CAMERA_LIBCAMERA)" = 1 ] && LC_REAR=1
+    [ "$LC_MODE" = test ] || LC_REAR=1
     echo "rear USB camera: off while CAMERA_LIBCAMERA=$(cfg CAMERA_LIBCAMERA) (its ID would clash with the libcamera camera)"
 fi
 REAR_ROTATION=$(cfg CAMERA_REAR_ROTATION)
@@ -82,6 +89,21 @@ if [ "$REAR" = 1 ] && [ ! -s "$REAR_DESC" ]; then
 fi
 echo "rear camera: $([ "$REAR" = 1 ] && echo "on, rotation $REAR_ROTATION" ||
     { [ "$LC_REAR" = 1 ] && echo "libcamera (gbos_ipu6.so), rotation $REAR_ROTATION"; } || echo off)"
+# CAMERA_LIBCAMERA=both: the front is the libcamera camera "camera0" too, so no camera is left on
+# the USB HAL: v4l2loopback is not loaded and no UVC identity is made. Both bridges are the 4:3
+# 1920x1440 builds (the plugin crops and scales to each stream; CAMERA_SIZE does not apply). If the
+# plugin cannot be used this boot (the crash guard below), the script restarts itself on the USB
+# route (GBOS_CAMERA_USB_FALLBACK=1), so the cameras never stay gone.
+# --- libcamera front (tools/test_ipu6_camera_bridge.sh runs this block) ---
+LC_FRONT=0
+FRONT_OUT=/dev/video64
+if [ "$(cfg CAMERA_LIBCAMERA)" = both ]; then
+    LC_FRONT=1
+    FRONT_OUT=channel:camera0
+    SIZE_DIR=/1920x1440
+    echo "front camera: libcamera (gbos_ipu6.so, frame channel $FRONT_OUT); v4l2loopback not used"
+fi
+# --- end of libcamera front ---
 # Idle stop: each bridge stops its sensor stream after this many seconds without a consumer
 # (the ISYS refuses system suspend while a stream is open) and restarts it when an app streams.
 # The bridge stays running meanwhile; only a failed stop or restart exits (status 4, see the supervisor).
@@ -107,65 +129,67 @@ case "$RAW_DUMP" in
        echo "camera raw dumps: up to $RAW_DUMP per camera into $LOGDIR" ;;
 esac
 
-if [ ! -e /dev/video64 ]; then
-    # One module load creates both devices; the bounds are module-wide. Min = max = OUT_W x OUT_H (the
-    # bridge's OUT_WIDTH x OUT_HEIGHT): the HAL takes the largest size v4l2loopback lists, so it
-    # must list only the one the bridge produces (the module's list has 1280x960 since 2026-11-20;
-    # with an older module nothing would match).
+if [ "$LC_FRONT" != 1 ]; then
+    if [ ! -e /dev/video64 ]; then
+        # One module load creates both devices; the bounds are module-wide. Min = max = OUT_W x OUT_H (the
+        # bridge's OUT_WIDTH x OUT_HEIGHT): the HAL takes the largest size v4l2loopback lists, so it
+        # must list only the one the bridge produces (the module's list has 1280x960 since 2026-11-20;
+        # with an older module nothing would match).
+        if [ "$REAR" = 1 ]; then
+            set -- video_nr=64,65 "card_label=$LOOPBACK_LABEL,$REAR_LABEL" exclusive_caps=1,1
+        else
+            set -- video_nr=64 "card_label=$LOOPBACK_LABEL" exclusive_caps=1
+        fi
+        insmod /postinstall/gbos/kmod/v4l2loopback.ko "$@" \
+            min_width=$OUT_W max_width=$OUT_W min_height=$OUT_H max_height=$OUT_H || {
+            status=$?
+            echo "ERROR: v4l2loopback insmod failed (status $status)"
+            exit "$status"
+        }
+    fi
+    for setting in min_width:$OUT_W max_width:$OUT_W min_height:$OUT_H max_height:$OUT_H; do
+        parameter=${setting%:*}
+        expected=${setting#*:}
+        actual=$(cat "/sys/module/v4l2loopback/parameters/$parameter" 2>/dev/null) || {
+            echo "ERROR: cannot verify v4l2loopback $parameter"
+            exit 1
+        }
+        if [ "$actual" != "$expected" ]; then
+            echo "ERROR: v4l2loopback $parameter is $actual, expected $expected"
+            exit 1
+        fi
+    done
+    i=0
+    while [ ! -e /dev/video64 ] && [ "$i" -lt 10 ]; do
+        sleep 1
+        i=$((i + 1))
+    done
+    if [ ! -e /dev/video64 ]; then
+        echo "ERROR: /dev/video64 was not created after loading v4l2loopback"
+        grep '^v4l2loopback ' /proc/modules || echo "v4l2loopback is not listed in /proc/modules"
+        ls /sys/class/video4linux 2>&1
+        exit 1
+    fi
+    LOOPBACK_SYS=/sys/devices/virtual/video4linux/video64
+    if [ ! -r "$LOOPBACK_SYS/name" ]; then
+        echo "ERROR: /dev/video64 exists but $LOOPBACK_SYS/name is unavailable"
+        exit 1
+    fi
+    ACTUAL_LABEL=$(cat "$LOOPBACK_SYS/name")
+    if [ "$ACTUAL_LABEL" != "$LOOPBACK_LABEL" ]; then
+        echo "ERROR: loopback label mismatch: got '$ACTUAL_LABEL', expected '$LOOPBACK_LABEL'"
+        exit 1
+    fi
+    REAR_SYS=/sys/devices/virtual/video4linux/video65
     if [ "$REAR" = 1 ]; then
-        set -- video_nr=64,65 "card_label=$LOOPBACK_LABEL,$REAR_LABEL" exclusive_caps=1,1
-    else
-        set -- video_nr=64 "card_label=$LOOPBACK_LABEL" exclusive_caps=1
-    fi
-    insmod /postinstall/gbos/kmod/v4l2loopback.ko "$@" \
-        min_width=$OUT_W max_width=$OUT_W min_height=$OUT_H max_height=$OUT_H || {
-        status=$?
-        echo "ERROR: v4l2loopback insmod failed (status $status)"
-        exit "$status"
-    }
-fi
-for setting in min_width:$OUT_W max_width:$OUT_W min_height:$OUT_H max_height:$OUT_H; do
-    parameter=${setting%:*}
-    expected=${setting#*:}
-    actual=$(cat "/sys/module/v4l2loopback/parameters/$parameter" 2>/dev/null) || {
-        echo "ERROR: cannot verify v4l2loopback $parameter"
-        exit 1
-    }
-    if [ "$actual" != "$expected" ]; then
-        echo "ERROR: v4l2loopback $parameter is $actual, expected $expected"
-        exit 1
-    fi
-done
-i=0
-while [ ! -e /dev/video64 ] && [ "$i" -lt 10 ]; do
-    sleep 1
-    i=$((i + 1))
-done
-if [ ! -e /dev/video64 ]; then
-    echo "ERROR: /dev/video64 was not created after loading v4l2loopback"
-    grep '^v4l2loopback ' /proc/modules || echo "v4l2loopback is not listed in /proc/modules"
-    ls /sys/class/video4linux 2>&1
-    exit 1
-fi
-LOOPBACK_SYS=/sys/devices/virtual/video4linux/video64
-if [ ! -r "$LOOPBACK_SYS/name" ]; then
-    echo "ERROR: /dev/video64 exists but $LOOPBACK_SYS/name is unavailable"
-    exit 1
-fi
-ACTUAL_LABEL=$(cat "$LOOPBACK_SYS/name")
-if [ "$ACTUAL_LABEL" != "$LOOPBACK_LABEL" ]; then
-    echo "ERROR: loopback label mismatch: got '$ACTUAL_LABEL', expected '$LOOPBACK_LABEL'"
-    exit 1
-fi
-REAR_SYS=/sys/devices/virtual/video4linux/video65
-if [ "$REAR" = 1 ]; then
-    # The module may predate this boot's service start (loaded with one device): then no rear.
-    if [ ! -e /dev/video65 ] || [ ! -r "$REAR_SYS/name" ]; then
-        echo "WARNING: /dev/video65 missing (v4l2loopback loaded without it); rear camera off"
-        REAR=0
-    elif [ "$(cat "$REAR_SYS/name")" != "$REAR_LABEL" ]; then
-        echo "WARNING: /dev/video65 is '$(cat "$REAR_SYS/name")', not '$REAR_LABEL'; rear camera off"
-        REAR=0
+        # The module may predate this boot's service start (loaded with one device): then no rear.
+        if [ ! -e /dev/video65 ] || [ ! -r "$REAR_SYS/name" ]; then
+            echo "WARNING: /dev/video65 missing (v4l2loopback loaded without it); rear camera off"
+            REAR=0
+        elif [ "$(cat "$REAR_SYS/name")" != "$REAR_LABEL" ]; then
+            echo "WARNING: /dev/video65 is '$(cat "$REAR_SYS/name")', not '$REAR_LABEL'; rear camera off"
+            REAR=0
+        fi
     fi
 fi
 
@@ -308,15 +332,15 @@ libcamera_service_stable() {
 }
 add_libcamera_plugins() {
     case "$(cfg CAMERA_LIBCAMERA)" in
-        1) set -- "$LIBCAMERA_PLUGINS"/gbos_ipu6.so ;;
+        1|both) set -- "$LIBCAMERA_PLUGINS"/gbos_ipu6.so ;;
         test) set -- "$LIBCAMERA_PLUGINS"/gbos_test.so ;;
         *)
-            echo "libcamera plugins: off (CAMERA_LIBCAMERA=1 in gbos.cfg for the libcamera rear camera, =test for the test camera)"
+            echo "libcamera plugins: off (CAMERA_LIBCAMERA=1 in gbos.cfg for the libcamera rear camera, =both for both cameras, =test for the test camera)"
             return 0 ;;
     esac
     if [ ! -f "$1" ]; then
-        echo "libcamera plugins: $1 missing"
-        return 0
+        echo "WARNING: libcamera plugin $1 missing"
+        return 1
     fi
     if [ ! -d "$LIBCAMERA_PIPE" ]; then
         echo "WARNING: $LIBCAMERA_PIPE missing; libcamera plugins not added"
@@ -376,10 +400,12 @@ wait_active() {
     return 1
 }
 
-prepare_node 64
-FAKE_DIR=/data/local/tmp/ipu6-camera-fake
-expose_uvc 64 "$FRONT_DESC" "$FAKE_DIR" 0408 4052
-[ "$?" = 2 ] && exit 1
+if [ "$LC_FRONT" != 1 ]; then
+    prepare_node 64
+    FAKE_DIR=/data/local/tmp/ipu6-camera-fake
+    expose_uvc 64 "$FRONT_DESC" "$FAKE_DIR" 0408 4052
+    [ "$?" = 2 ] && exit 1
+fi
 
 # OV5678_WINDOWS_ISP=1 in gbos.cfg: the front sensor gets the Windows driver's
 # 0x5000/0x3d8c/0x3d8d values when its bridge starts streaming (A/B test, see
@@ -432,7 +458,7 @@ if pgrep -f '/ipu6-loopback ' >/dev/null 2>&1; then
     echo "ERROR: bridge is already running outside this init service"
     exit 1
 else
-    "$BRIDGE" /dev/media0 /dev/video64 ${CAL:+"$CAL"} \
+    "$BRIDGE" /dev/media0 "$FRONT_OUT" ${CAL:+"$CAL"} \
         > "$LOGDIR/camera-bridge-runtime.txt" 2>&1 &
     BRIDGE_PID=$!
     echo "Started bridge pid=$BRIDGE_PID ($BRIDGE)"
@@ -443,7 +469,7 @@ if ! wait_active "$LOGDIR/camera-bridge-runtime.txt" "$BRIDGE_PID" && [ "$BRIDGE
     kill "$BRIDGE_PID" 2>/dev/null || true
     wait "$BRIDGE_PID" 2>/dev/null || true
     BRIDGE=$BRIDGE_CPU
-    "$BRIDGE" /dev/media0 /dev/video64 ${CAL:+"$CAL"} \
+    "$BRIDGE" /dev/media0 "$FRONT_OUT" ${CAL:+"$CAL"} \
         >> "$LOGDIR/camera-bridge-runtime.txt" 2>&1 &
     BRIDGE_PID=$!
     echo "Started bridge pid=$BRIDGE_PID ($BRIDGE)"
@@ -503,7 +529,17 @@ if [ "$REAR" = 1 ] || [ "$LC_REAR" = 1 ]; then
 fi
 
 # Rescan the new virtual UVC device after its node and sysfs identity exist.
-add_libcamera_plugins || true
+# With both cameras on libcamera, a plugin that cannot be used would leave no camera at all: stop
+# the bridges and run this script again on the USB route (the loopback was never loaded, so it
+# starts clean). With the rear only, the front is unaffected and the rear is off for this boot.
+if ! add_libcamera_plugins && [ "$LC_FRONT" = 1 ]; then
+    echo "WARNING: libcamera cameras unusable this boot; restarting the bridges on the USB route"
+    for pid in $BRIDGE_PID $REAR_PID_RUN; do
+        kill "$pid" 2>/dev/null
+        wait "$pid" 2>/dev/null
+    done
+    GBOS_CAMERA_USB_FALLBACK=1 exec /system/bin/sh "$0" "$BOOT_ID"
+fi
 killall -9 android.hardware.camera.provider-usb-service.android-desktop 2>/dev/null || true
 killall -9 cameraserver 2>/dev/null || true
 echo "Bridge ready; supervising pid=$BRIDGE_PID${REAR_PID_RUN:+ and rear pid=$REAR_PID_RUN}"
@@ -529,7 +565,7 @@ EXIT_IDLE_FAILED=4
 FRONT_IDLE_STOP=$IDLE_STOP
 REAR_IDLE_STOP=$IDLE_STOP
 start_front() {
-    "$BRIDGE" --idle-stop "$FRONT_IDLE_STOP" /dev/media0 /dev/video64 ${CAL:+"$CAL"} \
+    "$BRIDGE" --idle-stop "$FRONT_IDLE_STOP" /dev/media0 "$FRONT_OUT" ${CAL:+"$CAL"} \
         >> "$LOGDIR/camera-bridge-runtime.txt" 2>&1 &
     BRIDGE_PID=$!
     FRONT_SINCE=$(date +%s)

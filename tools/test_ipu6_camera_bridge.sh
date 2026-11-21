@@ -30,7 +30,7 @@ set -- video_nr=64,65 "card_label=$LOOPBACK_LABEL,$REAR_LABEL" exclusive_caps=1,
 [ "$2" = card_label=GBOS_IPU6_Camera,GBOS_IPU6_Rear_Camera ]
 # The rear bridge runs the OV8856 profile on video65; the front command line is unchanged.
 grep -Fq '"$REAR_BRIDGE" --sensor ov8856 --rotate "$REAR_ROTATION" /dev/media0 "$REAR_OUT"' "$BRIDGE"
-grep -Fq '"$BRIDGE" /dev/media0 /dev/video64 ${CAL:+"$CAL"}' "$BRIDGE"
+grep -Fq '"$BRIDGE" /dev/media0 "$FRONT_OUT" ${CAL:+"$CAL"}' "$BRIDGE"
 grep -Fq 'REAR_LOG=$LOGDIR/camera-bridge-rear-runtime.txt' "$BRIDGE"
 # Order: the rear starts only after the front streams, and the HAL restart comes after both.
 front_ready=$(grep -n 'wait_active "$LOGDIR/camera-bridge-runtime.txt" "$BRIDGE_PID"' "$BRIDGE" | tail -n 1 | cut -d: -f1)
@@ -80,7 +80,36 @@ rear_with() {	# CAMERA_REAR, CAMERA_LIBCAMERA -> "REAR LC_REAR"
 }
 # CAMERA_LIBCAMERA=1: the rear moves to the libcamera plugin; =test: the test camera replaces it.
 [ "$(rear_with '' '')" = "1 0" ] && [ "$(rear_with '' 1)" = "0 1" ] && [ "$(rear_with 0 '')" = "0 0" ] &&
-    [ "$(rear_with '' 0)" = "1 0" ] && [ "$(rear_with '' test)" = "0 0" ] && [ "$(rear_with 0 1)" = "0 0" ]
+    [ "$(rear_with '' 0)" = "1 0" ] && [ "$(rear_with '' test)" = "0 0" ] && [ "$(rear_with 0 1)" = "0 0" ] &&
+    [ "$(rear_with '' both)" = "0 1" ]
+
+# CAMERA_LIBCAMERA=both: the front moves to the libcamera plugin too (frame channel camera0, the
+# 1920x1440 builds); any other value keeps it on v4l2loopback.
+front_block=$(awk '/^# --- libcamera front/ { on = 1; next } /^# --- end of libcamera front/ { exit } on { print }' "$BRIDGE")
+front_with() {	# CAMERA_LIBCAMERA -> "LC_FRONT FRONT_OUT SIZE_DIR"
+    (
+        cfg() { [ "$1" = CAMERA_LIBCAMERA ] && printf '%s' "$c_lc"; }
+        c_lc=$1 SIZE_DIR=/1280x720
+        eval "$front_block" >/dev/null
+        echo "$LC_FRONT $FRONT_OUT $SIZE_DIR"
+    )
+}
+[ "$(front_with '')" = "0 /dev/video64 /1280x720" ] && [ "$(front_with 1)" = "0 /dev/video64 /1280x720" ] &&
+    [ "$(front_with test)" = "0 /dev/video64 /1280x720" ] && [ "$(front_with both)" = "1 channel:camera0 /1920x1440" ]
+# No loopback module and no front UVC identity with both on libcamera.
+grep -q '^if \[ "$LC_FRONT" != 1 \]; then$' "$BRIDGE"
+[ "$(grep -c '^if \[ "$LC_FRONT" != 1 \]; then$' "$BRIDGE")" = 2 ]
+loop_line=$(grep -n 'insmod /postinstall/gbos/kmod/v4l2loopback.ko' "$BRIDGE" | cut -d: -f1)
+guard_line=$(grep -n '^if \[ "$LC_FRONT" != 1 \]; then$' "$BRIDGE" | head -n 1 | cut -d: -f1)
+[ "$guard_line" -lt "$loop_line" ]
+# The USB fallback: after the libcamera cameras failed, CAMERA_LIBCAMERA reads as 0 and the script
+# runs itself again; the bridges are stopped first.
+cfg_fn=$(awk '/^cfg\(\) \{/ { on = 1 } on { print } on && /^}/ { exit }' "$BRIDGE")
+[ "$(GBOS_CAMERA_USB_FALLBACK=1 sh -c "$cfg_fn"'; cfg CAMERA_LIBCAMERA')" = 0 ]
+grep -Fq 'GBOS_CAMERA_USB_FALLBACK=1 exec /system/bin/sh "$0" "$BOOT_ID"' "$BRIDGE"
+grep -Fq 'if ! add_libcamera_plugins && [ "$LC_FRONT" = 1 ]; then' "$BRIDGE"
+fallback=$(awk '/^if ! add_libcamera_plugins/ { on = 1 } on { print } on && /^fi$/ { exit }' "$BRIDGE")
+[ "$(echo "$fallback" | grep -n 'kill "$pid"' | cut -d: -f1)" -lt "$(echo "$fallback" | grep -n 'exec /system/bin/sh' | cut -d: -f1)" ]
 
 # Rear bridge choice: the loopback rear uses the front's build; the libcamera rear the 1920x1440
 # builds with the frame channel output, on the GPU when the front is, and not at all without them.
@@ -154,7 +183,7 @@ sup_out=$(
     set +e  # as in the launcher (set -u only)
     sleep() { :; }
     FAKE_ARGS=$tmp/args; export FAKE_ARGS
-    BRIDGE=$tmp/fake-bridge LOGDIR=$tmp REAR_LOG=$tmp/rear.log CAL= REAR_ROTATION=0 IDLE_STOP=15
+    BRIDGE=$tmp/fake-bridge LOGDIR=$tmp REAR_LOG=$tmp/rear.log CAL= REAR_ROTATION=0 IDLE_STOP=15 FRONT_OUT=/dev/video64
     BRIDGE_CPU=$tmp/fake-bridge BRIDGE_GPU=$tmp/no-gpu-build
     sh -c 'exit 4' & BRIDGE_PID=$!
     REAR_PID_RUN=
@@ -172,7 +201,7 @@ sup_out=$(
     set +e
     sleep() { :; }
     FAKE_ARGS=$tmp/args; export FAKE_ARGS
-    LOGDIR=$tmp REAR_LOG=$tmp/rear.log CAL= REAR_ROTATION=0 IDLE_STOP=0
+    LOGDIR=$tmp REAR_LOG=$tmp/rear.log CAL= REAR_ROTATION=0 IDLE_STOP=0 FRONT_OUT=/dev/video64
     BRIDGE_CPU=$tmp/fake-bridge BRIDGE_GPU=$tmp/fake-gpu BRIDGE=$tmp/fake-gpu
     sh -c 'exit 1' & BRIDGE_PID=$!
     REAR_PID_RUN=
@@ -190,7 +219,7 @@ sup_out=$(
     set +e
     sleep() { :; }
     FAKE_ARGS=$tmp/args; export FAKE_ARGS
-    LOGDIR=$tmp REAR_LOG=$tmp/rear.log CAL= REAR_ROTATION=0 IDLE_STOP=0
+    LOGDIR=$tmp REAR_LOG=$tmp/rear.log CAL= REAR_ROTATION=0 IDLE_STOP=0 FRONT_OUT=/dev/video64
     BRIDGE_CPU=$tmp/fake-bridge BRIDGE_GPU=$tmp/fake-gpu BRIDGE=$tmp/fake-gpu
     REAR_BRIDGE_CPU=$tmp/fake-bridge REAR_BRIDGE_GPU=$tmp/fake-gpu REAR_BRIDGE=$tmp/fake-gpu
     REAR_OUT=channel:camera1
@@ -234,8 +263,7 @@ grep -Fq 'WARNING: GPU bridge did not reach streaming state; using the CPU conve
 plugin_fn=$(awk '/^(add_libcamera_plugins|libcamera_service_stable)\(\) \{/ { on = 1 } on { print } on && /^}/ { on = 0 }' "$BRIDGE")
 [ "$(echo "$plugin_fn" | grep -c '^[a-z_]*() {')" = 2 ]
 echo "$plugin_fn" | grep -q 'mount -o bind "$LIBCAMERA_COPY" "$LIBCAMERA_PIPE"'
-grep -Fq 'add_libcamera_plugins || true' "$BRIDGE"
-[ "$(grep -n 'add_libcamera_plugins || true' "$BRIDGE" | cut -d: -f1)" -lt "$(grep -n 'killall -9 cameraserver' "$BRIDGE" | cut -d: -f1)" ]
+[ "$(grep -n '^if ! add_libcamera_plugins' "$BRIDGE" | cut -d: -f1)" -lt "$(grep -n 'killall -9 cameraserver' "$BRIDGE" | cut -d: -f1)" ]
 mkdir -p "$tmp/pipe" "$tmp/plugins"
 echo google > "$tmp/pipe/camera.libipu7_hal_fatcat.so"
 echo ours > "$tmp/plugins/gbos_test.so"
@@ -279,6 +307,11 @@ echo "$calls" | grep -qx 'status 0'
 [ "$(cat "$tmp/copy/camera.libipu7_hal_fatcat.so")" = google ] && [ "$(cat "$tmp/copy/gbos_ipu6.so")" = ipu6 ] &&
     [ ! -e "$tmp/copy/gbos_test.so" ]
 rm -rf "$tmp/copy"
+rm -rf "$tmp/copy"
+calls=$(run_plugins both stable)
+echo "$calls" | grep -qx 'status 0'
+[ "$(cat "$tmp/copy/gbos_ipu6.so")" = ipu6 ] && [ ! -e "$tmp/copy/gbos_test.so" ]
+rm -rf "$tmp/copy"
 calls=$(run_plugins test stable)
 echo "$calls" | grep -qx 'status 0'
 [ "$(cat "$tmp/copy/gbos_test.so")" = ours ] && [ ! -e "$tmp/copy/gbos_ipu6.so" ]
@@ -297,6 +330,7 @@ calls=$(run_plugins 0)
 rm -f "$tmp/plugins/gbos_ipu6.so"
 calls=$(run_plugins 1)
 ! echo "$calls" | grep -q '^mount\|^stop\|^start'
+echo "$calls" | grep -qx 'status 1'	# a missing plugin is a failure (the both-cameras fallback needs it)
 
 # Output size: CAMERA_SIZE picks bridge builds, loopback bounds and descriptors together; the
 # files it names exist in usb/.

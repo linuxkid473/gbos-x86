@@ -15,9 +15,14 @@
  * Keeping the sensor work out of this process also means a bridge failure never takes the camera
  * service down: the plugin just waits for the bridge to come back.
  *
- * Step 1 (2026-11-20): the rear OV8856 only, as INTERNAL "camera1" (camera_hal.yaml: back). It is
- * registered only when its bridge's channel exists. Internal only: an external camera crashes
+ * Cameras: INTERNAL "camera0", the front OV5678 (RGB-IR), and "camera1", the rear OV8856, as
+ * Google's camera_hal.yaml names them (camera0 front, camera1 back, rotation 0). Each is registered
+ * only when its bridge's channel exists, so CAMERA_LIBCAMERA=1 (rear only; the front stays on the
+ * USB HAL) and CAMERA_LIBCAMERA=both use the same plugin. Internal only: an external camera crashes
  * Google's adapter (boot-16, see gbos_test.cpp).
+ *
+ * Sizes: CameraX in Google's camera app takes only its video qualities when there are no encoder
+ * profiles (SD 640x480, HD 1280x720, FHD 1920x1080; boot-17/18), and all three are listed.
  */
 
 #include <algorithm>
@@ -32,6 +37,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <string>
+#include <typeinfo>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
@@ -59,13 +65,42 @@
 #include "../ipu6-channel.h"
 #include "gbos_convert.h"
 
+/*
+ * Google's HAL hands us gralloc buffers as HALFrameBuffer (src/android/hal_framebuffer.h: a
+ * FrameBuffer plus its buffer_handle_t), and its minigbm buffer manager knows their real row
+ * strides; both are exported by camera.libcamera_hal_base.so. Declared here as there (the AOSP
+ * headers need Android's cutils/hardware headers, which the NDK lacks); only the layout and the
+ * mangled names matter. A buffer is recognised by its type name, so no typeinfo of ours is
+ * compared with the vendor's.
+ */
+struct native_handle;
+typedef const native_handle *buffer_handle_t;
+
+namespace crosLibcamera {
+class CameraBufferManager
+{
+public:
+	static size_t GetPlaneStride(buffer_handle_t buffer, size_t plane);
+};
+} /* namespace crosLibcamera */
+
+class HALFrameBuffer final : public libcamera::FrameBuffer
+{
+public:
+	buffer_handle_t handle() const { return handle_; }
+
+private:
+	HALFrameBuffer() = delete;
+	buffer_handle_t handle_;
+};
+
 namespace libcamera {
 
 LOG_DEFINE_CATEGORY(GbosIpu6)
 
 namespace {
 
-/* What the libcamera-mode bridge build delivers (installer/bin/1920x1440/): the rear's 4:3. */
+/* What the libcamera-mode bridge build delivers (installer/bin/1920x1440/): both sensors are 4:3. */
 const Size kMaxSize{ 1920, 1440 };
 /* Listed sizes (the HAL adds camera3Resolutions below the maximum and the maximum itself). */
 const Size kSizes[] = {
@@ -73,7 +108,8 @@ const Size kSizes[] = {
 };
 constexpr unsigned int kBufferCount = 4;
 constexpr int64_t kFrameDurationUs = 33333;
-constexpr unsigned int kMaxStreams = 3;
+/* Preview + YUV analysis + video + the HAL's internal still stream for JPEG. */
+constexpr unsigned int kMaxStreams = 4;
 
 bool sizeOk(const Size &s)
 {
@@ -101,7 +137,14 @@ struct CameraInfo {
 	const char *model;
 };
 
+/*
+ * Registration order sets the HAL's internal ids (0, 1, ... as registered; camera_hal_manager.cpp).
+ * Google's adapter published the only camera, the back test camera, as device@1.0/legacy/1
+ * (boot-17), so its public ids follow the facing or the yaml name rather than that order. The
+ * USB provider has no cameras when both are here (CAMERA_LIBCAMERA=both), so nothing can clash.
+ */
 const CameraInfo kCameras[] = {
+	{ "camera0", properties::CameraLocationFront, "OV5678 (gbOS IPU6)" },
 	{ "camera1", properties::CameraLocationBack, "OV8856 (gbOS IPU6)" },
 };
 
@@ -114,7 +157,7 @@ public:
 		: Camera::Private(pipe), id_(info.id), streams_(kMaxStreams)
 	{
 		properties_.set(properties::Location, info.location);
-		properties_.set(properties::Rotation, 0);	/* the bridge applies CAMERA_REAR_ROTATION */
+		properties_.set(properties::Rotation, 0);	/* as camera_hal.yaml; the rear bridge applies CAMERA_REAR_ROTATION */
 		properties_.set(properties::Model, info.model);
 		properties_.set(properties::PixelArraySize, kMaxSize);
 		properties_.set(properties::PixelArrayActiveAreas, { Rectangle(kMaxSize) });
@@ -246,7 +289,16 @@ public:
 				cfg.size = sizeOk(s) ? s : kMaxSize;
 				status = Adjusted;
 			}
-			if (cfg.pixelFormat != formats::NV12) {
+			/*
+			 * Google's HAL asks for its JPEG source as an MJPEG StillCapture stream
+			 * (buildStreamConfigsNoMap) and treats any Adjusted result as a failure
+			 * (boot-21: "Set of requested inputs/outputs not supported by HAL"), yet its
+			 * encoder and thumbnailer read NV12, in YCbCr_420_888 buffers it allocates
+			 * itself. So MJPEG becomes NV12 without reporting an adjustment.
+			 */
+			if (cfg.pixelFormat == formats::MJPEG) {
+				cfg.pixelFormat = formats::NV12;
+			} else if (cfg.pixelFormat != formats::NV12) {
 				cfg.pixelFormat = formats::NV12;
 				status = Adjusted;
 			}
@@ -396,6 +448,31 @@ void PipelineHandlerGbosIpu6::channelReadable(GbosIpu6CameraData *data)
 
 namespace {
 
+/*
+ * Bytes per row of an NV12 buffer: the gralloc stride for the HAL's buffers, else (our DmaHeap
+ * buffers, packed) the width. The UV plane has the same stride as luma in NV12.
+ */
+unsigned int rowStride(const FrameBuffer *buffer, size_t plane0, size_t planes, const Size &size)
+{
+	static const char *const kHal = typeid(HALFrameBuffer).name();
+	unsigned int stride = 0;
+
+	if (!strcmp(typeid(*buffer).name(), kHal)) {
+		const HALFrameBuffer *hal = static_cast<const HALFrameBuffer *>(buffer);
+		stride = (unsigned int)crosLibcamera::CameraBufferManager::GetPlaneStride(hal->handle(), 0);
+	}
+	if (stride < size.width || stride > size.width * 4u) {
+		/* Not a HAL buffer (or no answer): packed, as exportFrameBuffers makes them. */
+		stride = size.width;
+		if (planes == 1 && plane0 >= (size_t)size.width * size.height * 3 / 2)
+			stride = (unsigned int)(plane0 * 2 / 3 / size.height);
+		else if (planes > 1 && plane0 >= (size_t)size.width * size.height)
+			stride = (unsigned int)(plane0 / size.height);
+		stride = std::max(stride & ~1u, size.width);
+	}
+	return stride;
+}
+
 /* CPU access to a dma-buf the GPU or display may also use. */
 void dmabufSync(const FrameBuffer *buffer, uint64_t flags)
 {
@@ -426,17 +503,20 @@ void PipelineHandlerGbosIpu6::completeFrame(GbosIpu6CameraData *data, Request *r
 			if (!mapped.isValid() || planes.empty()) {
 				LOG(GbosIpu6, Error) << data->id_ << ": cannot map a frame buffer";
 			} else {
-				/* Stride from the luma plane's length when gralloc pads it. */
-				unsigned int stride = size.width;
-				if (planes.size() == 1 && planes[0].size() >= (size_t)size.width * size.height * 3 / 2)
-					stride = planes[0].size() * 2 / 3 / size.height;
-				else if (planes[0].size() >= (size_t)size.width * size.height)
-					stride = planes[0].size() / size.height;
-				stride = std::max(stride & ~1u, size.width);
+				unsigned int stride = rowStride(buffer, planes[0].size(), planes.size(), size);
 				uint8_t *y = planes[0].data();
 				uint8_t *uv = planes.size() > 1 ? planes[1].data() : y + (size_t)stride * size.height;
-				gbos_yuyv_to_nv12(src, data->hello_.width, data->hello_.height, y, uv, stride,
-						  size.width, size.height);
+				size_t need = (size_t)stride * (size.height - 1) + size.width;
+				size_t needUv = (size_t)stride * (size.height / 2 - 1) + size.width;
+				size_t haveUv = planes.size() > 1 ? planes[1].size() :
+					planes[0].size() - (size_t)stride * size.height;
+				if (planes[0].size() < need || haveUv < needUv) {
+					LOG(GbosIpu6, Error) << data->id_ << ": buffer too small for " << size
+							     << " at stride " << stride;
+				} else {
+					gbos_yuyv_to_nv12(src, data->hello_.width, data->hello_.height, y, uv,
+							  stride, size.width, size.height);
+				}
 			}
 		}
 		dmabufSync(buffer, DMA_BUF_SYNC_END);

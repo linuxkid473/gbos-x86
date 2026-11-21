@@ -314,7 +314,32 @@ static int ir_visible_q12 = 410;		/* 0.10 */
  * that teal). At 0.75 boot-12's daylight frames sit on the locus (0.00-0.03; at 0.60 they were
  * 0.04 on the magenta side), boot-8's 0.07 on the green side, within the green-side zone.
  */
-static int nir_keep_q12[3] = { 0, 0, 1024 };	/* R, G: k = 1; B: k = 0.75 */
+static int nir_keep_q12[3] = { 0, 0, 1024 };	/* R, G: k = 1; B: k = 0.75 (G: see below) */
+
+/*
+ * 2026-11-21 (boot-21): green keeps more NIR than the model removes, by an amount that depends on
+ * the light. Sunlit room, NIR 0.40-0.82 of green: grey-world R/G 0.33-0.44 and B/G 0.43-0.51, both
+ * low, 0.10-0.26 off the module's locus on its green side; the band could only pull it 0.08 off, so
+ * the picture was green. Boot-15's window light (NIR 0.34-0.92) the same. One extra green term,
+ * G = G_site - IR - e x n, with e = 0.39 (boot-21) or 0.40 (boot-15) fitted per boot, put every one
+ * of those frames within 0.005-0.07 of the locus, between D65 and D50 (the lights a sunlit room
+ * has), and a fit on either boot predicts the other. But boot-12's window light (NIR 0.43, 1x)
+ * already sat on the locus with e = 0, and e = 0.39 would push it 0.12-0.19 to the magenta side.
+ * So e is measured per scene: the value in 0..NIR_GREEN_MAX that brings the frame's grey-world
+ * closest to the locus, faded in from NIR NIR_GREEN_START (lamps and LEDs, NIR 0.00-0.05, are
+ * never touched) and from a locus distance of NIR_GREEN_DEAD (boot-12's 0.03 stays as it was),
+ * and smoothed over frames. nir_keep_q12[1] = -e: the whole picture, CPU and GPU,
+ * uses it, not only the white point.
+ */
+#define NIR_GREEN_START 0.20		/* NIR/green where the estimate starts to count */
+#define NIR_GREEN_RAMP 0.15		/* ... and counts fully at START + RAMP */
+#define NIR_GREEN_MAX 0.45
+/* Only frames clearly off the locus: none within NIR_GREEN_DEAD, fully from twice that. */
+#define NIR_GREEN_DEAD 0.04
+#define NIR_GREEN_SMOOTH 0.3		/* per frame, after the first estimate */
+static int nir_green_adapt = 1;		/* 0: e stays 0 (host-test negative control) */
+static double nir_green_excess;		/* e, smoothed */
+static int nir_green_frames;		/* estimates since the last reset */
 
 static int nir_estimate(int ir, int green)
 {
@@ -696,6 +721,53 @@ static void update_lsc(double rg, double bg, unsigned int width, unsigned int he
 	lsc_generation++;
 }
 
+#ifdef CAMERA_BRIDGE_TEST
+/* A new test scene: no estimate carried over (the bridge keeps it across sessions). */
+static void nir_green_reset(void)
+{
+	nir_green_excess = 0;
+	nir_green_frames = 0;
+	nir_keep_q12[1] = 0;
+}
+#endif
+
+/* The scene's green NIR excess e (see nir_keep_q12) from the frame's per-site means above black. */
+static void update_nir_green(const double m[4])
+{
+	double nir = nir_estimate_f(m[CFA_IR], m[1]), target = 0;
+	double g0 = m[1] - m[CFA_IR];
+	double r = m[0] - m[CFA_IR] + nir * nir_keep_q12[0] / 4096.0;
+	double b = m[2] - m[CFA_IR] + nir * nir_keep_q12[2] / 4096.0;
+
+	if (nir_green_adapt && ccm_count >= 2 && g0 > WB_MIN_SIGNAL && r > 0 && b > 0) {
+		double w = (nir / g0 - NIR_GREEN_START) / NIR_GREEN_RAMP;
+		if (w > 1) w = 1;
+		double px, py, d0 = fabs(locus_nearest(r / g0, b / g0, &px, &py));
+		double wd = (d0 - NIR_GREEN_DEAD) / NIR_GREEN_DEAD;
+		if (wd > 1) wd = 1;
+		if (wd < w) w = wd;
+		if (w > 0) {
+			double best = 1e9, best_e = 0;
+			for (int k = 0; k <= (int)(NIR_GREEN_MAX * 100 + 0.5); k++) {
+				double e = k / 100.0, g = g0 - e * nir;
+				if (g <= WB_MIN_SIGNAL)
+					break;
+				double d = fabs(locus_nearest(r / g, b / g, &px, &py));
+				if (d < best - 1e-4) {	/* the smallest e that gets closest */
+					best = d;
+					best_e = e;
+				}
+			}
+			target = w * best_e;
+		}
+	}
+	if (nir_green_frames++ == 0)
+		nir_green_excess = target;
+	else
+		nir_green_excess += NIR_GREEN_SMOOTH * (target - nir_green_excess);
+	nir_keep_q12[1] = -(int)lround(nir_green_excess * 4096);
+}
+
 static void calculate_white_balance(const uint16_t *raw, unsigned int width,
 				    unsigned int height, unsigned int stride,
 				    unsigned int gain_q12[3], double *mean_green)
@@ -792,6 +864,8 @@ static void calculate_white_balance(const uint16_t *raw, unsigned int width,
 	if (mean_green)
 		*mean_green = all_count ? (double)all_sum / all_count : 0;
 	/* Balance the colour after removing the IR that leaks into R, G and B (model above). */
+	if (cfa_has_ir_sites())
+		update_nir_green(mean);
 	double nir = nir_estimate_f(mean[CFA_IR], mean[1]);
 	for (int channel = 0; channel < 3; channel++) {
 		mean[channel] += -mean[CFA_IR] + nir * nir_keep_q12[channel] / 4096.0;
@@ -919,8 +993,10 @@ static void log_cfa_phases(const uint16_t *raw, unsigned int width,
 	else
 		printf("ccm: no calibration table; generic saturation %.2f\n", saturation_q12 / 4096.0);
 	if (cfa_has_ir_sites())
-		printf("ir: NIR %.2f of green (IR site minus %.2f x green), blue NIR response %.2f; clip at raw %u\n",
-		       wb_nir_ratio, ir_visible_q12 / 4096.0, 1.0 - nir_keep_q12[2] / 4096.0, raw_clip);
+		printf("ir: NIR %.2f of green (IR site minus %.2f x green), blue NIR response %.2f, "
+		       "green NIR excess %.2f (this scene); clip at raw %u\n",
+		       wb_nir_ratio, ir_visible_q12 / 4096.0, 1.0 - nir_keep_q12[2] / 4096.0,
+		       -nir_keep_q12[1] / 4096.0, raw_clip);
 	else
 		printf("clip: raw %u\n", raw_clip);
 	if (lsc_active)

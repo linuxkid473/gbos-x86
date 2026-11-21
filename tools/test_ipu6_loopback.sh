@@ -14,7 +14,8 @@ grep -Fq 'min_width=$OUT_W max_width=$OUT_W min_height=$OUT_H max_height=$OUT_H'
 # The bridge's output size is what the launcher's bounds and the descriptors say.
 grep -q '^#define OUT_WIDTH 1920$' "$ROOT/kernel/ipu6-loopback.c"
 grep -q '^#define OUT_HEIGHT 1080$' "$ROOT/kernel/ipu6-loopback.c"
-grep -q '"$BRIDGE" /dev/media0 /dev/video64' "$ROOT/usb/installer/bin/ipu6-camera-bridge.sh"
+grep -Fq '"$BRIDGE" /dev/media0 "$FRONT_OUT"' "$ROOT/usb/installer/bin/ipu6-camera-bridge.sh"
+grep -q '^FRONT_OUT=/dev/video64$' "$ROOT/usb/installer/bin/ipu6-camera-bridge.sh"
 grep -q 'wait "$BRIDGE_PID"' "$ROOT/usb/installer/bin/ipu6-camera-bridge.sh"
 grep -q '/sys/module/ov5675/parameters/gbos_windows_isp' "$ROOT/usb/installer/bin/ipu6-camera-bridge.sh"
 grep -q '^OV5678_WINDOWS_ISP=0' "$ROOT/usb/gbos.cfg"

@@ -1112,6 +1112,7 @@ static int run_rgbir_scene(const struct rgbir_scene *s, struct scene_result *r)
 	if (!f)
 		return -1;
 	set_rgbir_pattern();
+	nir_green_reset();	/* a new scene: no green NIR estimate carried over */
 	sensor_total_gain = s->gain > 0 ? s->gain : 1.0;
 	for (int k = 0; k < 4; k++) {
 		for (unsigned int y = 0; y < h; y++)
@@ -1166,6 +1167,8 @@ static const struct rgbir_scene boot12_daylight = { { 135.6, 198.6, 133.6, 68.9 
 
 static void restore_colour_defaults(int keep_b, double nir_band)
 {
+	nir_green_adapt = 1;
+	nir_green_reset();
 	nir_keep_q12[2] = keep_b;
 	wb_locus_nir_band = nir_band;
 	wb_locus_green_band = 0.18;
@@ -1193,7 +1196,11 @@ static int test_daylight_ir_grey(void)
 		result = 2;
 	else if (wb_nir_ratio < 0.35 || wb_nir_ratio > 0.5 || wb_locus_distance > wb_locus_band)
 		result = 3;	/* NIR ~0.43 of green; within the (widened) band */
+	else if (nir_green_excess > 0.05)
+		result = 7;	/* on the locus already: no green NIR correction (boot-12, see nir_keep_q12) */
 	wb_locus_green_band = 0;
+	/* The controls test the blue term and the band alone: no scene green estimate. */
+	nir_green_adapt = 0;
 	/* Negative control: no blue NIR term, fixed band. */
 	nir_keep_q12[2] = 0;
 	wb_locus_nir_band = 0;
@@ -1207,6 +1214,64 @@ static int test_daylight_ir_grey(void)
 	wb_locus_nir_band = band;
 	if (!result && (run_rgbir_scene(&sc, &r) || (fabs(r.u) <= 2 && fabs(r.v) <= 2)))
 		result = 6;
+	restore_colour_defaults(keep, band);
+	return result;
+}
+
+/*
+ * 2026-11-21 (boot-21): a grey in a sunlit room, NIR 0.69 of green, 3.5x. Per-site levels from the
+ * logged grey-world (R/G 0.353, B/G 0.447 with the model as it was, so IR = 0.79, G = 1.79,
+ * R = 1.14, B = 1.06 per unit of that green). The scene's green NIR estimate brings it to the
+ * locus: neutral. Negative control: without it (e = 0) the white point stays at the band's edge on
+ * the green side and the grey comes out green (U, V about -9), as on the laptop. Without NIR the
+ * estimate stays 0; sunlit foliage over a third of the frame keeps the grey neutral.
+ */
+static const struct rgbir_scene boot21_sunlit = { { 114.3, 179.0, 106.5, 79.0 }, { 0 }, 0, 0, 10.0, 3.5 };
+
+static int test_daylight_green_nir(void)
+{
+	struct rgbir_scene sc = boot21_sunlit;
+	struct scene_result r;
+	int keep = nir_keep_q12[2];
+	double band = wb_locus_nir_band;
+	int result = 0;
+
+	if (load_test_locus())
+		return 1;
+	if (run_rgbir_scene(&sc, &r))
+		result = 2;
+	if (!result && (fabs(r.u) > 2 || fabs(r.v) > 2))
+		result = 3;
+	else if (!result && (nir_green_excess < 0.15 || nir_green_excess > NIR_GREEN_MAX))
+		result = 4;
+	nir_green_adapt = 0;
+	if (!result && run_rgbir_scene(&sc, &r))
+		result = 5;
+	if (!result && !(r.u < -2 && r.v < -2))
+		result = 6;
+	nir_green_adapt = 1;
+	/* Not a lamp: the same levels without NIR (IR site = 0.10 x green) are left alone. */
+	sc.level[3] = 0.10 * sc.level[1] / 1.10;
+	if (!result && run_rgbir_scene(&sc, &r))
+		result = 7;
+	if (!result && nir_green_excess != 0)
+		result = 8;
+	/*
+	 * Foliage in the same sun over the top third: visible R, G, B 20, 60, 15 plus NIR 120 (leaves
+	 * reflect much of it). The sites take it as the grey's do in this light: R all of it, G 1.39x
+	 * (boot-21's excess), B 0.75; the IR site the NIR plus 0.10 of green. The grey stays neutral,
+	 * the estimate within its bound, and the foliage green (the correction does not grey it).
+	 */
+	sc = boot21_sunlit;
+	sc.top_rows = 972 / 3;
+	sc.top[0] = 20 + 120; sc.top[1] = 60 + 1.39 * 120; sc.top[2] = 15 + 0.75 * 120;
+	sc.top[3] = (120 + 0.10 * sc.top[1]) / 1.10;
+	if (!result && run_rgbir_scene(&sc, &r))
+		result = 9;
+	else if (!result && (fabs(r.u) > 2 || fabs(r.v) > 2 || nir_green_excess > NIR_GREEN_MAX))
+		result = 10;
+	else if (!result && !(r.top_u < -3 && r.top_v < -3))
+		result = 11;
 	restore_colour_defaults(keep, band);
 	return result;
 }
@@ -2148,6 +2213,8 @@ int main(void)
 		return 250 + test_autofocus();
 	{
 		int r;
+		if ((r = test_daylight_green_nir()))
+			return printf("test_daylight_green_nir %d\n", r), 1;
 		if ((r = test_daylight_ir_grey()))
 			return printf("test_daylight_ir_grey %d\n", r), 260 + r;
 		if ((r = test_lowlight_led_grey()))
