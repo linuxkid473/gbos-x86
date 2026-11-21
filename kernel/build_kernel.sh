@@ -73,6 +73,7 @@ for s in i915_color_pipeline i915_edp_colorspace i915_edp_no_colorspace i915_edp
   sh \$P/\$s.sh > /dev/null
 done
 python3 \$P/sdw_sl7.py /build/src > /dev/null
+python3 \$P/sdw_link_skip.py /build/src > /dev/null
 python3 /host/kernel/isa_emu_patch/camera_7320.py /build/src
 P=/host/kernel/kernelsu sh /host/kernel/kernelsu/apply.sh | tail -2
 
