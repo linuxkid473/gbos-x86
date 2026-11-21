@@ -1445,3 +1445,12 @@ SHA-NI, 256-bit VAES/VPCLMULQDQ, AVX-IFMA and AVX-512; the lapis binaries use th
   `publish_system_update.sh` used to carry on after that refusal (the build's exit status was lost in a pipe): it now stops and removes
   the half-made release (test added).
 
+- 2026-11-21 **Updater deployed to the persistent stick, on the lab channel (user approved each publish).**
+  - Merged `claude/hopeful-snyder-258763` into integration (55b24a2). Removed personal data: a home path in HANDOFF and a user name in a goodix_sim_test fixture (7d2ff73).
+  - **Fix 3558f76:** under the FAT lockdown, sysupdate.sh's Android-side writers (stage, cancel, request, boot-ok, install-app) re-run in a private mount namespace with /postinstall writable, like audio-profile.sh. Without it, the app could not stage and a tried update would roll back. test_system_update.sh: the old script fails 5 checks. All 42 tools/test_*.sh pass.
+  - **Lab snapshot:** branch `lab/updater-base2`, `b3a6d4d` + `ba8fc05`: integration plus lapis/BUILD and patched/MANIFEST at R4, the lab key in usb/sysupdate.pub, and `hook: gbOS86 lab marker 1`. Pushed to the lab repo's main.
+  - **Published:** `sysupdate-202611211956` (set 37623db1…, without the fix) and then `sysupdate-202611212044` (set `0451bf34…`, commit ba8fc05, R4, full bundle 825 MB, no delta). The feed points at 202611212044.
+  - **App:** built with REPO set to the lab repo and the test key (lab-base2/build/updater-app; later lab updates must be built from that worktree to keep the signature). APK 8e75e262…
+  - **On the stick (D:\gbos):** sysupdate.sh 59a9dd5d…, sysupdate.pub (lab), gbos86-updater.apk, hook.sh (marker 1), early_patch.sh, patched/MANIFEST, and system.manifest = set 0451bf34….
+  - **Checked:** a full hash of the stick against the set (all 5251 equal; extras only gbos.cfg, camera/, a11y/, install.sh and the Windows .bat), busybox at the GBOSSYS root, no SYSUPDATE=0, and `sysupdate.sh audit` on an identical tree: `modified=no`.
+  - **Next:** boot; then the app installs and checks the feed, and finds no newer update. To test updating from inside the system, publish update 2 (`lab marker 2`, next seq) from lab-base2. That needs the user's approval.
