@@ -73,7 +73,7 @@ void main()
 	}
 	float keep = 1.0;
 	if (P.chroma_guard != 0 && P.cfa_count[3] != 0) {
-		int g16 = max(lin3[1], 16);
+		int g16 = max(max(lin3[0], max(lin3[1], lin3[2])), 16);	// the strongest colour (chroma_guard_strongest)
 		if ((gmax - gmin) * 4u > gmax + gmin + 64u ||
 		    float(nir) > (P.wb_nir_ratio + P.nir_free) * float(g16)) {
 			float rho = float(nir) / float(g16);
