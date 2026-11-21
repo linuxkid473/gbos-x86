@@ -1396,3 +1396,52 @@ SHA-NI, 256-bit VAES/VPCLMULQDQ, AVX-IFMA and AVX-512; the lapis binaries use th
   - gbos.cfg differs from usb/gbos.cfg only by `MODE=boot`, `CAMERA_BRIDGE=1`, `DEBUG_LOGS=1` and `CAMERA_LIBCAMERA=both`.
   - The user flashes it with Rufus (DD mode) or balenaEtcher.
 - 2026-11-21 **Persistent image flashed by the user** (Kingston 115 GB: GBOSSYS is Windows `D:`, 7.98 GB, 3.73 GB free; not booted yet). Its files equal the image. **Updater deploy requested:** the published lab set (update 1, 20 Nov, fb5f636d…) predates most of the work above, so deploying it would roll the stick back. Next: the updater thread should merge integration into `claude/hopeful-snyder-258763`, publish a new lab base set built from it, and give the exact deploy list. (Both messages to it were blocked by the auto-mode safety check (sensitive information, then undermining oversight); the user decides how the request reaches the updater thread.)
+- 2026-11-20 **System updates without the stick (built and tested on the PC, not on hardware; not deployed).** `docs/system-update.md`.
+  - *What:* a signed bundle (`gbos86-update-<seq>-<id>/`: manifest, manifest.sig, changed files) copied into `gbos/update.inbox/` on GBOSSYS
+    (from Windows, `sysupdate.sh stage` as root, or the new gbOS86 Updater app) is checked and switched in by stage0 at the next start, from
+    `early_patch.sh` (works on today's kernel; `stage0_init.sh` has a 4-line fallback that needs a kernel build). Rollback after 3 starts that
+    do not reach `sys.boot_completed`; held instead for a new Google build that Android already ran (`/data` may be upgraded).
+  - *Signature:* RSA-3072 PKCS#1 v1.5 / SHA-256 checked in busybox `bc` (0.37 s here), whole encoded block compared. `usb/sysupdate.pub` is a
+    placeholder: laptops refuse every bundle until the project's public key is committed there (`tools/make_system_update.sh keygen`, offline).
+  - *Safety details:* the kernel is replaced by a rename over `BOOTX64.EFI` (never missing) and backed up on GBOSSYS, not the EFI partition;
+    a journal undoes a power cut at any step (tested at every step, kernel switch included); the code that undoes it is the copy that wrote it
+    (`update/engine.sh`); only `EFI/gbos86` or `EFI/BOOT` on a `GBOS_EFI` partition is written, never a shared ESP's fallback loader.
+  - *Menu 1:* shows both sets, refuses an older Google build unless `DOWNGRADE` is typed, trusts `.stamps` only for the same
+    `system.manifest`, never skips `super.img` when `super.layout`/`libkm_compat.so`/`system_ext_manifest.xml`/`patched/MANIFEST` changed.
+  - *App:* `updater-app/` (no permissions; a root init service does the copy, from the app's private request file only). Built with JDK 17,
+    platform 35, build-tools 35.0.0 (downloaded with the user's approval into `~/Android/Sdk`): 16.8 KB, test key, not committed.
+  - *Stick check:* a read-only listing of the stick's firmware/modules/... (5,724 entries) has only names the manifest rules accept.
+  - *Tests:* `tools/test_system_update.sh` (96 checks, `SYSTEM_UPDATE_TEST_PASS`). Untested on hardware: the erofs loop-mount build check,
+    the EFI partition lookup with `sfdisk`, the restart after a kernel change, the tty1 messages, the app and its init service.
+  - *First hardware test:* commit the real public key, deploy, menu 1 once (puts `sysupdate.sh` and the key on the laptop), boot the
+    laptop, copy a small delta bundle into `update.inbox` from Windows, restart. Read `gbos/update/status.txt` and `kmsg.log`'s
+    `gbos-sysupdate:` lines (menu 1's `nvme-logs`). Then try one that changes the kernel.
+- 2026-11-20 **Updates from GitHub in the gbOS86 Updater app, no second PC (built and tested on the PC, not on hardware; not deployed).**
+  - *Publish:* `tools/publish_system_update.sh --key KEY --tree <stick's gbos/>` builds the set from a pushed commit, makes a full and a
+    delta bundle **without `super.img`** (GitHub's 2 GiB limit; Google's image is not ours to redistribute), signs a feed and, after asking,
+    creates release `sysupdate-<seq>` and replaces `gbos86-update.feed` on release `sysupdate-feed` with `gh`. Nothing was uploaded.
+  - *App (v2):* checks after each start (the boot service broadcasts `BOOT_CHECK`) and daily, notifies, downloads (resume, sha256 from the
+    signed feed), stages from its own storage (`where app`), falls back from the delta to the full bundle on `NEEDS-FILES`. Settings tabs
+    General / Experimental features. New permissions: internet, network state, notifications, boot, foreground service.
+  - *Modification check:* `sysupdate.sh audit` (files vs `system.manifest`; added files in the set's folders; `gbos.cfg`/logs ignored;
+    big files by size unless deep) + the set's commit (`-dirty`; clean ones looked up on GitHub). A modified system gets a warning and a
+    second confirmation before installing. `make_system_update.sh manifest` now records `-dirty` when the tree differs from HEAD.
+  - *Experimental, off by default:* rebuild `super.img` from Google's `recovery.zip` (range-read zip directory, one inflate stream, GPT +
+    liblp, Java port of `make_super.py`; resumes a broken connection with the same inflater). `tools/super_parts.py` proves a published
+    `super.img` is make_super.py's image of Google's partitions: true for 16693588 with `lapis/parts` (`google_super 3688890368 e94590cf...`).
+  - *Tests:* `test_system_update.sh` 116 checks; `test_updater_core.sh` (feed, RSA vs openssl, resume, tar, Java vs make_super.py, Google-like
+    zip64 with split/out-of-order/zero extents and a dropped connection). By hand: the real 16693588 partitions in a 3.2 GB zip64 test zip
+    -> the Java code rebuilt the identical 3.7 GB `super.img` in 29 s. Never run: GitHub redirects, Google's real zip, the app on Android.
+- 2026-11-20 **Updater app: the "Modified system" warning now also covers unknown systems (PC only, not on hardware).** Before, the app
+  asked "Install anyway" only for changed files or a `-dirty` build. A laptop installed from a stick deployed with local changes has no
+  `system.manifest` (deploy_stick.sh deletes it), and a commit not on GitHub only got a line of text, so an update could replace local
+  work without asking. Now any system that is not exactly a published set needs the confirmation (codes in `Updater.warningCodes`), and the
+  accepted reasons go to `gbos/update/history.txt` through the request's new `accepted_warning` line.
+- 2026-11-20 **The laptop and the stick still run Google build R4 (16658739), although git says R5 (16693588).** Found while preparing the
+  updater lab test: every fingerprint in `build/boot-logs` (up to boot-15) is `CL3B.260622.276.R4/16658739`, the PC's `lapis/parts`
+  (Nov 6) are R4, and make_super.py of them gives exactly the stick's `super.layout` and size. `lapis/BUILD` and `usb/patched/MANIFEST`
+  say R5 since the 2026-11-13 port, but no R5 `super.img` was ever put on the stick. The patches still bind (the originals' hashes are the
+  same in R4 and R5). `make_system_update.sh` refuses such a set (super.img's fingerprint differs from the MANIFEST's), which is right; and
+  `publish_system_update.sh` used to carry on after that refusal (the build's exit status was lost in a pipe): it now stops and removes
+  the half-made release (test added).
+

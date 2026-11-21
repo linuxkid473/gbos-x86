@@ -73,4 +73,10 @@ Data carries over to a newer build; going back to an older one needs a data wipe
 
 * Commit `usb/patched/`, `usb/libkm_compat.so`, `usb/system_ext_manifest.xml`, `lapis/BUILD`, `lapis/recovery.zip.sha256`.
 * Add a dated line to `HANDOFF.md` (build id, what the tool reported, what the laptop showed).
+* To ship the port to installed laptops without the stick: push the port commit, then `tools/publish_system_update.sh --key KEY.pem --tree <stick's gbos/>`
+  (the laptops' app finds it on GitHub; the new `super.img` comes from the stick or, with the app's experimental setting, from Google's own
+  download, which `tools/super_parts.py` checks is possible: see `docs/system-update.md`). For a bundle to copy by hand:
+  `tools/make_system_update.sh build --key KEY.pem --tree <stick's gbos/> --commit <the port commit> --base <the last bundle's manifest>`
+  ([`docs/system-update.md`](docs/system-update.md)). The bundle carries `super.img`, `super.layout` and the patches of the same commit; the laptop
+  refuses it if `super.img` is another build than `patched/MANIFEST` names.
 * `usb/make_super.py`, `tools/make_gbos86_image.sh` and the installer need no change: they take whatever is in `lapis/parts`.

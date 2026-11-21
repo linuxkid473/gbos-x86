@@ -24,26 +24,22 @@ def name36(s):
     return b.ljust(36, b'\0')
 
 
-def main():
-    out, layout_path, specs = sys.argv[1], sys.argv[2], sys.argv[3:]
-    parts = []
-    for s in specs:
-        name, img = s.split('=', 1)
-        parts.append((name, img, os.path.getsize(img)))
-
+def plan(parts):
+    """parts: [(name, size)] in order -> (placed [(name, size, offset, aligned size)], total, geometry bytes, metadata bytes).
+    The image is fully determined by the names and sizes: tools/super_parts.py and the updater app (SuperImage.java) rely on that."""
     meta_end = RESERVED + (GEOM_SIZE + MAX_META * SLOTS) * 2
     first_logical = up(meta_end, ALIGN)
     cur = first_logical
     placed = []
-    for name, img, size in parts:
+    for name, size in parts:
         size_al = up(size, BLOCK)
-        placed.append((name, img, size, cur, size_al))
+        placed.append((name, size, cur, size_al))
         cur = up(cur + size_al, ALIGN)
     total = up(cur + ALIGN, ALIGN)
 
     # tables
     ptab = b''.join(struct.pack('<36sIIII', name36(n), 1, i, 1, 1) for i, (n, *_r) in enumerate(placed))
-    etab = b''.join(struct.pack('<QIQI', sz // SECTOR, 0, off // SECTOR, 0) for (_n, _i, _s, off, sz) in placed)
+    etab = b''.join(struct.pack('<QIQI', sz // SECTOR, 0, off // SECTOR, 0) for (_n, _s, off, sz) in placed)
     gtab = struct.pack('<36sIQ', name36('default'), 0, 0) + struct.pack('<36sIQ', name36(GROUP), 0, 0)
     btab = struct.pack('<QIIQ36sI', first_logical // SECTOR, ALIGN, 0, total, name36('super'), 0)
     tables = ptab + etab + gtab + btab
@@ -65,17 +61,33 @@ def main():
 
     gbody = lambda ck: struct.pack('<II32sIII', GEOM_MAGIC, 52, ck, MAX_META, SLOTS, BLOCK)
     geom = gbody(hashlib.sha256(gbody(b'\0' * 32)).digest())
+    return placed, total, geom, meta
+
+
+def write_metadata(f, geom, meta):
+    for g in (RESERVED, RESERVED + GEOM_SIZE):
+        f.seek(g); f.write(geom)
+    base = RESERVED + GEOM_SIZE * 2
+    for i in range(SLOTS * 2):  # primary slots then backup slots
+        f.seek(base + i * MAX_META); f.write(meta)
+
+
+def main():
+    out, layout_path, specs = sys.argv[1], sys.argv[2], sys.argv[3:]
+    imgs = {}
+    parts = []
+    for s in specs:
+        name, img = s.split('=', 1)
+        imgs[name] = img
+        parts.append((name, os.path.getsize(img)))
+    placed, total, geom, meta = plan(parts)
 
     with open(out, 'wb') as f:
         f.truncate(total)
-        for g in (RESERVED, RESERVED + GEOM_SIZE):
-            f.seek(g); f.write(geom)
-        base = RESERVED + GEOM_SIZE * 2
-        for i in range(SLOTS * 2):  # primary slots then backup slots
-            f.seek(base + i * MAX_META); f.write(meta)
-        for name, img, size, off, _sz in placed:
+        write_metadata(f, geom, meta)
+        for name, size, off, _sz in placed:
             f.seek(off)
-            with open(img, 'rb') as src:
+            with open(imgs[name], 'rb') as src:
                 while True:
                     buf = src.read(8 << 20)
                     if not buf:
@@ -83,7 +95,7 @@ def main():
                     f.write(buf)
             print('%-16s %10d bytes at sector %d' % (name, size, off // SECTOR), flush=True)
     with open(layout_path, 'w') as lf:
-        for name, _img, _size, off, sz in placed:
+        for name, _size, off, sz in placed:
             lf.write('%s %d %d\n' % (name, off // SECTOR, sz // SECTOR))
     print('super: %d bytes' % total)
 

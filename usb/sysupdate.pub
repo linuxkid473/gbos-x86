@@ -1,0 +1,2 @@
+gbos86-sysupdate-key 1
+none: no signing key is installed, so every system update is refused. Put the project's public key here (tools/make_system_update.sh pubkey); see docs/system-update.md.
