@@ -1339,3 +1339,24 @@ SHA-NI, 256-bit VAES/VPCLMULQDQ, AVX-IFMA and AVX-512; the lapis binaries use th
     - If the plugin can't be used (crash guard, missing file, bind mount failure), the launcher stops both bridges and runs itself again with `GBOS_CAMERA_USB_FALLBACK=1` (CAMERA_LIBCAMERA reads as 0): the cameras come back on the USB route that boot.
     - `CAMERA_LIBCAMERA=1` stays rear-only, `=0` the USB route.
   - *Unverified on hardware:* the app's whole libcamera session (stream start, frames, JPEG); the public IDs with two libcamera cameras (the HAL numbers them 0, 1 in registration order; the adapter published the lone back camera as 1); the fallback re-exec; e on real frames.
+- 2026-11-21 **Calibration shot (boot-23 vs Windows): front white point and red fixed against ground truth; the per-scene green correction removed (host-tested only, not deployed).**
+  - *The shot:* the user photographed a Portuguese flag (white shield, red, green, yellow, blue) with the front camera in three lights: natural light in a teal room, a bathroom lamp, direct sun on a balcony. First on Windows (Camera Roll, EXIF OV5678: Intel's pipeline as the reference), then on gbOS with `CAMERA_RAW_DUMP=3` (boot-23 `raw-ov5678-{1,2,3}`; boot-22's dumps were taken before the camera pointed at the flag). The photos stay local.
+  - *What the raw frames say:*
+    - Direct sun: the white shield sits 0.05 from the module's locus with the infrared model as it was (no green term). So the boot-21 green term had the wrong cause, and it is **removed**.
+    - Natural light in the teal room: the shield is 0.17 off on the green side. The light itself is green, bounced off the walls; Windows still renders the shield white.
+    - Lamp: the shield is 0.06 off, the white tiles 0.14 (green side).
+    - Red flag fabric reflects 2–6x more NIR than its green (1.4x its red).
+  - *What the bridge did wrong (rendered with the bridge's CPU path from the raw frames and compared patch by patch with Windows):*
+    - Sun: the large red flag dragged the white point warm (R/G 0.63 for a white at 0.46), so the shield came out light blue (U +30, V −26).
+    - Natural light: the colour guard measured the red's NIR against its tiny green, so it read as "NIR-dominated" and was faded to brown (V +8 vs Windows +54).
+  - *Fixes:*
+    - The white point now comes from the **brightest** regions a light could have lit: weight (G/G_max)^3 over 16x12 regions (were 8x6, each weighing its brightness once).
+    - The colour guard measures NIR against the window's **strongest** colour (CPU `chroma_guard_strongest`, GPU `grid.comp`).
+  - *Result on the shot* (sum of patch colour errors vs Windows): natural light 94 → 76, lamp 63 → 48, sun 111 → 108.
+    - Sun white 37 → 10, lamp tiles 10 → 2, natural red 48 → 18.
+    - Sun red was already over-saturated (V +78 vs +44); the old guard had partly hidden that, so it gets a little worse.
+  - *Still off:*
+    - Natural light: the shield stays cyan (~25). A gilded picture frame in that frame is brighter than the shield, and a uniformity weight didn't help because the shield's regions contain the crests.
+    - Saturated colours in sun (red, yellow) lean orange and over-saturated vs Windows. Not tuned further on three photos.
+  - *Tests:* `test_white_from_brightest` (a bright grey under a large dimmer tint stays neutral; control: plain averaging gives V +6) and `test_red_keeps_colour_nir` (the shot's red levels stay red, V +61; control against green: V +25). Region-count checks are now relative to 16x12. All suites at 4 sizes, CPU = GPU.
+  - *Libcamera rear:* registered and stable on boot-22 and boot-23, but never opened; still unseen in the app.
