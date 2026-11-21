@@ -15,6 +15,7 @@
 # Usage:
 #   sh tools/make_gbos86_image.sh [--type standard|looper] [--data-size N_GB] [--auto] [OUT_DIR]
 #   GBOS_DEBUG_LOGS=1 enables full logcat and verbose startup diagnostics in the image.
+#   GBOS_CFG_SET="CAMERA_LIBCAMERA=both DEBUG_LOGS=1" sets gbos.cfg keys in this image only (applied last).
 #   GBOS_USB_SOURCE=/path/to/usb uses a separately staged USB payload tree.
 set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -192,6 +193,27 @@ if [ "$AUTO_TAILOR" = 1 ]; then
     apply_hardware_config "$G/gbos.cfg"
   fi
 fi
+
+# GBOS_CFG_SET="KEY=value KEY2=value2": settings for this image only, applied last (usb/gbos.cfg is unchanged).
+# Keys are upper-case gbos.cfg names; values may not contain spaces or shell/sed specials.
+gbos_image_cfg_set() {
+  _cfg=$1; shift
+  for _kv in "$@"; do
+    _k=${_kv%%=*}; _v=${_kv#*=}
+    case "$_kv" in *=*) ;; *) echo "GBOS_CFG_SET: '$_kv' is not KEY=value" >&2; exit 1;; esac
+    case "$_k" in ''|*[!A-Z0-9_]*) echo "GBOS_CFG_SET: bad key '$_k'" >&2; exit 1;; esac
+    case "$_v" in *[!A-Za-z0-9._,:+-]*) echo "GBOS_CFG_SET: bad value for $_k: '$_v'" >&2; exit 1;; esac
+    if grep -q "^${_k}=" "$_cfg"; then
+      sed -i.bak "s/^${_k}=.*/${_k}=${_v}/" "$_cfg" && rm -f "$_cfg.bak"
+    else
+      printf '\n# Set for this image (GBOS_CFG_SET)\n%s=%s\n' "$_k" "$_v" >> "$_cfg"
+    fi
+    grep -qx "${_k}=${_v}" "$_cfg" || { echo "GBOS_CFG_SET: failed to set ${_k}=${_v}" >&2; exit 1; }
+    echo "   gbos.cfg: ${_k}=${_v} (GBOS_CFG_SET)"
+  done
+}
+# shellcheck disable=SC2086
+[ -z "${GBOS_CFG_SET:-}" ] || gbos_image_cfg_set "$G/gbos.cfg" $GBOS_CFG_SET
 
 cp "$ROOT/kernel/out/busybox" "$STAGE/gbos/busybox"
 

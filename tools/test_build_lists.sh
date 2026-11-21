@@ -36,5 +36,17 @@ grep -q 'GBOS_IPU6_CAMERA_BRIDGE="$GBOS_IPU6_CAMERA_BRIDGE" GBOS_SENSOR_PAYLOAD=
 grep -q 'image_payload.sh" stage "$GBOS_SENSOR_PAYLOAD"' "$ROOT/tools/install_dualboot.sh" || { echo "FAIL: install_dualboot.sh does not stage the sensor sub-HAL"; fail=1; }
 grep -q 'CAMERA_BRIDGE=1' "$ROOT/tools/install_dualboot.sh" || { echo "FAIL: install_dualboot.sh cannot turn the cameras on"; fail=1; }
 grep -q '"$U/camera"' "$ROOT/tools/make_gbos86_image.sh" || { echo "FAIL: make_gbos86_image.sh does not include usb/camera/"; fail=1; }
+# GBOS_CFG_SET: per-image gbos.cfg settings, validated, applied to the staged copy only.
+sed -n '/^gbos_image_cfg_set() {/,/^}/p' "$ROOT/tools/make_gbos86_image.sh" > "$T/cfgset.sh"
+[ -s "$T/cfgset.sh" ] || { echo "FAIL: gbos_image_cfg_set missing from make_gbos86_image.sh"; fail=1; }
+printf 'MODE=ask\nDEBUG_LOGS=0\nCAMERA_LIBCAMERA=0\n' > "$T/img.cfg"
+( . "$T/cfgset.sh"; gbos_image_cfg_set "$T/img.cfg" CAMERA_LIBCAMERA=both DEBUG_LOGS=1 CAMERA_SIZE=1920x1080 ) >/dev/null 2>&1 || { echo "FAIL: gbos_image_cfg_set rejected valid settings"; fail=1; }
+grep -qx 'CAMERA_LIBCAMERA=both' "$T/img.cfg" && grep -qx 'DEBUG_LOGS=1' "$T/img.cfg" && grep -qx 'CAMERA_SIZE=1920x1080' "$T/img.cfg" && grep -qx 'MODE=ask' "$T/img.cfg" ||
+  { echo "FAIL: gbos_image_cfg_set did not apply the settings"; fail=1; }
+[ "$(grep -c '^CAMERA_LIBCAMERA=' "$T/img.cfg")" = 1 ] || { echo "FAIL: gbos_image_cfg_set duplicated a key"; fail=1; }
+for bad in 'lower=1' 'NOVALUE' 'MODE=a;b' 'MODE=$(x)' 'MODE=a/b'; do
+  ( . "$T/cfgset.sh"; gbos_image_cfg_set "$T/img.cfg" "$bad" ) >/dev/null 2>&1 && { echo "FAIL: gbos_image_cfg_set accepted '$bad'"; fail=1; }
+done
+grep -q 'gbos_image_cfg_set "$G/gbos.cfg" $GBOS_CFG_SET' "$ROOT/tools/make_gbos86_image.sh" || { echo "FAIL: make_gbos86_image.sh does not apply GBOS_CFG_SET"; fail=1; }
 [ $fail = 0 ] && echo "test_build_lists: PASS"
 exit $fail
