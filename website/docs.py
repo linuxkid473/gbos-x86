@@ -25,7 +25,7 @@ def overview():
 <h2>Status</h2>
 <table class="spec"><tbody>
 <tr><td>Works (Dell Latitude 5300)</td><td>Boot to desktop, setup and Google sign-in, Play Store installs, Wi-Fi, Bluetooth, sound (speakers, headset jack, internal mic, HDMI), touchpad with gestures, battery/AC, persistent data on the internal NVMe drive, screen-lock password, correct display colours.</td></tr>
-<tr><td>Works on other laptops</td><td>Acer Aspire Lite AL15-52 (i5-1235U), Lenovo ThinkPad T470 and an Intel NUC8BEH (live from USB; its SATA drive cannot be installed to), as reported by the people who tried them. See <a href="/docs/tested-laptops">Tested laptops</a>.</td></tr>
+<tr><td>Works on other laptops</td><td>Acer Aspire Lite AL15-52 (i5-1235U), Lenovo ThinkPad T470, an Intel NUC8BEH (installed to its SATA SSD), MSI Sword 16 HX, Dell Inspiron 14 5440 and Dell Inspiron 14 Plus 7440, as reported by the people who tried them. See <a href="/docs/tested-laptops">Tested laptops</a>.</td></tr>
 <tr><td>Partly works</td><td>HP OmniBook 7 (no Wi-Fi) and Dell XPS 16 (screen refresh, Wi-Fi and camera). A Framework Laptop 13 Pro had a black screen, now fixed in the firmware and waiting for confirmation; an HP 14-ne0013dx did not work. Newer Core Ultra machines are the weak spot.</td></tr>
 <tr><td>Not done</td><td>Suspend/resume, Night Light, fingerprint readers, IPU6 cameras, discrete GPUs, OTA updates (manual updates only), Linux Terminal VM, auth-bound keystore keys.</td></tr></tbody></table>
 <h2>The pages in this section</h2>
@@ -152,8 +152,9 @@ def google_hw():
 <tr><td>Logs truncated, stick corrupted</td><td>Android's volume daemon ran a filesystem check on the stick while mounted.</td><td>The USB rule is removed from the fstab so Android never touches the stick.</td></tr>
 <tr><td>No sound</td><td>Google uses SOF; a laptop's own audio is usually legacy HDA.</td><td>The audio HAL configuration is replaced (see <a href="/docs/hardware-detection">Hardware detection</a>).</td></tr>
 <tr><td>White veil, lifted blacks</td><td>Google's display compositor loads a gamma curve meant for its own graphics driver into i915 every frame.</td><td>i915 ignores userspace gamma, degamma and colour matrices; the panel is treated as full-range sRGB.</td></tr>
+<tr><td>Night Light</td><td>Android ColorDisplayService supplies a display colour transform.</td><td>On i915, drm_hwcomposer uses client composition: SurfaceFlinger/RenderEngine GPU-composes the frame and applies the transform before KMS. Verified on a Lenovo ThinkPad X13 Gen 1 (Intel).</td></tr>
 <tr><td>Everything too big</td><td>Google's panel is set for density 260.</td><td><code>RESOLUTION</code> and <code>DENSITY</code> in <code>gbos.cfg</code>.</td></tr></tbody></table>
-<p>The consequence of the colour fix: Night Light has no effect, because the gamma tables it uses are ignored on purpose.</p>
+<p><strong>Night Light is supported on the tested i915 client-composition path.</strong> The kernel #29 workaround neutralizes the KMS DEGAMMA_LUT, GAMMA_LUT and CTM properties, but it does not disable Android colour transforms applied while SurfaceFlinger/RenderEngine GPU-composes the frame. This was verified on a Lenovo ThinkPad X13 Gen 1 (Intel). This result is specific to the i915 client-composition path; it does not establish behaviour on xe or other display backends.</p>
 <h2>Drivers Google's modules cannot provide</h2>
 <p>Google's vendor kernel modules are built for Google's kernel and do not load on this one. Battery and AC, the Intel LPSS I2C controller (touchpad) and legacy HDA audio are therefore built into the gbOS86 kernel; the rest are loadable modules found by <a href="/docs/hardware-detection">hardware detection</a>.</p>'''
 
@@ -250,8 +251,8 @@ def safety():
 <li>Secure Boot must be off, so the boot chain is not verified.</li>
 <li>The CPU emulator runs inside the kernel; a bug there is a kernel bug.</li></ul>
 <h2>Compatibility limits</h2>
-<ul><li>Intel x86-64 only. AMD CPUs (Ryzen) and ARM are not supported, and AMD graphics is experimental (software rendering only, slow, untested on hardware). The CPU must have AVX (many Celeron, Pentium and Atom parts do not): Google's init uses it from its first instruction.</li><li>Installing needs an internal NVMe drive (live mode works without).</li><li>Suspend and resume, fingerprint readers, IPU6 cameras and discrete GPUs are not supported. On a laptop with AMD Radeon graphics the desktop is drawn by the CPU (experimental).</li>
-<li>Twenty-one machines have been tried, eight of them fully working; see <a href="/docs/tested-laptops">Tested laptops</a>. Anything not on that list is untested.</li></ul>
+<ul><li>Built for Intel x86-64. AMD CPUs (Ryzen) and AMD graphics are experimental: three Ryzen laptops are reported working (see Tested laptops), with the desktop drawn by the CPU or by a project-built RADV driver. ARM is not supported. The CPU must have AVX (many Celeron, Pentium and Atom parts do not): Google's init uses it from its first instruction.</li><li>Installing works to an internal NVMe, eMMC or SATA disk (live mode works without one).</li><li>Suspend and resume, fingerprint readers, IPU6 cameras and discrete GPUs are not supported. On a laptop with AMD Radeon graphics the desktop is drawn by the CPU (experimental).</li>
+<li>Thirty-six machines have been tried, fourteen of them fully working; see <a href="/docs/tested-laptops">Tested laptops</a>. Anything not on that list is untested.</li></ul>
 <h2>Legal</h2>
 <p>gbOS86 is an independent community project, not affiliated with or endorsed by Google. Googlebook OS, Android and Chrome are Google's. The built image contains Google's OS and is not redistributed. The source repository includes a small number of patched Google libraries (a patched libz, libcrypto and a software KeyMint library) that the build requires; Google's own terms apply to them.</p>'''
 
@@ -261,6 +262,7 @@ def changelog():
     return '''<h1>Changelog</h1>
 <p class="lead">Headline milestones. Kernel numbers are the build counter printed in the boot log.</p>
 <table class="spec"><thead><tr><th>Build</th><th>Change</th></tr></thead><tbody>
+<tr><td>2026-11-01</td><td>Android Night Light verified on Intel i915 client composition (ThinkPad X13 Gen 1). SurfaceFlinger/RenderEngine applies the colour transform during GPU composition, upstream of the KMS colour properties neutralized by kernel #29.</td></tr>
 <tr><td>#32</td><td><strong>Generic Intel gen 6+ support.</strong> About 400 driver modules, boot-time hardware detection with a per-boot report, firmware for Intel, Realtek, MediaTek, Qualcomm and Broadcom Wi-Fi and Bluetooth, SOF audio, generated audio configs. HDA versus SOF is now chosen by the kernel. Early binding of the patched libraries.</td></tr>
 <tr><td>#30</td><td>gbOS86 boot menu (live / install or update / boot installed) and branding; flashable live and installer USB image.</td></tr>
 <tr><td>#29</td><td>i915 ignores userspace gamma, degamma and colour matrices: the white veil and lifted blacks are fixed.</td></tr>

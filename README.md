@@ -45,7 +45,7 @@ Boot the laptop from the stick (**F12** at the logo, Secure Boot off).
 
 `./build.sh --dry-run` shows what it would download (Google's 7.7 GB image, ~1 MB busybox, 14 MB of kernel modules and 70 MB of firmware
 from this repo's [release](https://github.com/linuxkid473/gbos-x86/releases)). It streams only the six partitions it needs out of
-Google's zip, so the 19 GB disk image inside is never unpacked. Allow 30 to 60 minutes, mostly the download. Twenty-one machines have been
+Google's zip, so the 19 GB disk image inside is never unpacked. Allow 30 to 60 minutes, mostly the download. Thirty-six machines have been
 tried (see [Tested laptops](#tested-laptops)); if you try another, please post its `gbos/logs/boot-N/hwdetect.txt` in an issue.
 Fedora/RHEL with SELinux enforcing: the scripts add `:z` to the docker bind mounts of this repo's own folders automatically; don't disable SELinux.
 
@@ -64,11 +64,11 @@ Fedora/RHEL with SELinux enforcing: the scripts add `:z` to the docker bind moun
 | Screen-lock password | Software Gatekeeper (`gatekeeper/soft_gk.c`) |
 | Root for apps (KernelSU) | Built into the kernel; the manager app is installed on first boot, root is granted per app in it |
 | Correct display colours / black levels | Kernel #29: i915 ignores the HWC's gamma tables (see below) |
+| Night Light | Works on i915's client-composition path: SurfaceFlinger applies Android's colour transform during GPU composition, before KMS; verified on a ThinkPad X13 Gen 1 |
 
 | Not done / limited | |
 |---|---|
 | Speed | Some instructions are still emulated in the kernel (see "Why it's slow") |
-| Night Light | Gamma tables from userspace are ignored (that's the colour fix), so it has no effect |
 | Linux Terminal (AVF) | Secretkeeper hang fixed; VM boot not yet confirmed |
 | Auth-bound keystore keys | `soft_gk`'s auth tokens aren't trusted by the software KeyMint |
 | Google's on-device AI (Magic Pointer, AICore) | Google's servers refuse it without hardware key attestation, which no non-Google laptop can provide |
@@ -76,7 +76,7 @@ Fedora/RHEL with SELinux enforcing: the scripts add `:z` to the docker bind moun
 | Fingerprint reader (Latitude 7320 Detachable, Goodix `27c6:6384`) | Works on hardware (2026-11-17): the userspace AIDL HAL registers, one finger enrolled and unlocked the lock screen. Enabled by default for this exact USB ID (`FINGERPRINT=0` disables it); CrosFP is unchanged on other devices. The HAL runs from the stick's VFAT under permissive SELinux, so enforcing-mode USB access is still unverified. See [`HANDOFF.md`](HANDOFF.md) |
 | Auto-rotation (Latitude 7320 Detachable) | Experimental, DMI-scoped Sensors 2.1 sub-HAL and display-policy trial. Confirmed working by the user on the 2026-11-15 Live boot; logs show accelerometer enumeration and sensor-driven transitions through all four display rotations. The axis mapping has been validated for that test, but the physical full-scale range remains unknown and the HAL's ±2 g range is provisional. `SENSOR_HAL=0` disables both changes. Tablet mode (on-screen keyboard with the cover detached, intel_hid tablet switch) and a rotation policy that survives Google's LaptopController resets are added but hardware-unverified (`usb/tablet_mode.sh`, `TABLET_*` in `gbos.cfg`). See [`sensors/trogdor/`](sensors/trogdor/). |
 | Intel IPU6 cameras | Experimental Latitude 7320-only UVC loopback bridge is available in an opt-in test image (`GBOS_IPU6_CAMERA_BRIDGE=1`). The Latitude's V4L2 frame-size enumeration and initial format are limited to its producer mode, 1280×960 YUYV since 2026-11-20 (640×480 before). An Android-native build (`installer/bin/vulkan/ipu6-loopback`, `tools/build_ipu6_loopback_gpu.sh`, needs the Android NDK) does the per-pixel work on the GPU with Vulkan compute; the launcher uses it when `--probe-gpu` succeeds (`CAMERA_GPU=0` in gbos.cfg keeps the CPU build). The bridge keeps the sensor streaming until reboot because IPU6 stream-stop/close timed out in prior tests. A second bridge instance exposes the rear OV8856 on `/dev/video65` as the back camera (`CAMERA_REAR=0` turns it off, `CAMERA_REAR_ROTATION=180` turns its picture); it is not yet hardware-verified. See [`docs/latitude-7320-camera-test.md`](docs/latitude-7320-camera-test.md) for the image and instructions. |
-| Other laptops | Eight of twenty-one tried machines work fully, ten partly, one pending, two not; see [Tested laptops](#tested-laptops). The CPU-emulation kernel should help any pre-2021 Intel CPU |
+| Other laptops | Fourteen of thirty-six tried machines work fully, fourteen partly, six have a fix pending, two do not; see [Tested laptops](#tested-laptops). The CPU-emulation kernel should help any pre-2021 Intel CPU |
 
 ## How it works
 
@@ -163,7 +163,7 @@ changing anything.
 
 ## Tested laptops
 
-Reports from people who booted the stick (2026-10-18). A row says what was reported, not what the newest build can do. The same list is on
+Reports from people who booted the stick (updated 2026-11-18). A row says what was reported, not what the newest build can do. The same list is on
 [gbos86.com/hardware](https://gbos86.com/hardware); the source of truth is [`website/laptops.py`](website/laptops.py).
 
 | Laptop | CPU | Result | Works | Does not work / notes |
@@ -171,11 +171,17 @@ Reports from people who booted the stick (2026-10-18). A row says what was repor
 | Dell Latitude 5300 | Core i5-8365U, 16 GB | **Works** | Everything tested: Wi-Fi, Bluetooth, sound, touchpad, brightness, battery, install | Suspend. The maintainer's machine |
 | Acer Aspire Lite AL15-52 | Core i5-1235U, 8 GB | **Works** | Wi-Fi, display, touchpad, keyboard, sound, brightness, camera, Bluetooth, SD card | Needed two firmware fixes (Realtek Wi-Fi; Intel AX201 Bluetooth name `ibt-0040-1050.sfi`), both in firmware v34+. Older sticks need a rebuild or an Update from a fresh stick |
 | Lenovo ThinkPad T470 | Intel 7th gen | **Works** | Reported as working with no setup | Short report |
-| Intel NUC8BEH (mini PC) | Core i3-8109U, 8 GB | **Works** (live) | Wi-Fi, Bluetooth, display and brightness (external monitor), keyboard (external), USB ports | Sound not tested. SATA M.2 SSD: install support for SATA disks added afterwards (QEMU-tested only, not yet tried on this NUC) |
+| Intel NUC8BEH (mini PC) | Core i3-8109U, 8 GB | **Works** | Wi-Fi, Bluetooth, display and brightness (external monitor), keyboard (external), USB ports, install to the SATA M.2 SSD | Sound not tested. First tried live on kernel #32; the installer gained SATA support afterwards and the reporter has now installed to the SSD |
 | HP Envy 13-aq0xxx | Core i5-8265U, 8 GB | **Works** | Reported as working great, live and installed to the NVMe (kernel #32) | Per-device detail is in the forum thread |
 | Dell Latitude 5300 2-in-1 | Core i7-8665U, 16 GB | **Works** | Wi-Fi, Bluetooth, sound, touchpad, backlight, display, touchscreen, hinge, webcam, pen, suspend | Auto-rotate (sensor driver added to the next kernel), mic-mute LED |
 | Dell Latitude 5290 2-in-1 | Core i5 (model not given) | **Works** | Sound, once the speaker volume is raised | Short report: speakers were very quiet, `Master Playback Volume` 87 in `gbos-hda-pch/mixer_paths.xml` fixed it (shipped from 2026-10-26) |
 | Lenovo ThinkPad T480 | Core i5-8350U, 16 GB | **Works** | Wi-Fi, Bluetooth, sound, touchpad, touchscreen, keyboard, brightness, display, webcam (installed) | Slow to wake; Wi-Fi needs a toggle after sleep |
+| MSI Sword 16 HX | Core i7-13700HX | **Works** | Reported as working perfectly out of the box, used daily for a week | Games (the one exception named). Discord report |
+| Dell Inspiron 14 5440 | Core i3-1305U | **Works** | Display (i915), Wi-Fi, Bluetooth, sound, TalkBack from the first boot, installed next to another OS | Speakers were quiet until the volume 87 change; spoken boot menu fixed 2026-11-05 (kernel #46) |
+| HP OmniBook 5 | Ryzen 7 8840U, Radeon 780M | **Works** | Desktop (AMD, RADV build), sound | Speaker volume low. AMD is experimental; needed the RADV protected-memory fix and the `/dev/snd` fix (kernel #37) |
+| Acer Aspire A515-46 | Ryzen 3 3350U | **Works** | Desktop, sound | Speaker volume low. AMD is experimental; needed the audio config and `/dev/snd` fixes (kernel #37) |
+| HP Spectre x360 14-ef0xxx | Core i7-1255U | **Works** | Everything except the camera (live, kernel #37) | Camera (IPU6 + Hi-556, no driver). Issue 10 |
+| Dell Inspiron 14 Plus 7440 | Core Ultra 9 185H | **Works** | Graphics, Wi-Fi, Bluetooth, touchpad, sound, Widevine, Play Store, Linux Terminal VM, root adb | Five bugs, each with a fix the reporter confirmed (kernel #37). Issue 17 |
 | Dell Latitude 3380 | Core i5-7200U, 8 GB | Partly | Wi-Fi, sound, touchpad, keyboard, brightness, display, webcam (installed) | Bluetooth (Qualcomm 0cf3:e007: firmware loads, `hci0` up, cause unknown; needs `logcat.txt`). Kernel #42 |
 | HP OmniBook 7 | Core Ultra 5 225U, 16 GB | Partly | Touchpad, keyboard, brightness, display | Wi-Fi (Intel BE201). Sound, webcam, Bluetooth not tested |
 | HP Pavilion Power 15 | Core i7-7700HQ + GTX 1050, 16 GB | Partly | Wi-Fi, Bluetooth, touchpad, brightness, display, webcam | Speakers (fixed in the next update: audio config picked the NVIDIA HDMI card); dock/DisplayLink and the NVIDIA GPU have no driver |
@@ -185,7 +191,16 @@ Reports from people who booted the stick (2026-10-18). A row says what was repor
 | Realme Book Slim (2021) | Core i5-1135G7, 8 GB | Partly | Wi-Fi, Bluetooth, touchpad, keyboard, brightness, display, webcam (live USB) | Sound. No `hwdetect.txt` yet |
 | Fujitsu Arrows Tab V727 (tablet) | Core m3-7Y30, 8 GB | Partly | Wi-Fi (Intel 8265), Bluetooth, sound card detected (HDA Intel PCH); live USB on kernel #33, USB 2.0 | Tagged "mostly works"; what fails is not listed in the report |
 | Dell XPS 16 (2026) | Intel Core Ultra | Partly | Boots and runs | Screen refresh rate, Wi-Fi, camera. A kernel option reportedly fixes the screen: try it with `MODOPTS` in `gbos.cfg` |
+| Lenovo Legion 5 Pro 16IAH7H | Core i7-12700H + RTX 3070 Ti | Partly | Mostly working, per the report | NVIDIA dGPU (no driver). No sound on the first build (audio config picked the NVIDIA HDMI card; fixed). Issue 14 |
+| MSI Modern 15 B7M | Ryzen 5 7530U | Partly | Desktop (AMD, RADV build), Wi-Fi with `mt7921_common.disable_clc=1`, speakers | HDMI audio. Early build: red-square pointer (not rechecked). AMD is experimental |
+| HP ENVY x360 2-in-1 15-ew0xxx | Core i7-1255U | Partly | Boots live; tagged "mostly works" | Blank or unresponsive apps (the `/dev/null` fix of 2026-11-16 is unconfirmed here). Kernel #46 |
+| Dell Latitude 7320 2-in-1 | Core i7-1180G7 | Partly | Wi-Fi, Bluetooth, touchpad | Sound (SoundWire codec modules added 2026-11-05, unconfirmed). Live USB |
 | Framework Laptop 13 Pro | Core Ultra 5 325 (Panther Lake), 16 GB | Fix pending | Boots | Black screen on sticks without the Panther Lake `xe` firmware (GuC); firmware v35 has it. Awaiting confirmation |
+| Google Pixelbook Go (Atlas) | Intel | Fix pending | | Chrome does not load pages, Google sign-in fails: `/dev/null` was a regular file (stage0 bug), repaired in `hook.sh` 2026-11-16. Awaiting confirmation |
+| Dell Vostro 3400 | Core i3-1115G4 | Fix pending | Boots to the home screen, i915 | Apps blank/unresponsive (same `/dev/null` cause; R5, kernel 6.18.21). Awaiting confirmation |
+| Dell Latitude 5310 2-in-1 | Intel 10th gen | Fix pending | Desktop, Wi-Fi, sound, Google Photos (installed) | Chrome and Firefox show no page (same cause). Issue 43 |
+| HP EliteBook 840 G6 | Core i7-8665U, 16 GB | Fix pending | Boots from the NVMe, i915 | Most apps crash; Chrome GPU-channel timeouts (same cause). Issue 44 |
+| HP 14s-dq2509TU | Core i3-1115G4 | Fix pending | | Did not boot: KernelSU panic on 11th gen (CET-IBT). `ibt=off` is built in since kernel #42. Awaiting retest |
 | Microsoft Surface Laptop 7 (Intel) | Core Ultra 7 266V (Lunar Lake), 16 GB | Partly | Wi-Fi, keyboard, battery, speakers, headset jack, touchpad, Bluetooth | Microphone, HDMI audio, camera, touchscreen, suspend. Needed extra kernel and boot-script work (section below) |
 | ASUS X441NA | Celeron N3350 | Does not work | | No AVX on this CPU: Google's init dies on its first instruction (kernel panic, exit code 4). Not fixable; newer sticks stop with a message |
 | HP 14-ne0013dx | Intel | Does not work | | No logs yet |
@@ -218,7 +233,7 @@ The kernel (#31) builds drivers for most Intel-era laptops as **modules**, and b
 | Hotkeys, fans, rfkill | Dell, HP, ThinkPad, IdeaPad, Asus, Acer, Samsung, MSI, Sony, Fujitsu, LG, Intel HID/VBTN |
 | Other | SD card readers (Realtek, SDHCI), USB webcams (UVC), Ethernet (r8169, e1000e, igc, USB r8152 and friends) |
 
-**Honest limits.** Twenty-one machines have been booted (below); anything not on that list is built and wired but untested on
+**Honest limits.** Thirty-six machines have been booted (below); anything not on that list is built and wired but untested on
 hardware. Sound on SOF machines needs the codec's mixer controls to match the generated config (best effort);
 suspend/resume, fingerprint readers, IPU6 cameras and NVIDIA/AMD discrete GPUs are not covered. Build the payload with
 `tools/fetch_firmware.sh` (firmware, not committed) and `kernel/isa_emu_patch/build_generic*.sh` (modules, not committed).
@@ -393,6 +408,23 @@ menu **2**, then **3 (Only save its logs)** (or 1 to update too), and read `gbos
 how the previous boot's shutdown step ended, a read-only `fsck.fat -n` when it was not clean, see `usb/stick_fat.sh`), `fat-shutdown.txt`
 (the shutdown watcher: armed at boot; failures, with what was still writing, appended at shutdown), and `pstore-prev/`.
 FAT has no journal: always shut down from Android's power menu, not the physical power button.
+
+### Play Store closes a second or two after opening
+If `logcat | grep com.android.vending` (rooted terminal) shows the Store being killed in a loop with
+
+```
+Killing <pid>:com.android.vending/...: depends on provider <pkg>/<provider> in dying proc <pkg>
+```
+
+then Android is killing the Store because an app it is bound to (a content-provider client) keeps dying. That is
+not a gbOS86 fault. The case seen so far (2026-11-20, Ice Lake, R5) was a user-installed **Zygisk module plus its
+companion app** ("Play Integrity Break": `it.eldavo.pib` / `icu.nullptr.playintegritybreak`, which logs
+`Integrity hooks installed in com.android.vending (Zygisk)`) whose provider process was dead each time, so every
+Store launch was killed about 2 s in. gbOS86 ships no Zygisk and no Play Integrity module (the Trusty-backed
+KeyMint/attestation services never answer on this hardware, so such modules are unsupported here). Uninstall or
+disable the module and its app, clear the Store's data, and reboot. If the Store still closes, post the
+unfiltered log of the crash (`logcat -b all -d > /sdcard/logcat.txt`, taken right after one failed launch) and the
+`logs/boot-N/` folder, not a `grep` of the package name, which hides the actual crash.
 
 ### Display size
 Density stays Google's stock 260. `RESOLUTION=2400x1350` in `gbos.cfg` makes Android render at a larger
