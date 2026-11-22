@@ -22,7 +22,11 @@
 #                                        If fsck finds nothing but the dirty bit (and lost clusters, which only waste space), the flag is
 #                                        cleared at shutdown, right after the read-only remount, when nothing can write any more
 #                                        (FAT_CLEAR_DIRTY=0 leaves it). Report: LOGDIR/fat-check.txt and a "FAT-CHECK" line in
-#                                        stage0-dmesg.txt. Never repairs anything else.
+#                                        stage0-dmesg.txt. Never repairs anything else. fsck runs before any file of the previous
+#                                        boot is opened, and those files are read only when the volume is known intact: opening a
+#                                        damaged one is a FAT error, and errors=remount-ro then makes the volume read-only for the
+#                                        whole boot (boot-4 of the persistent stick, 2026-11-22). If that happened anyway, the report
+#                                        goes to kmsg instead.
 #   gbos_fat_start_shutdown_watch DEV MP LOGDIR
 #                                        (hook.sh) a background child of stage0 (like the kmsg copier, so init's service shutdown leaves it
 #                                        alone; it ignores sysrq's SIGTERM) that waits for init's "sync() before umount" line in /dev/kmsg.
@@ -222,28 +226,93 @@ gbos_fat_rt_setup() { # DEV
   echo "${_tm# }"
 }
 
+# Paths (volume-relative, lower case) that fsck.fat -n names in its output: the files and directories it found something wrong with.
+gbos_fsck_named_paths() { grep '^/' "$1" 2>/dev/null | grep -v ': [0-9]* files, [0-9]*/[0-9]* clusters$' | tr 'A-Z' 'a-z'; }
+
+# The kernel's FAT messages in a previous boot's kmsg.log (whole file, first events): "MOUNTED_DIRTY_S|READ_ONLY_S|FIRST_ERROR", empty
+# fields when absent. READ_ONLY_S is "Filesystem has been set read-only": a FAT error with errors=remount-ro (stage0's mount, the
+# default) made the superblock read-only. From then on no file can be created (EROFS) while files that were already open (kmsg.log)
+# keep growing, and "remount,ro" has nothing left to do and returns 0 (real vfat driver, 2026-11-22). Boot-4 of the persistent stick.
+gbos_fat_kmsg_fat_events() { # KMSG_LOG
+  tr -d '\0' < "$1" 2>/dev/null | awk -F, '
+    /;FAT-fs \([^)]*\): Volume was not properly unmounted/ { if (d == "") d = sprintf("%.3f", $3 / 1000000) }
+    /;FAT-fs \([^)]*\): error, / { if (e == "") { e = $0; sub(/^[^;]*;/, "", e) } }
+    /;FAT-fs \([^)]*\): Filesystem has been set read-only/ { r = sprintf("%.3f", $3 / 1000000); exit }
+    END { print d "|" r "|" e }'
+}
+
+# The watcher's "gbos-fat: shutdown:" line near the end of a kmsg.log: "LINE|RECORDS_AFTER_IT|LAST_RECORD_S". The copier keeps copying
+# for ~50 ms after that line (boot-4: 72 apexd records, 13 KB), so it is not in the last 8 KB: search the last 256 KB.
+gbos_fat_kmsg_shutdown_line() { # KMSG_LOG
+  tail -c 262144 "$1" 2>/dev/null | tr -d '\0' | awk -F, '
+    /;gbos-fat: shutdown: / { s = $0; sub(/^[^;]*;/, "", s); n = 0; t = ""; next }
+    s != "" && /^[0-9]+,[0-9]+,[0-9]+,/ { n++; t = $3 }
+    END { if (s != "") printf "%s|%d|%s\n", s, n, (t == "" ? "" : sprintf("%.3f", t / 1000000)) }'
+}
+
 # The previous boot's shutdown, as far as the volume can tell: its fat-shutdown.txt (armed at boot; failures appended at shutdown), the
-# end of its kmsg.log (the watcher's last line is copied there just before the copier stops), and whether this mount found it clean.
-gbos_fat_prev_shutdown() { # LOGDIR WAS_DIRTY(0|1)
+# watcher's line near the end of its kmsg.log (copied there just before the copier stops), the kernel's FAT messages in that log, and
+# whether this mount found the volume clean. WHY_NOT_READ (from the boot check, when the volume was not clean and fsck did not show it
+# intact): the previous boot's files are not opened at all. Reading a file whose directory entry claims more than its cluster chain holds
+# is a FAT error, and the kernel then makes the whole volume read-only for the rest of the boot: boot-4 of the persistent stick lost every
+# file it would have created after 25.8 s (fat-check.txt, fat-shutdown.txt, logcat) to the old check's tail of boot-3's damaged kmsg.log.
+gbos_fat_prev_shutdown() { # LOGDIR WAS_DIRTY(0|1) [WHY_NOT_READ]
   _pn=${1##*/boot-}; case $_pn in ''|*[!0-9]*) return 0;; esac
   _pd=${1%/boot-*}/boot-$((_pn - 1)); [ -d "$_pd" ] || return 0
-  _pk=; [ -f "$_pd/kmsg.log" ] && _pk=$(tail -c 8192 "$_pd/kmsg.log" 2>/dev/null | tr -d '\0' | grep -o 'gbos-fat: shutdown: .*' | tail -1)
+  if [ -n "${3:-}" ]; then
+    echo "previous boot (${_pd##*/}): its files were not read: $3"
+    if [ "$2" = 0 ]; then echo "=> it left the volume read-only and clean"; else echo "=> unknown: that boot's logs were not read (see above)"; fi
+    return 0
+  fi
+  _pk=; _pe='||'
+  if [ -f "$_pd/kmsg.log" ]; then
+    _pk=$(gbos_fat_kmsg_shutdown_line "$_pd/kmsg.log")
+    [ "$2" = 1 ] && _pe=$(gbos_fat_kmsg_fat_events "$_pd/kmsg.log")
+  fi
+  _pkl=${_pk%%|*}; _pkr=${_pk#*|}; _pkn=${_pkr%%|*}; _pkt=${_pkr#*|}
+  _pmd=${_pe%%|*}; _per=${_pe#*|}; _pro=${_per%%|*}; _perr=${_per#*|}
+  _pat=; [ -n "$_pkl" ] && _pat=$(echo "$_pkl" | sed -n 's/.*unmount step at \([0-9.]*\) s.*/\1/p')
+  _pcl=   # was that shutdown step to clear the dirty flag? its kmsg line says so; for older lines, the armed line
+  case $_pkl in *'clearing the dirty flag'*) _pcl=yes;; *remounting*) _pcl=no;; esac
+  if [ -z "$_pcl" ] && [ -f "$_pd/fat-shutdown.txt" ]; then
+    _pcl=$(tr -d '\0' < "$_pd/fat-shutdown.txt" | sed -n 's/^armed at boot: .*clear the dirty flag then: \([a-z]*\).*/\1/p' | head -1)
+  fi
+  _pmdirty=0; { [ -n "$_pmd" ] || grep -q 'NOT clean' "$_pd/fat-check.txt" 2>/dev/null; } && _pmdirty=1
   if [ -f "$_pd/fat-shutdown.txt" ]; then
     echo "previous boot (${_pd##*/}) fat-shutdown.txt:"; tr -d '\0' < "$_pd/fat-shutdown.txt" | sed 's/^/  /'
+  elif [ -n "$_pro" ]; then
+    echo "previous boot (${_pd##*/}): no fat-shutdown.txt: it could not be created, the volume was read-only from $_pro s (below)"
   else
     echo "previous boot (${_pd##*/}): no fat-shutdown.txt (FAT_SHUTDOWN_RO=0, an older stick_fat.sh, or it never got that far)"
   fi
-  [ -n "$_pk" ] && echo "  end of its kmsg.log: $_pk"
+  if [ -n "$_pkl" ]; then
+    echo "  end of its kmsg.log: $_pkl"
+    [ "${_pkn:-0}" -gt 0 ] && echo "  ($_pkn more kernel records were copied after it, the last at $_pkt s: the copier stops 50 ms after that line)"
+  fi
+  [ -n "$_pmd" ] && echo "  its kmsg.log: the kernel found the volume dirty when that boot mounted it ($_pmd s)"
+  if [ -n "$_pro" ]; then
+    echo "  its kmsg.log: a FAT error made the volume READ-ONLY at $_pro s: ${_perr:-no error line}"
+    echo "  (from then on no file could be created on it: no fat-check.txt, fat-shutdown.txt or logcat; files already open, like kmsg.log, kept growing)"
+  fi
   if [ "$2" = 0 ]; then echo "=> it left the volume read-only and clean"
   elif [ -f "$_pd/fat-shutdown.txt" ] && grep -q 'FAILED' "$_pd/fat-shutdown.txt"; then echo "=> its shutdown step failed (lines above)"
-  elif grep -q 'clear the dirty flag then: no' "$_pd/fat-shutdown.txt" 2>/dev/null && grep -q 'NOT clean' "$_pd/fat-check.txt" 2>/dev/null; then
-    echo "=> that boot already mounted it dirty and its fat-check.txt did not allow clearing the flag: it stays dirty whatever the remount did"
+  elif [ "$_pcl" = no ] && [ $_pmdirty = 1 ]; then
+    echo "=> that boot already mounted it dirty and was not allowed to clear the flag (its fsck found problems or did not run, or FAT_CLEAR_DIRTY=0): it stays dirty whatever the remount did${_pat:+ (its shutdown step started at $_pat s)}"
+  elif [ -n "$_pat" ]; then
+    echo "=> its shutdown step started at $_pat s but did not finish: killed or cut off by reboot() before the remount or the flag clear, or the flag clear failed once the volume was read-only"
   elif [ -n "$_pk" ]; then echo "=> its shutdown step started but did not finish: killed or cut off by reboot() before the remount or the flag clear"
   else echo "=> its shutdown step never started: forced power-off, crash, or the watcher was not running"; fi
 }
 
+# A description when the volume at MP is read-only now although stage0 mounted it rw: a FAT error this boot (errors=remount-ro).
+gbos_fat_ro_now() { # DEV MP
+  [ "$(gbos_fat_sb_state "$2" "$GBOS_PROC")" = ro ] || return 1
+  _rq=$(${GBOS_DMESG:-dmesg} 2>/dev/null | grep "FAT-fs (${1##*/}): error" | head -1 | sed 's/^.*\(FAT-fs (\)/\1/')
+  echo "${_rq:-no FAT-fs error in dmesg}"
+}
+
 gbos_fat_boot_check() { # DEV MP LOGDIR
-  _bd=$1; _bm=$2; _bo=$3/fat-check.txt
+  _bd=$1; _bm=$2; _bld=$3; _bo=$3/fat-check.txt
   _bf=$G/installer/bin/fsck.fat
   _bx=${GBOS_FAT_TMP:-/tmp}; mkdir -p "$_bx" 2>/dev/null
   _br=$_bx/gbos-fat-check.$$   # the report and fsck's output stay in RAM until fsck is done (see the top of this file)
@@ -251,9 +320,6 @@ gbos_fat_boot_check() { # DEV MP LOGDIR
   _bo2=$(gbos_fat_state_offset "$_bd") || _bo2=
   case $_bo2 in 65) _bt=FAT32;; 37) _bt=FAT12/16;; *) _bt="no FAT boot sector found";; esac
   if gbos_fat_was_dirty "$_bd"; then _bp=1; _bs="previous shutdown NOT clean"; else _bp=0; _bs="previous shutdown clean"; fi
-  { echo "$_bd at $_bm, $_bt: $_bs"
-    [ $_bp = 1 ] && echo "(the kernel found the dirty flag set when stage0 mounted it: \"Volume was not properly unmounted\")"
-    gbos_fat_prev_shutdown "$3" $_bp; } > "$_br" 2>/dev/null
   case ${FAT_FSCK:-auto} in
     0) _bk=0; _bv="fsck skipped (FAT_FSCK=0)";;
     1) _bk=1;;
@@ -261,6 +327,10 @@ gbos_fat_boot_check() { # DEV MP LOGDIR
   esac
   [ $_bk = 1 ] && [ -z "$_bo2" ] && { _bk=0; _bv="fsck skipped (no FAT boot sector)"; }
   [ $_bk = 1 ] && [ ! -f "$_bf" ] && { _bk=0; _bv="fsck skipped (gbos/installer/bin/fsck.fat missing)"; }
+  # fsck first: it reads the block device, never a file, so it cannot trip a FAT error. The previous boot's files are opened only when
+  # the volume is known to be intact (clean at mount, or fsck found nothing but the dirty flag and lost clusters).
+  _bn="the volume was not cleanly unmounted and fsck did not run ($_bv); opening a damaged file would make the kernel set the whole volume read-only"
+  : > "$_br.fsck"
   if [ $_bk = 1 ]; then
     _bc=$(gbos_fat_copier); set -- $_bc
     [ -n "$2" ] && kill -STOP "$2" 2>/dev/null       # no kmsg.log appends while fsck reads the directories
@@ -273,9 +343,9 @@ gbos_fat_boot_check() { # DEV MP LOGDIR
     [ -n "$2" ] && kill -CONT "$2" 2>/dev/null
     _bl=$(sed -n 's/^Reclaimed \([0-9]*\) unused cluster.*/\1/p' "$_br.fsck" | head -1)
     if [ $_brc = 0 ]; then
-      _bv="fsck.fat -n: no errors"
+      _bv="fsck.fat -n: no errors"; _bn=
     elif gbos_fsck_only_dirty "$_br.fsck" "$_bo2"; then
-      _bv="fsck.fat -n: no errors besides the dirty flag"
+      _bv="fsck.fat -n: no errors besides the dirty flag"; _bn=
       [ -n "$_bl" ] && _bv="$_bv and $_bl lost cluster(s) (left allocated: harmless; chkdsk or fsck.fat -a frees them)"
       if [ $_bp = 0 ]; then
         _bv="$_bv (set by this boot's mount; the read-only remount at shutdown clears it)"
@@ -287,12 +357,25 @@ gbos_fat_boot_check() { # DEV MP LOGDIR
       fi
     else
       _bv="fsck.fat -n rc=$_brc: PROBLEMS FOUND, nothing changed (see fat-check.txt; repair on another computer: Windows chkdsk X: /f, macOS Disk Utility First Aid)"
+      _bw=$(gbos_fsck_named_paths "$_br.fsck" | tr '\n' ' ')
+      _bn="fsck found problems${_bw:+ (in ${_bw% })}; opening a damaged file would make the kernel set the whole volume read-only"
     fi
-    { echo "--- fsck.fat -n $_bd (rc=$_brc, uptime $_bt0 -> $_bt1 s)"; cat "$_br.fsck"; echo "---"; } >> "$_br"; rm -f "$_br.fsck"
   fi
-  echo "$_bv" >> "$_br"
-  cat "$_br" > "$_bo" 2>/dev/null; rm -f "$_br"
-  log "hook: FAT-CHECK $_bd: $_bs; $_bv"
+  [ $_bp = 0 ] && _bn=
+  { echo "$_bd at $_bm, $_bt: $_bs"
+    [ $_bp = 1 ] && echo "(the kernel found the dirty flag set when stage0 mounted it: \"Volume was not properly unmounted\")"
+    gbos_fat_prev_shutdown "$_bld" $_bp "$_bn"
+    [ $_bk = 1 ] && { echo "--- fsck.fat -n $_bd (rc=$_brc, uptime $_bt0 -> $_bt1 s)"; cat "$_br.fsck"; echo "---"; }
+    echo "$_bv"; } > "$_br" 2>/dev/null
+  rm -f "$_br.fsck"
+  # Safety net: the volume should still be read-write here. If a FAT error made it read-only, nothing can create a file on it for the
+  # rest of the boot (this report, fat-shutdown.txt, logcat): say so in kmsg, which the already-open kmsg.log still records.
+  _bro=; _bro=$(gbos_fat_ro_now "$_bd" "$_bm") && echo "$_bm is READ-ONLY now (FAT error: $_bro): no file can be created on it this boot" >> "$_br"
+  if ! { cat "$_br" > "$_bo"; } 2>/dev/null; then
+    while IFS= read -r _bz; do log "hook: fat-check.txt (not writable): $_bz"; done < "$_br"
+  fi
+  rm -f "$_br"
+  log "hook: FAT-CHECK $_bd: $_bs; $_bv${_bro:+; $_bm is READ-ONLY now (FAT error: $_bro)}"
 }
 
 # fd 3 = /dev/kmsg for reading, fd 4 = /dev/kmsg for writing (both opened before switch_root). The shutdown runs inside the pipeline as soon
@@ -310,8 +393,10 @@ gbos_fat_watch() { # DEV MP LOGDIR CLEAR [COPIER_SUBSHELL COPIER_CAT]
 
 gbos_fat_shutdown() { # KMSG_SECONDS DEV MP LOGDIR CLEAR [COPIER_SUBSHELL COPIER_CAT]
   # This line reaches kmsg.log through the copier, which still runs: the last line of that log. Nothing else is written to the volume
-  # unless something fails.
-  echo "<5>gbos-fat: shutdown: init reached its unmount step at $1 s; stopping the kmsg copier, remounting $3 read-only$([ "$5" = 1 ] && echo ' and clearing the dirty flag') (end of this log)" >&4
+  # unless something fails. It also says whether the volume is read-only already (a FAT error this boot, see gbos_fat_kmsg_fat_events):
+  # then the remount has nothing to do, and nothing was written to the volume since that error but files that were already open.
+  _sx=; [ "$(gbos_fat_sb_state "$3" "$GBOS_FAT_RT/proc")" = ro ] && _sx="; $3 is ALREADY read-only (a FAT error earlier this boot?)"
+  echo "<5>gbos-fat: shutdown: init reached its unmount step at $1 s; stopping the kmsg copier, remounting $3 read-only$([ "$5" = 1 ] && echo ' and clearing the dirty flag' || echo ', leaving the dirty flag as it is')$_sx (end of this log)" >&4
   $GBOS_FAT_BB sleep 0.05
   gbos_fat_stop_copier "$6" "$7"
   gbos_fat_finish "$2" "$3" "$4/fat-shutdown.txt" "$GBOS_FAT_RT/proc" "$GBOS_FAT_RT/sys" "$GBOS_FAT_RT/blk" "$GBOS_FAT_RT" "$5"
@@ -329,8 +414,10 @@ gbos_fat_start_shutdown_watch() { # DEV MP LOGDIR
   _wm=$(gbos_fat_rt_setup "$1")
   _wn=$GBOS_FAT_RT/null; [ -c "$_wn" ] || [ -L "$_wn" ] || _wn=$GBOS_FAT_RT/proc/self/fd/2
   _wl=$(gbos_fat_rw_loops "$2" "$GBOS_SYS" | tr '\n' ' ')
-  echo "armed at boot: remount $2 ($1) read-only at init's unmount step; clear the dirty flag then: $([ "${GBOS_FAT_CLEAR:-0}" = 1 ] && echo yes || echo no)" \
-    "(kmsg copier: ${_wc:-not found}${_wm:+; missing in $GBOS_FAT_RT: $_wm}${_wl:+; read-write loops on it now: $_wl})" > "$_wr" 2>/dev/null
+  _wa="armed at boot: remount $2 ($1) read-only at init's unmount step; clear the dirty flag then: $([ "${GBOS_FAT_CLEAR:-0}" = 1 ] && echo yes || echo no)"
+  _wa="$_wa (kmsg copier: ${_wc:-not found}${_wm:+; missing in $GBOS_FAT_RT: $_wm}${_wl:+; read-write loops on it now: $_wl})"
+  # Not writable (boot-4: a FAT error had made the volume read-only): the line goes to kmsg, which the open kmsg.log still records.
+  { echo "$_wa" > "$_wr"; } 2>/dev/null || log "hook: fat: fat-shutdown.txt NOT writable ($(gbos_fat_ro_now "$1" "$2" || echo 'reason unknown')); it would say: $_wa"
   ( trap '' TERM HUP   # init's last step is sysrq "terminate all tasks": SIGTERM to everything, possibly before the remount is done
     exec 3<"${GBOS_KMSG:-/dev/kmsg}" 4>"${GBOS_KMSG_OUT:-/dev/kmsg}" 2>"${GBOS_FAT_ERR:-/dev/null}"
     GBOS_FAT_NULL=$_wn
