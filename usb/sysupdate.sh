@@ -25,6 +25,8 @@
 # Never sourced: it runs as its own process, so it may exit, and nothing leaks into stage0.
 
 SU_PKG=org.gbos86.updater
+SU_PI=${SU_PI:-/postinstall}     # Android's view of the volume (tests: another path)
+SU_RW_DIR=${SU_RW_DIR:-/dev/gbos-rw}   # stage0's root-only writable view of it (hook.sh gbos_root_rw)
 SU_SMALL=1048576                 # files up to this size are backed up by copying, so they never go missing during the switch
 SU_MARGIN_KB=65536               # free space kept on GBOSSYS for logs when staging
 SU_KEEP_LOG_BOOTS=3              # --prune-logs never deletes the newest boots' logs
@@ -633,7 +635,7 @@ cmd_boot() {
 }
 
 # ---------------------------------------------------------------------------------------------------------------- Android side
-su_gbos() { G=${1:-/postinstall/gbos}; U=$G/update; INBOX=$G/update.inbox; ST=$G/update.staging; PREV=$G/update.prev; REJ=$G/update.rejected; }
+su_gbos() { G=${1:-$SU_PI/gbos}; [ "$G" = "$SU_PI/gbos" ] && [ -n "${SU_GBOS_RW:-}" ] && G=$SU_GBOS_RW; U=$G/update; INBOX=$G/update.inbox; ST=$G/update.staging; PREV=$G/update.prev; REJ=$G/update.rejected; }
 su_need_root() { [ -n "$SU_TEST" ] || [ "$(id -u)" = 0 ] || su_die "run as root (su -c sh $0 ...)"; }
 su_progress() { [ -n "${SU_STATUSF:-}" ] && { echo "$*" > "$SU_STATUSF.part" && mv -f "$SU_STATUSF.part" "$SU_STATUSF"; }; echo "$*"; }
 
@@ -659,7 +661,7 @@ cmd_stage() {
     case "$1" in --gbos) _g=$2; shift 2;; --prune-logs) _prune=1; shift;; --status) SU_STATUSF=$2; shift 2;; -*) su_die "stage: unknown option $1";; *) _src=$1; shift;; esac
   done
   [ -n "$_src" ] || su_die "usage: stage BUNDLE_FOLDER|BUNDLE.tar [--gbos DIR] [--prune-logs]"
-  su_need_root; su_gbos "$_g"; su_tmp
+  su_need_root; su_gbos "$_g"; su_rw_check "$G"; su_tmp
   [ -d "$G" ] || su_die "no gbos folder at $G"
   [ -f "$U/state" ] && su_die "an update is already being installed or tried (gbos/update/state); wait for it to finish"
   _src=$(realpath "$_src" 2>/dev/null) || su_die "no such bundle: $1"
@@ -747,6 +749,7 @@ su_verify_sig_dir() { # BUNDLE: signature + manifest on private copies (stage), 
 cmd_cancel() {
   su_need_root; su_gbos "${1:-}"
   [ -d "$INBOX" ] || { echo "nothing waiting in update.inbox"; return 0; }
+  su_rw_check "$G"
   _n=0; for _d in "$INBOX"/*; do [ -e "$_d" ] || continue; rm -rf "$_d"; _n=$((_n + 1)); done; sync
   echo "removed $_n waiting bundle(s); an update that is already installed is not touched"
 }
@@ -856,7 +859,7 @@ cmd_request() {
     status) cmd_status 2>&1 | respond done;;
     info) cmd_info 2>&1 | respond done;;
     audit) ( set -- audit; [ "$_dp" = 1 ] && set -- "$@" --deep; if [ -n "${SU_BB:-}" ]; then "$SU_BB" sh "$0" "$@"; else sh "$0" "$@"; fi ) 2>&1 | respond done;;
-    cancel) cmd_cancel 2>&1 | respond done;;
+    cancel) ( if [ -n "${SU_BB:-}" ]; then "$SU_BB" sh "$0" cancel; else sh "$0" cancel; fi ) 2>&1 | respond done;;
     reboot) echo "restarting" | respond done; sync; setprop sys.powerctl reboot,gbos-sysupdate;;
     stage)
       case "/$_rel/" in */../*|*/./*|//) echo "bad path" | respond failed; exit 1;; esac
@@ -886,6 +889,7 @@ cmd_install_app() {
   su_gbos "${1:-}"; _n=${2:-0}
   _apk=$G/gbos86-updater.apk; _log=$G/logs/boot-$_n/updater-app.txt; _stamp=/data/local/tmp/.gbos86-updater.sha256
   [ -f "$_apk" ] || exit 0
+  { echo "mounts: $SU_PI: $(su_mntline "$SU_PI")"; echo "mounts: $SU_RW_DIR/stick: $(su_mntline "$SU_RW_DIR/stick")"; } >> "$_log" 2>/dev/null
   _h=$(su_sha "$_apk")
   if pm path "$SU_PKG" >/dev/null 2>&1 && [ "$(cat "$_stamp" 2>/dev/null)" = "$_h" ]; then echo "updater app $_h already installed" >> "$_log"
   else
@@ -914,6 +918,7 @@ cmd_boot_ok() {
   _s=$(su_st set); [ -n "$_s" ] || exit 0
   [ -n "$SU_TEST" ] || sleep 60
   [ -n "$SU_TEST" ] || [ "$(getprop sys.boot_completed 2>/dev/null)" = 1 ] || exit 0
+  su_rw_check "$G"
   echo "$_s" > "$U/boot-ok.part" && sync && mv -f "$U/boot-ok.part" "$U/boot-ok" && sync
 }
 
@@ -964,18 +969,58 @@ cmd_stamp_set() { # NVMEG: written with the stamps (install.sh stamp_save)
   if [ -f "$1/system.manifest" ]; then su_sha "$1/system.manifest"; else echo none; fi > "$1/.stamps/set"
 }
 
+# ---------------------------------------------------------------------------------------------------------------- writing from Android
+# Under the FAT lockdown (hook.sh gbos_postinstall_lockdown) Android's /postinstall is read-only, so stage, cancel and boot-ok, the
+# Android-side writers of GBOSSYS, write somewhere else:
+#   1. /dev/gbos-rw/stick: the volume read-write, made by stage0 inside /dev/gbos-rw (mode 0700 root: no app, no system_server can go
+#      in; the bind's own root is the FAT's umask=000 root, so it must never be the 0700 directory itself). su_gbos maps G to it.
+#   2. with an older hook.sh that has no /dev/gbos-rw: a mount namespace of its own where /postinstall is remounted read-write
+#      (audio/audio-profile.sh does the same); apps never see it.
+# Each run logs the mount state and the way it chose to logs/boot-N/sysupdate.txt, and su_rw_check refuses with the reason when the
+# target still cannot be written (also when the kernel made the FAT itself read-only after a FAT error: then nothing can write it).
+# SU_MOUNTINFO, SU_RW_DIR, SU_UNSHARE, SU_PI: tests only.
+su_mnt() { # MOUNTPOINT: "<mount ro|rw> <filesystem ro|rw>" of the top mount there, from mountinfo; nothing when not a mount point
+  awk -v m="$1" '$5 == m { for (i = 7; i <= NF && $i != "-"; i++); split($6, a, ","); split($(i + 3), b, ","); r = a[1] " " b[1] }
+    END { if (r != "") print r }' "${SU_MOUNTINFO:-/proc/self/mountinfo}" 2>/dev/null
+}
+su_mntline() { awk -v m="$1" '$5 == m { r = $0 } END { print (r == "" ? "(not mounted)" : r) }' "${SU_MOUNTINFO:-/proc/self/mountinfo}" 2>/dev/null; }
+su_rw_log() { # MESSAGE: one line to stderr and to this boot's logs/boot-N/sysupdate.txt (the only boot-N under the lockdown's tmpfs)
+  echo "sysupdate: $*" >&2
+  _ld=$SU_PI/gbos/logs; _bn=$(ls "$_ld" 2>/dev/null | sed -n 's/^boot-\([0-9][0-9]*\)$/\1/p' | sort -n | tail -n 1)
+  [ -n "$_bn" ] && echo "$(date -u +%H:%M:%S 2>/dev/null) [$$] $*" >> "$_ld/boot-$_bn/sysupdate.txt" 2>/dev/null
+  return 0
+}
+su_rw_state() { # CMD: the facts behind the choice, logged
+  su_rw_log "$1: uid $(id -u 2>/dev/null) GBOS_STICK_RW=${GBOS_STICK_RW:-} $SU_PI: $(su_mntline "$SU_PI")"
+  su_rw_log "$1: $SU_RW_DIR/stick: $(su_mntline "$SU_RW_DIR/stick")"
+}
+su_stick_rw() { # CMD ARGS...: choose how this command writes GBOSSYS (may re-run the script in its own mount namespace)
+  _pm=$(su_mnt "$SU_PI")
+  case "$_pm" in ''|'rw '*) return 0;; esac          # no lockdown (stage0, the PC, POSTINSTALL_RW=1): write directly
+  su_rw_state "$1"
+  [ -n "${GBOS_STICK_RW:-}" ] && { su_rw_log "$1: in its own mount namespace"; return 0; }   # su_rw_check tells whether it worked
+  case "$_pm" in *' ro') su_rw_log "$1: the FAT itself is read-only (the kernel does this after a FAT error)"; return 0;; esac
+  if [ "$(su_mnt "$SU_RW_DIR/stick")" = "rw rw" ] && [ -d "$SU_RW_DIR/stick/gbos" ]; then
+    SU_GBOS_RW=$SU_RW_DIR/stick/gbos; su_rw_log "$1: writing through $SU_RW_DIR/stick (root only)"; return 0
+  fi
+  su_rw_log "$1: no $SU_RW_DIR/stick (older hook.sh): re-running in a mount namespace of its own"
+  _sh=${SU_BB:-$SU_PI/busybox}
+  exec env GBOS_STICK_RW=1 ${SU_UNSHARE:-unshare -m} "$_sh" sh -c \
+    'mount -o remount,bind,rw "$1" || { echo "sysupdate: ERROR: remounting $1 read-write in a mount namespace of its own failed" >&2; exit 1; }; shift; exec "$0" sh "$@"' \
+    "$_sh" "$SU_PI" "$0" "$@"
+}
+su_rw_check() { # G: refuse with the reason when G cannot be written (after su_gbos). A real write: busybox test -w is always true for root
+  mkdir "$1/.sysupdate-rw.$$" 2>/dev/null && rmdir "$1/.sysupdate-rw.$$" && return 0
+  _why="the system partition is read-only here"
+  case "$(su_mnt "$SU_PI")" in *' ro') _why="the stick's FAT is read-only for everyone: the kernel made it read-only after a FAT error (FAT-fs lines in kmsg). Boot the stick and choose 1 (it checks the FAT), or check it with chkdsk";;
+    'ro '*) [ -n "${GBOS_STICK_RW:-}" ] && _why="$SU_PI stayed read-only in the updater's own mount namespace" || _why="$SU_PI is read-only and $SU_RW_DIR/stick is missing";; esac
+  su_rw_log "cannot write $1: $_why"; su_rw_state "check"
+  su_die "cannot write $1: $_why (details: logs/boot-N/sysupdate.txt)"
+}
+
 # ---------------------------------------------------------------------------------------------------------------- main
 _cmd=${1:-}; [ $# -gt 0 ] && shift
-# /postinstall is read-only in Android (hook.sh gbos_postinstall_lockdown, 2026-11-20). The Android-side commands that write
-# GBOSSYS re-run themselves in a mount namespace of their own where /postinstall is writable, as audio/audio-profile.sh does;
-# apps never see it writable. stage0 (boot) writes /gbos directly and is not affected. SU_MOUNTS/SU_UNSHARE: tests only.
-case "$_cmd" in
-  stage|cancel|request|boot-ok|install-app)
-    if [ -z "${GBOS_STICK_RW:-}" ] && grep -q '^[^ ]* /postinstall [^ ]* ro[, ]' "${SU_MOUNTS:-/proc/mounts}" 2>/dev/null; then
-      exec env GBOS_STICK_RW=1 ${SU_UNSHARE:-unshare -m} /postinstall/busybox sh -c \
-        'mount -o remount,bind,rw /postinstall && exec /postinstall/busybox sh "$@"' sh "$0" "$_cmd" "$@"
-    fi;;
-esac
+case "$_cmd" in stage|cancel|boot-ok) su_stick_rw "$_cmd" "$@";; esac
 case "$_cmd" in
   boot) [ $# -ge 3 ] || su_die "usage: boot G LOGDIR BOOTN [--efi-dir DIR] [--dev DEV]"; cmd_boot "$@";;
   verify) [ $# -ge 1 ] || su_die "usage: verify BUNDLE [--pub FILE] [--installed G]"; cmd_verify "$@";;

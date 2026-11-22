@@ -743,6 +743,23 @@ gbos_goodix_fp() {
 # POSTINSTALL_RW=1 in gbos.cfg keeps the old world-writable /postinstall (debug only: any app can then get root).
 # PI = Android's /postinstall (/new/postinstall), LOGDIR = $L, N = boot number. Sets GBOS_LOGS_PRIVATE=1 when only root can reach logs/boot-N.
 # Lines start with "POSTINSTALL:" in stage0-dmesg.txt; "POSTINSTALL-RW" means apps can write something.
+# The system updater's way to write the volume from Android (usb/sysupdate.sh su_stick_rw: stage, cancel, boot-ok): /dev/gbos-rw/stick,
+# stage0's /gbos read-write (nosuid, nodev, noexec) inside /dev/gbos-rw, a 0700 root directory on /dev's tmpfs: apps and system_server
+# (no CAP_DAC_OVERRIDE) cannot go in. The bind's own root is the FAT's umask=000 root directory, so the 0700 directory must stay above
+# it, never be the mount point. /dev moves into Android with its mounts (as /dev/gbos-system-log). Without it sysupdate.sh falls back
+# to a mount namespace of its own. GBOS_DEV and GBOS_VOL are only for tests.
+gbos_root_rw() {
+  _rd=${GBOS_DEV:-/dev}/gbos-rw
+  if { [ -d "$_rd" ] || mkdir -m 0700 "$_rd"; } && chown 0:0 "$_rd" && chmod 0700 "$_rd" && { [ -d "$_rd/stick" ] || mkdir "$_rd/stick"; } &&
+     mount --bind "${GBOS_VOL:-/gbos}" "$_rd/stick"; then
+    mount -o remount,bind,nosuid,nodev,noexec "$_rd/stick" 2>/dev/null || log "hook: POSTINSTALL: /dev/gbos-rw/stick stays suid/dev/exec (remount failed)"
+    log "hook: POSTINSTALL: the system updater writes the volume through /dev/gbos-rw/stick (root only)"
+    return 0
+  fi
+  log "hook: POSTINSTALL: /dev/gbos-rw/stick FAILED: the system updater falls back to a mount namespace of its own"
+  return 1
+}
+
 gbos_postinstall_lockdown() { # PI LOGDIR N
   GBOS_LOGS_PRIVATE=0
   if [ "${POSTINSTALL_RW:-0}" = 1 ]; then
@@ -753,6 +770,7 @@ gbos_postinstall_lockdown() { # PI LOGDIR N
     log "hook: POSTINSTALL-RW: read-only remount of /postinstall FAILED: every app can write gbos/ (and get root)"
     return 1
   fi
+  gbos_root_rw
   _pl=$1/gbos/logs/boot-$3
   if mount -t tmpfs -o mode=0700,size=64k,nosuid,nodev,noexec gbos-logs "$1/gbos/logs"; then
     if mkdir -m 0700 "$_pl" && mount --bind "$2" "$_pl"; then

@@ -342,19 +342,36 @@ check "publish: Google's zip, each partition and super.img's hash are in the fee
 echo tampered >> "$T/parts/vendor_a.img"
 check "super_parts.py refuses partitions that are not the ones in super.img" "! python3 -I '$ROOT/tools/super_parts.py' '$T/t3/super.img' '$T/t3/super.layout' --parts '$T/parts' >/dev/null 2>&1"
 
-# Under the FAT lockdown (/postinstall read-only for Android) the Android-side writers re-run themselves in their own mount
-# namespace with /postinstall writable; read-only commands and stage0 do not, and the re-run does not loop.
-printf '/dev/block/sda2 /postinstall vfat ro,nosuid,nodev 0 0\n' > "$T/mounts-ro"
-printf '/dev/block/sda2 /postinstall vfat rw,nosuid,nodev 0 0\n' > "$T/mounts-rw"
-SU=$ROOT/usb/sysupdate.sh
-for c in stage cancel request boot-ok install-app; do
-  check "lockdown: $c re-runs with /postinstall writable" "SU_MOUNTS='$T/mounts-ro' SU_UNSHARE='echo UNSHARE' sh '$SU' $c 2>&1 | grep -q '^UNSHARE /postinstall/busybox sh -c mount -o remount,bind,rw /postinstall .* $c'"
+# Under the FAT lockdown (/postinstall read-only for Android) the Android-side writers (stage, cancel, boot-ok) write through stage0's
+# root-only /dev/gbos-rw/stick, or, with an older hook.sh, re-run in a mount namespace of their own; they refuse with the reason when
+# the target is still read-only, and log the mount state to logs/boot-N/sysupdate.txt. Fake mountinfo here; the real mounts are in
+# tools/test_postinstall_ro.sh (privileged docker).
+PI=$T/pi; RWD=$T/rwdir; mkdir -p "$PI/gbos/logs/boot-4" "$RWD/stick/gbos/update.inbox/gbos86-update-x"
+mi() { # PI-mount PI-filesystem [rw-stick-line]
+  echo "30 25 8:2 / $PI $1,nosuid,nodev shared:7 - vfat /dev/block/sda2 $2,fmask=0000"
+  echo "31 30 0:40 / $PI/gbos/logs rw,nosuid shared:8 - tmpfs gbos-logs rw,size=64k,mode=700"
+  [ -n "${3:-}" ] && echo "32 20 8:2 / $RWD/stick rw,nosuid,nodev,noexec shared:9 - vfat /dev/block/sda2 rw,fmask=0000"
+  return 0
+}
+mi ro rw > "$T/mi-ro"; mi ro rw x > "$T/mi-ro-dev"; mi rw rw > "$T/mi-rw"; mi ro ro x > "$T/mi-fatro"
+LK() { _m=$1; shift; SU_MOUNTINFO="$T/$_m" SU_PI="$PI" SU_RW_DIR="$RWD" SU_UNSHARE='echo UNSHARE' "$BB" sh "$ROOT/usb/sysupdate.sh" "$@"; }
+for c in stage cancel boot-ok; do
+  check "lockdown, older hook (no /dev/gbos-rw): $c re-runs in its own namespace" "LK mi-ro $c 2>&1 | grep -q \"^UNSHARE $BB sh -c mount -o remount,bind,rw .* $BB $PI $ROOT/usb/sysupdate.sh $c\$\""
 done
-for c in audit status info; do
-  check "lockdown: $c (read-only) does not re-run" "! SU_MOUNTS='$T/mounts-ro' SU_UNSHARE='echo UNSHARE' sh '$SU' $c '$T/none' 2>&1 | grep -q '^UNSHARE'"
+for c in request install-app audit status info; do
+  check "lockdown: $c does not re-run" "! LK mi-ro $c '$T/none' 2>&1 | grep -q '^UNSHARE'"
 done
-check "lockdown: no re-run when /postinstall is writable" "! SU_MOUNTS='$T/mounts-rw' SU_UNSHARE='echo UNSHARE' sh '$SU' request 2>&1 | grep -q '^UNSHARE'"
-check "lockdown: no second re-run inside the namespace" "! GBOS_STICK_RW=1 SU_MOUNTS='$T/mounts-ro' SU_UNSHARE='echo UNSHARE' sh '$SU' boot-ok '$T/none' 2>&1 | grep -q '^UNSHARE'"
+check "lockdown: no re-run when /postinstall is writable" "! LK mi-rw cancel '$T/none' 2>&1 | grep -q '^UNSHARE'"
+check "lockdown: no second re-run inside the namespace" "! GBOS_STICK_RW=1 LK mi-ro boot-ok '$T/none' 2>&1 | grep -q '^UNSHARE'"
+check "lockdown: cancel writes through /dev/gbos-rw/stick (no namespace)" "LK mi-ro-dev cancel > '$T/lk1' 2>&1 && ! grep -q '^UNSHARE' '$T/lk1' && grep -q 'removed 1 waiting' '$T/lk1' && [ ! -e '$RWD/stick/gbos/update.inbox/gbos86-update-x' ]"
+check "lockdown: the choice and the mount lines are logged in logs/boot-N/sysupdate.txt" "grep -q 'cancel: writing through $RWD/stick' '$PI/gbos/logs/boot-4/sysupdate.txt' && grep -q 'GBOS_STICK_RW= $PI: 30 25 8:2 / $PI ro,' '$PI/gbos/logs/boot-4/sysupdate.txt'"
+mkdir -p "$PI/gbos/update.inbox/gbos86-update-y" "$PI/gbos/update"; chmod 555 "$PI/gbos"
+check "lockdown: still read-only in its namespace: refused with the reason" "! GBOS_STICK_RW=1 LK mi-ro cancel '$PI/gbos' > '$T/lk2' 2>&1 && grep -q 'stayed read-only in the updater' '$T/lk2' && [ -d '$PI/gbos/update.inbox/gbos86-update-y' ]"
+check "lockdown: the FAT itself read-only (FAT error): refused, says why, no namespace" "! LK mi-fatro cancel '$PI/gbos' > '$T/lk3' 2>&1 && ! grep -q '^UNSHARE' '$T/lk3' && grep -q 'FAT is read-only for everyone' '$T/lk3'"
+echo x > "$PI/gbos/update/state"
+check "lockdown: boot-ok refuses instead of failing silently" "! LK mi-fatro boot-ok '$PI/gbos' > '$T/lk4' 2>&1 || ! grep -q 'cannot write' '$T/lk4'"
+chmod 755 "$PI/gbos"
+check "lockdown: install-app logs the mount lines every boot" "mkdir -p '$T/ia/logs/boot-4' && : > '$T/ia/gbos86-updater.apk' && PATH=/nonexistent LK mi-ro-dev install-app '$T/ia' 4 >/dev/null 2>&1; grep -q 'mounts: $PI: 30 25' '$T/ia/logs/boot-4/updater-app.txt' && grep -q 'mounts: $RWD/stick: 32 20' '$T/ia/logs/boot-4/updater-app.txt'"
 
 [ $FAILS = 0 ] && { echo SYSTEM_UPDATE_TEST_PASS; exit 0; }
 echo "$FAILS FAILED"; exit 1

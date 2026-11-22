@@ -1461,3 +1461,20 @@ SHA-NI, 256-bit VAES/VPCLMULQDQ, AVX-IFMA and AVX-512; the lapis binaries use th
   - *Regression in the persistent image:* `hook: experimental Latitude 7320 Sensors HAL not selected (missing display policy overlay /gbos/gbos/sensors/gbos-latitude7320-rotation-policy.apk)`. The image left the RRO out (wrongly taken as inert), but hook.sh requires it to select the sensor HAL, so the persistent stick has no sensor HAL: no auto-rotation or adaptive brightness. The original unsigned APK was lost when the old stick was flashed. Fix candidate: `claude/competent-carson-62ba0a` 9873888 (signed RRO shipped from usb/display/, hook stages it from display/; not yet seen on hardware).
   - *Updater failure cause:* unknown so far; the logcat is unreadable. Waiting for the user's photos, and for approval to run chkdsk (admin) on D:.
 - 2026-11-22 **Updater failure cause (the user's photo of the app):** the app found update 202611212051 (30 MB) and reported the system as published (commit ba8fc05) with no local changes. On Download and install, staging failed: `mkdir: can't create directory '/postinstall/gbos/update.inbox': Read-only file system` and `sysupdate: ERROR: cannot write to /postinstall/gbos/update.inbox`. So 3558f76's re-exec into a writable namespace did not take effect on hardware (grep, unshare or remount; unknown which). There is no /proc/mounts capture from any lockdown boot. chkdsk /f on D: found "no problems" but deleted boot-1's unreadable logs (logcat*, camera-bridge*, sensors.txt); kmsg.log survives only to 170 s. Handed to the updater thread at the user's request.
+- 2026-11-22 **Updater: staging failed on the persistent stick (read-only update.inbox); new way to write GBOSSYS from Android
+  (PC and container only, not on hardware).** The app's "Download and install" on lab update 202611212051 failed: `mkdir:
+  can't create directory '/postinstall/gbos/update.inbox': Read-only file system`. The namespace re-run (3558f76) works with
+  the stick's own busybox on a real kernel (privileged container, the same mounts the lockdown makes), so the hardware cause is
+  **not proven**. The boot's logs were lost to FAT damage. Two candidates: (1) the kernel made the FAT itself read-only after a FAT
+  error that boot (`errors=remount-ro`; the same session damaged the logs), which no remount of a bind can undo; (2) something
+  Android-specific broke the namespace re-run. Now stage0 makes `/dev/gbos-rw/stick` (hook.sh `gbos_root_rw`: a rw, nosuid, nodev,
+  noexec bind of `/gbos` inside a 0700 root directory on /dev) and sysupdate.sh writes through it, with no namespace. It keeps the
+  namespace re-run only for older hooks. It probes with a real mkdir (busybox `test -w` is always true for root, so the old check
+  could never fail). It refuses with the reason ("FAT is read-only for everyone" / "stayed read-only in its own namespace" / "no
+  /dev/gbos-rw"). It logs mount lines and its choice to `logs/boot-N/sysupdate.txt` on every stage/cancel/boot-ok, and to
+  `updater-app.txt` every boot. `request` no longer re-runs itself: its stage and cancel children choose for themselves, so their
+  errors reach the app. `tools/test_postinstall_ro.sh` (kernel part) runs `sysupdate.sh cancel`/`boot-ok` as init does (empty
+  environment, `/postinstall/busybox sh`): through /dev/gbos-rw, then through the namespace fallback, then with the FAT superblock
+  read-only. It also checks that uid 10123 and 1000 cannot reach `/dev/gbos-rw/stick`. To try it, the stick needs the new `hook.sh`
+  and `sysupdate.sh`; staging through the old copy cannot work.
+

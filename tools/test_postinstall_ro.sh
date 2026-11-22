@@ -33,12 +33,13 @@ if [ "${1:-}" = --inner ]; then
   rm -f $G/app-on-gbos
   # what hook.sh does
   mount() { $BB mount "$@"; }; umount() { $BB umount "$@"; }; log() { echo "$*" >> $W/hook.log; }
-  eval "$(fn gbos_postinstall_lockdown /repo/usb/hook.sh)"
+  eval "$(fn gbos_postinstall_lockdown /repo/usb/hook.sh)"; eval "$(fn gbos_root_rw /repo/usb/hook.sh)"
+  mkdir -p /stage0dev /new/dev && $BB mount -t tmpfs -o mode=0755 tmpfs /stage0dev
+  export GBOS_DEV=/stage0dev
   mount --bind /gbos /new/postinstall && gbos_postinstall_lockdown /new/postinstall "$L" "$N"; rc=$?
   # gbos_fp (uid system) gets logs/boot-7/fingerprint.txt through stage0's /dev, which then moves into Android as stage0 moves it
   eval "$(fn gbos_system_log /repo/usb/hook.sh)"
-  mkdir -p /stage0dev /new/dev && $BB mount -t tmpfs -o mode=0755 tmpfs /stage0dev
-  FPLOG=$(GBOS_DEV=/stage0dev gbos_system_log fingerprint.txt)
+  FPLOG=$(gbos_system_log fingerprint.txt)
   $BB mount --move /stage0dev /new/dev
   unset -f mount umount
   mount --make-rshared / 2>/dev/null   # then switch_root, and Android init makes / rshared: a flag change must still not travel to peers
@@ -92,6 +93,39 @@ if [ "${1:-}" = --inner ]; then
     && [ "$(cat $G/root-ns 2>/dev/null)" = root ] && ok "root writes gbos/ in its own mount namespace" || bad "root cannot get write access in its own namespace"
   ( echo pwn > $P/after-ns ) 2>/dev/null && bad "the namespace remount leaked: /postinstall writable" || ok "after it, /postinstall is still read-only here"
   as 10123 "echo pwn > $P/after-ns" && bad "the namespace remount leaked to apps" || ok "and still read-only for apps"
+  # the system updater (usb/sysupdate.sh), run exactly as init runs it: /postinstall/busybox sh .../sysupdate.sh, empty environment
+  R=/new/dev/gbos-rw
+  grep -q 'POSTINSTALL: the system updater writes the volume through /dev/gbos-rw/stick' $W/hook.log && ok "logged: updater writes through /dev/gbos-rw/stick" || bad "gbos_root_rw log: $(cat $W/hook.log)"
+  [ "$(stat -c '%a %u' $R)" = "700 0" ] && ok "/dev/gbos-rw is 0700 root after the /dev move" || bad "/dev/gbos-rw is $(stat -c '%a %u' $R 2>&1)"
+  o=$(awk -v m=$R/stick '$5 == m {print $6}' /proc/self/mountinfo)
+  case ,$o, in *,rw,*nosuid,*nodev,*noexec,*|*,rw,*noexec,*) ok "/dev/gbos-rw/stick mount options $o";; *) bad "/dev/gbos-rw/stick options: [$o]";; esac
+  for u in 10123 1000; do
+    as $u "ls $R/stick" && bad "uid $u can list /dev/gbos-rw/stick" || ok "uid $u cannot reach /dev/gbos-rw/stick"
+    as $u "echo pwn > $R/stick/gbos/hook.sh" && bad "uid $u can write through /dev/gbos-rw" || ok "uid $u cannot write through /dev/gbos-rw"
+  done
+  cp $BB /gbos/busybox && cp /repo/usb/sysupdate.sh $G/sysupdate.sh
+  SUE="env -i PATH=/product/bin:/system/bin SU_PI=/new/postinstall SU_RW_DIR=$R"
+  mkdir -p $G/update.inbox/gbos86-update-202611220000-aaaaaaaaaaaa
+  $SUE /new/postinstall/busybox sh $P/sysupdate.sh cancel > $W/su1 2>&1 && grep -q 'removed 1 waiting' $W/su1 && [ ! -e $G/update.inbox/gbos86-update-202611220000-aaaaaaaaaaaa ] \
+    && ok "sysupdate cancel (as init runs it) writes through /dev/gbos-rw/stick" || bad "sysupdate cancel: $(cat $W/su1)"
+  grep -q 'cancel: writing through' $L/sysupdate.txt && grep -q 'GBOS_STICK_RW= /new/postinstall: .* /new/postinstall ro,' $L/sysupdate.txt \
+    && ok "it logged its choice and the mount lines to logs/boot-7/sysupdate.txt" || bad "sysupdate.txt: $(cat $L/sysupdate.txt 2>&1)"
+  mkdir -p $G/update && printf 'set=abc\nphase=trying\n' > $G/update/state
+  $SUE SYSUPDATE_TEST=1 /new/postinstall/busybox sh $P/sysupdate.sh boot-ok > $W/su2 2>&1 && [ "$(cat $G/update/boot-ok 2>/dev/null)" = abc ] \
+    && ok "sysupdate boot-ok records the tried set through /dev/gbos-rw/stick" || bad "boot-ok: $(cat $W/su2)"
+  rm -f $G/update/boot-ok $G/update/state
+  # an older hook.sh (no /dev/gbos-rw): its own mount namespace, with the busybox unshare stage0 ships
+  $BB umount $R/stick && mkdir -p $G/update.inbox/gbos86-update-202611220000-bbbbbbbbbbbb
+  $SUE /new/postinstall/busybox sh $P/sysupdate.sh cancel > $W/su3 2>&1 && grep -q 'removed 1 waiting' $W/su3 && grep -q 're-running in a mount namespace' $W/su3 \
+    && ok "without /dev/gbos-rw: cancel re-runs in its own namespace and writes" || bad "namespace fallback: $(cat $W/su3)"
+  ( echo pwn > $P/after-su ) 2>/dev/null && bad "the updater's namespace leaked: /postinstall writable" || ok "after it, /postinstall is still read-only here"
+  as 10123 "echo pwn > $P/after-su" && bad "the updater's namespace leaked to apps" || ok "and for apps"
+  # the FAT itself read-only (the kernel does this after a FAT error): a clear refusal, nothing half-done
+  mkdir -p $G/update.inbox/gbos86-update-202611220000-cccccccccccc
+  $BB mount -t vfat -o remount,ro $DEV /gbos
+  $SUE /new/postinstall/busybox sh $P/sysupdate.sh cancel > $W/su4 2>&1; r4=$?
+  [ $r4 != 0 ] && grep -q 'FAT is read-only for everyone' $W/su4 && ok "FAT read-only: cancel refuses and says why" || bad "FAT read-only: rc $r4 $(cat $W/su4)"
+  $BB mount -t vfat -o remount,rw $DEV /gbos && rm -rf $G/update.inbox $L/sysupdate.txt $G/sysupdate.sh /gbos/busybox
   # stick_fat.sh's superblock remount at shutdown (no writer open)
   $BB mount -t vfat -o remount,ro $DEV /gbos && [ "$(awk '$5 == "/gbos" { for (i = 7; $i != "-"; i++); split($(i + 3), o, ","); print o[1] }' /proc/self/mountinfo)" = ro ] \
     && ok "stick_fat.sh superblock remount read-only still works with these mounts" || bad "superblock remount ro fails"
@@ -104,6 +138,8 @@ W=$(mktemp -d "${TMPDIR:-/tmp}/pi-ro.XXXXXX"); trap 'rm -rf "$W"' EXIT
 sh -n "$H" "$ROOT/usb/audio/audio-profile.sh" && ok "sh -n hook.sh audio-profile.sh" || bad "syntax"
 fn gbos_postinstall_lockdown "$H" > "$W/fn.sh"
 [ -s "$W/fn.sh" ] && ok "gbos_postinstall_lockdown extracted ($(wc -l < "$W/fn.sh") lines)" || { bad "gbos_postinstall_lockdown not in hook.sh"; exit 1; }
+fn gbos_root_rw "$H" | grep -q 'mount --bind "${GBOS_VOL:-/gbos}" "$_rd/stick"' && fn gbos_root_rw "$H" | grep -q 'chmod 0700 "$_rd"' \
+  && ok "gbos_root_rw binds the volume at gbos-rw/stick, below the 0700 directory (never on it)" || bad "gbos_root_rw: not the expected bind below a 0700 directory"
 
 # FAILON = a substring of the one call that fails ("remount,bind,ro", "tmpfs", "mkdir", "bind LOGDIR PI/gbos/logs/boot-7", ...)
 run() { # FAILON [VAR=value]
@@ -113,15 +149,16 @@ run() { # FAILON [VAR=value]
     umount() { echo "umount $*" >> "$W/calls"; }
     mkdir() { echo "mkdir $*" >> "$W/calls"; case "mkdir $*" in *"$FAILON"*) [ -n "$FAILON" ] && return 1;; esac; return 0; }
     log() { echo "$*" >> "$W/log"; }
+    gbos_root_rw() { echo "gbos_root_rw" >> "$W/calls"; }   # real mounts: kernel part
     . "$W/fn.sh"
     gbos_postinstall_lockdown PI LOGDIR 7; echo "rc=$? private=$GBOS_LOGS_PRIVATE" > "$W/result" )
 }
 exp() { printf '%s\n' "$@" > "$W/exp"; cmp -s "$W/exp" "$W/calls"; }
 
 run ""
-exp "mount -o remount,bind,ro,nosuid,nodev PI" "mount -t tmpfs -o mode=0700,size=64k,nosuid,nodev,noexec gbos-logs PI/gbos/logs" \
+exp "mount -o remount,bind,ro,nosuid,nodev PI" "gbos_root_rw" "mount -t tmpfs -o mode=0700,size=64k,nosuid,nodev,noexec gbos-logs PI/gbos/logs" \
     "mkdir -m 0700 PI/gbos/logs/boot-7" "mount --bind LOGDIR PI/gbos/logs/boot-7" "mount -o remount,bind,nosuid,nodev,noexec PI/gbos/logs/boot-7" \
-  && ok "default: ro remount, 0700 tmpfs over logs/, rw bind of this boot's dir (noexec)" || bad "default call sequence: $(cat "$W/calls")"
+  && ok "default: ro remount, root's /dev/gbos-rw, 0700 tmpfs over logs/, rw bind of this boot's dir (noexec)" || bad "default call sequence: $(cat "$W/calls")"
 grep -qx 'rc=0 private=1' "$W/result" && ! grep -q POSTINSTALL-RW "$W/log" && ok "default: rc 0, logs private, no POSTINSTALL-RW" || bad "default: $(cat "$W/result") $(cat "$W/log")"
 
 run "" POSTINSTALL_RW=1

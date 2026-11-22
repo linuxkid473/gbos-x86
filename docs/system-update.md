@@ -324,6 +324,16 @@ update's state, backups and kernel copy, and copies the stick's `system.manifest
   fetched from a moving branch, no unverified multi-GB download, no block delta that cannot fit 8 GiB, no `super.img` without its
   `super.layout`, patches and scripts from the same commit, and no edits to `gbos.cfg`, other apps' settings or logs.
 
+* **Writing GBOSSYS from Android.** Since the FAT lockdown (hook.sh `gbos_postinstall_lockdown`), Android's `/postinstall` is
+  read-only. The three Android-side writers (`stage`, `cancel`, `boot-ok`) write through `/dev/gbos-rw/stick`: stage0's `/gbos`
+  read-write (nosuid, nodev, noexec) inside `/dev/gbos-rw`, a 0700 root directory, so no app and not system_server can reach it
+  (hook.sh `gbos_root_rw`). With an older hook.sh they re-run in a mount namespace of their own with `/postinstall` remounted
+  read-write. Before writing they really write a probe directory (busybox `test -w` is always true for root). When the target is still
+  read-only they refuse and say why, also when the kernel made the FAT itself read-only after a FAT error (then nothing can write it
+  until the FAT is checked). Each run logs the mount lines and the way it chose to `logs/boot-N/sysupdate.txt`, and the app's install
+  service logs the same mount lines to `logs/boot-N/updater-app.txt` every boot. Tested with real mounts in a privileged container
+  (`tools/test_postinstall_ro.sh`), running `sysupdate.sh` exactly as init does.
+
 ## Files on GBOSSYS
 
 | Path | What |
