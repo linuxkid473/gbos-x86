@@ -131,6 +131,7 @@ The app's default update source is this checkout's GitHub `origin` (or `REPO=OWN
 
 ## The app
 
+* **Material 3 interface.** Designed to Material Design 3 (Material You) guidelines: dynamic color tokens adapting to Day/Night mode and Android 12-15 system wallpaper accents; structured surface container cards (Hero Update status, System info & integrity, Local folder bundle, and Maintenance); M3 pill buttons (filled primary, tonal secondary, outlined, danger) with ripple effects; color-coded status badges for system integrity; segmented button controls for Settings; and a responsive layout (720dp max-width centered) suited for desktop and laptop screens.
 * **Checking.** After each start, the gbOS86 boot service (`sysupdate.sh install-app`) tells the app (broadcast `BOOT_CHECK`; it reaches
   the app even if it was never opened). The app waits for a network, reads the feed, checks its signature against the laptop's own
   `gbos/sysupdate.pub`, and shows a notification when an update newer than the installed one is published. It also checks once a day,

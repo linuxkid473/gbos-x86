@@ -51,9 +51,16 @@ final class BuildInfo {
 }
 EOF
 echo "default update source: ${REPO:-none (set it in the app's Settings)}"
-echo "== aapt2 link (manifest only, no resources)"
-"$BT/aapt2" link -o "$OUT/base.apk" -I "$JAR" --manifest "$HERE/AndroidManifest.xml" \
-  --min-sdk-version $MIN_SDK --target-sdk-version $API --version-code "$VERSION_CODE" --version-name "$VERSION_NAME"
+RES_ZIP=""
+if [ -d "$HERE/res" ]; then
+  echo "== aapt2 compile"
+  "$BT/aapt2" compile --dir "$HERE/res" -o "$OUT/res.zip"
+  RES_ZIP="$OUT/res.zip"
+fi
+echo "== aapt2 link"
+# shellcheck disable=SC2086
+"$BT/aapt2" link -o "$OUT/base.apk" -I "$JAR" ${RES_ZIP:+"$RES_ZIP"} --manifest "$HERE/AndroidManifest.xml" \
+  --java "$OUT/gen" --min-sdk-version $MIN_SDK --target-sdk-version $API --version-code "$VERSION_CODE" --version-name "$VERSION_NAME"
 echo "== javac"
 javac -encoding UTF-8 -source 1.8 -target 1.8 -Xlint:-options -bootclasspath "$JAR" -classpath "$BT/core-lambda-stubs.jar" -d "$OUT/classes" \
   $(find "$HERE/src" "$OUT/gen" -name '*.java')

@@ -1,11 +1,13 @@
 package org.gbos86.updater;
 
 import android.app.Activity;
+import android.graphics.Color;
 import android.graphics.Typeface;
 import android.os.Bundle;
 import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
+import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
@@ -13,36 +15,72 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
-/** Settings, on two tabs: General, and Experimental features (off by default). */
+import org.gbos86.updater.ui.M3;
+import org.gbos86.updater.ui.M3Theme;
+
+/**
+ * Settings (Material 3 Edition):
+ * Organised into General and Experimental categories via M3 Segmented Buttons,
+ * housed in surface container cards.
+ */
 public class SettingsActivity extends Activity {
-    private LinearLayout body;
-    private Button tabGeneral, tabExperimental;
+    private LinearLayout contentCol;
+    private boolean onExperimental;
 
     @Override
     protected void onCreate(Bundle saved) {
         super.onCreate(saved);
-        setTitle("gbOS86 Updater settings");
-        int pad = dp(16);
+
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(pad, pad, pad, pad);
-        LinearLayout tabs = new LinearLayout(this);
-        tabs.setOrientation(LinearLayout.HORIZONTAL);
-        tabGeneral = tab("General", v -> show(false));
-        tabExperimental = tab("Experimental features", v -> show(true));
-        tabs.addView(tabGeneral, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
-        tabs.addView(tabExperimental, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+        int pad = M3.dp(this, 16);
+        root.setPadding(pad, pad, pad, pad * 2);
+
+        // ---------------------------------------------------------------- Top App Header with Back
+        LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.HORIZONTAL);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        header.setPadding(0, M3.dp(this, 8), 0, M3.dp(this, 16));
+
+        Button backBtn = M3.tonalButton(this, "← Back", v -> finish());
+        header.addView(backBtn);
+
+        LinearLayout titleCol = new LinearLayout(this);
+        titleCol.setOrientation(LinearLayout.VERTICAL);
+        titleCol.setPadding(M3.dp(this, 16), 0, 0, 0);
+        titleCol.addView(M3.eyebrow(this, "PREFERENCES"));
+        titleCol.addView(M3.headline(this, "Settings"));
+        header.addView(titleCol, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f));
+
+        root.addView(header);
+
+        // ---------------------------------------------------------------- Segmented Control (Tabs)
+        LinearLayout tabs = M3.segmentedControl(this, new String[] {"General", "Experimental"},
+                (saved != null && saved.getBoolean("exp")) ? 1 : 0, index -> show(index == 1));
         root.addView(tabs);
-        body = new LinearLayout(this);
-        body.setOrientation(LinearLayout.VERTICAL);
-        ScrollView sv = new ScrollView(this);
-        sv.addView(body);
-        root.addView(sv);
-        setContentView(root);
+        addMarginBottom(tabs, 16);
+
+        // ---------------------------------------------------------------- Content Container
+        contentCol = new LinearLayout(this);
+        contentCol.setOrientation(LinearLayout.VERTICAL);
+        root.addView(contentCol);
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        scroll.setBackgroundColor(M3Theme.surface(this));
+        View scaffold = M3.responsiveScaffold(this, root, 720);
+        scroll.addView(scaffold);
+        setContentView(scroll);
+
         show(saved != null && saved.getBoolean("exp"));
     }
 
-    private boolean onExperimental;
+    private void addMarginBottom(View v, int dp) {
+        LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) v.getLayoutParams();
+        if (lp == null) lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.bottomMargin = M3.dp(this, dp);
+        v.setLayoutParams(lp);
+    }
 
     @Override
     protected void onSaveInstanceState(Bundle out) {
@@ -50,112 +88,168 @@ public class SettingsActivity extends Activity {
         out.putBoolean("exp", onExperimental);
     }
 
-    private void show(boolean experimental) {
-        onExperimental = experimental;
-        tabGeneral.setEnabled(experimental);
-        tabExperimental.setEnabled(!experimental);
-        tabGeneral.setTypeface(null, experimental ? Typeface.NORMAL : Typeface.BOLD);
-        tabExperimental.setTypeface(null, experimental ? Typeface.BOLD : Typeface.NORMAL);
-        body.removeAllViews();
-        if (experimental) experimental(); else general();
+    private void show(boolean exp) {
+        onExperimental = exp;
+        contentCol.removeAllViews();
+        if (exp) experimental();
+        else general();
     }
 
+    // ---------------------------------------------------------------- General Settings Tab
     private void general() {
-        body.addView(heading("Checking for updates"));
-        body.addView(check("Check for updates when the laptop starts", Prefs.CHECK_BOOT, true,
-                "After each start, once a network is there, the app looks for a new update and shows a notification if there is one. "
-                        + "It never downloads or installs anything without you."));
-        body.addView(check("Also check once a day", Prefs.CHECK_DAILY, true, null));
-        body.addView(heading("Installing"));
-        body.addView(check("If the system partition is short of space, delete old boot logs", Prefs.PRUNE_LOGS, false,
-                "The newest 3 boots' logs are always kept."));
-        body.addView(heading("Update source"));
-        body.addView(text("The GitHub repository whose releases hold gbOS86's updates (OWNER/NAME). Whatever the source, this laptop "
-                + "installs only updates signed with the key in its gbos/sysupdate.pub."));
+        // Card 1: Automated Checks
+        LinearLayout schedCard = M3.card(this, 20);
+        schedCard.addView(M3.eyebrow(this, "AUTOMATED CHECKS"));
+        TextView schedTitle = M3.titleLarge(this, "Background Updates");
+        schedTitle.setPadding(0, M3.dp(this, 4), 0, M3.dp(this, 8));
+        schedCard.addView(schedTitle);
+
+        schedCard.addView(checkTile("Check for updates at boot", Prefs.CHECK_BOOT, true,
+                "Checks the signed feed automatically when the laptop finishes starting."));
+        schedCard.addView(M3.divider(this));
+        schedCard.addView(checkTile("Check once a day", Prefs.CHECK_DAILY, true,
+                "Schedules a low-power background check every 24 hours."));
+        contentCol.addView(schedCard);
+        addMarginBottom(schedCard, 16);
+
+        // Card 2: Storage Maintenance
+        LinearLayout storageCard = M3.card(this, 20);
+        storageCard.addView(M3.eyebrow(this, "STORAGE MANAGEMENT"));
+        TextView storTitle = M3.titleLarge(this, "Disk Maintenance");
+        storTitle.setPadding(0, M3.dp(this, 4), 0, M3.dp(this, 8));
+        storageCard.addView(storTitle);
+
+        storageCard.addView(checkTile("Prune old boot logs when space is tight", Prefs.PRUNE_LOGS, false,
+                "Deletes older boot logs from GBOSSYS if needed before staging an update. The newest 3 boots' logs are always kept."));
+        contentCol.addView(storageCard);
+        addMarginBottom(storageCard, 16);
+
+        // Card 3: Update Source Feed
+        LinearLayout sourceCard = M3.card(this, 20);
+        sourceCard.addView(M3.eyebrow(this, "UPDATE SOURCE"));
+        TextView srcTitle = M3.titleLarge(this, "Release Repository");
+        srcTitle.setPadding(0, M3.dp(this, 4), 0, M3.dp(this, 4));
+        sourceCard.addView(srcTitle);
+
+        TextView srcDesc = M3.body(this, "The GitHub repository whose releases hold gbOS86's updates (OWNER/NAME). Whatever the source, this laptop "
+                + "installs only updates signed with the key in its gbos/sysupdate.pub.");
+        srcDesc.setPadding(0, 0, 0, M3.dp(this, 12));
+        sourceCard.addView(srcDesc);
+
         final EditText src = new EditText(this);
         src.setSingleLine(true);
         src.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
         src.setText(Prefs.source(this));
-        body.addView(src);
-        final TextView srcMsg = text("");
-        LinearLayout row = new LinearLayout(this);
-        row.addView(button("Save", v -> {
+        src.setTextColor(M3Theme.onSurface(this));
+        src.setTextSize(14);
+        int epad = M3.dp(this, 14);
+        src.setPadding(epad, epad, epad, epad);
+        src.setBackground(M3.roundRectBorder(M3Theme.surfaceContainerHigh(this), M3Theme.outlineVariant(this), M3.dp(this, 1), M3.dp(this, 12)));
+        sourceCard.addView(src);
+
+        final TextView srcMsg = M3.bodySmall(this, "");
+        srcMsg.setPadding(0, M3.dp(this, 6), 0, M3.dp(this, 10));
+
+        LinearLayout btnRow = new LinearLayout(this);
+        btnRow.setOrientation(LinearLayout.HORIZONTAL);
+        btnRow.setPadding(0, M3.dp(this, 12), 0, 0);
+
+        Button saveBtn = M3.filledButton(this, "Save source", v -> {
             String s = src.getText().toString().trim();
-            if (!Prefs.validSource(s)) { srcMsg.setText("Write it as OWNER/NAME, for example the project's own repository."); return; }
+            if (!Prefs.validSource(s)) {
+                srcMsg.setText("Enter as OWNER/NAME, for example the project's own repository.");
+                srcMsg.setTextColor(M3Theme.error(this));
+                return;
+            }
             Prefs.get(this).edit().putString(Prefs.SOURCE, s.equals(BuildInfo.DEFAULT_REPO) ? "" : s).apply();
-            srcMsg.setText("Saved.");
-        }));
-        row.addView(button("Default", v -> {
+            srcMsg.setText("✓ Saved.");
+            srcMsg.setTextColor(M3Theme.success(this));
+        });
+
+        Button defBtn = M3.outlinedButton(this, "Restore default", v -> {
             Prefs.get(this).edit().remove(Prefs.SOURCE).apply();
             src.setText(Prefs.source(this));
-            srcMsg.setText(BuildInfo.DEFAULT_REPO.isEmpty() ? "This app was built without a default source." : "Back to the default.");
-        }));
-        body.addView(row);
-        body.addView(srcMsg);
+            srcMsg.setText(BuildInfo.DEFAULT_REPO.isEmpty() ? "This app was built without a default source." : "Restored to default source.");
+            srcMsg.setTextColor(M3Theme.onSurfaceVariant(this));
+        });
+
+        btnRow.addView(saveBtn);
+        LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) saveBtn.getLayoutParams();
+        lp.setMarginEnd(M3.dp(this, 10));
+        saveBtn.setLayoutParams(lp);
+        btnRow.addView(defBtn);
+
+        sourceCard.addView(btnRow);
+        sourceCard.addView(srcMsg);
+
+        contentCol.addView(sourceCard);
     }
 
+    // ---------------------------------------------------------------- Experimental Tab
     private void experimental() {
-        body.addView(heading("Experimental features"));
-        TextView warn = text("These are new and less tested. They can fail, and they can use a lot of data and space. Leave them off "
-                + "unless you need them.");
-        warn.setTypeface(null, Typeface.ITALIC);
-        body.addView(warn);
-        body.addView(check("Download new Google builds directly from Google", Prefs.EXP_GOOGLE, false,
-                "Some updates bring a new Google build (the Android system image, super.img). It is too big for GitHub and it is Google's, so "
-                        + "it is not in the update. With this on, the app downloads Google's recovery image for that build from dl.google.com, "
-                        + "keeps only the parts gbOS86 uses, and rebuilds super.img on this laptop.\n\n"
-                        + "- Data: Google's file is read from the start up to the last part needed, several GB (up to about 8 GB). Use a Wi-Fi "
-                        + "network without a data cap.\n"
-                        + "- An interrupted connection resumes, but if the app is closed or the laptop sleeps, Google's part starts over.\n"
-                        + "- Space: about 4 GB free on the data partition while it works, and about 3.8 GB on the system partition (GBOSSYS).\n"
-                        + "- The result must match the signed update exactly; the laptop checks it again before installing.\n\n"
-                        + "Without this, an update with a new Google build is installed with the USB stick (menu 1)."));
+        // Warning Banner Card
+        LinearLayout warnCard = M3.card(this, 20);
+        warnCard.setBackground(M3.roundRectBorder(M3Theme.warningContainer(this), M3Theme.warning(this), M3.dp(this, 1), M3.dp(this, 20)));
+
+        TextView warnEyebrow = M3.eyebrow(this, "EXPERIMENTAL FEATURES");
+        warnEyebrow.setTextColor(M3Theme.onWarningContainer(this));
+        warnCard.addView(warnEyebrow);
+
+        TextView warnTitle = M3.titleLarge(this, "Proceed with Caution");
+        warnTitle.setTextColor(M3Theme.onWarningContainer(this));
+        warnTitle.setPadding(0, M3.dp(this, 4), 0, M3.dp(this, 6));
+        warnCard.addView(warnTitle);
+
+        TextView warn = M3.body(this, "These features are new and less tested. They can consume substantial network data and disk space. "
+                + "Leave them disabled unless you specifically require them.");
+        warn.setTextColor(M3Theme.onWarningContainer(this));
+        warnCard.addView(warn);
+        contentCol.addView(warnCard);
+        addMarginBottom(warnCard, 16);
+
+        // Feature Card
+        LinearLayout featCard = M3.card(this, 20);
+        featCard.addView(M3.eyebrow(this, "STANDALONE SUPER REBUILD"));
+        TextView featTitle = M3.titleLarge(this, "Google Recovery Image Fetching");
+        featTitle.setPadding(0, M3.dp(this, 4), 0, M3.dp(this, 8));
+        featCard.addView(featTitle);
+
+        featCard.addView(checkTile("Download new Google builds directly from Google", Prefs.EXP_GOOGLE, false,
+                "Some updates bring a new Google build (the Android system image, super.img). Because it is large and proprietary to Google, "
+                        + "it is not hosted on GitHub.\n\n"
+                        + "When enabled, the app downloads Google's official recovery image from dl.google.com, extracts only the necessary "
+                        + "partitions, and rebuilds super.img locally on this laptop.\n\n"
+                        + "• Network: Requires up to ~8 GB download. Use an unmetered Wi-Fi connection.\n"
+                        + "• Resumption: Streaming resumes automatically if dropped, but restarting the app restarts the fetch.\n"
+                        + "• Storage: Requires ~4 GB temporary space on /data and ~3.8 GB on GBOSSYS.\n"
+                        + "• Verification: The result is strictly verified against the signed release manifest before installing.\n\n"
+                        + "Without this setting, updates requiring a new Google build are applied via USB stick (menu 1)."));
+
+        contentCol.addView(featCard);
     }
 
-    // ------------------------------------------------------------------------------------------------ helpers
-    private View check(String label, final String key, boolean def, String help) {
+    // ---------------------------------------------------------------- UI Helpers
+    private View checkTile(String label, final String key, boolean def, String help) {
         LinearLayout l = new LinearLayout(this);
         l.setOrientation(LinearLayout.VERTICAL);
+        l.setPadding(0, M3.dp(this, 6), 0, M3.dp(this, 6));
+
         CheckBox cb = new CheckBox(this);
         cb.setText(label);
+        cb.setTextSize(15);
+        cb.setTextColor(M3Theme.onSurface(this));
         cb.setChecked(Prefs.get(this).getBoolean(key, def));
         cb.setOnCheckedChangeListener((b, on) -> {
             Prefs.get(this).edit().putBoolean(key, on).apply();
             if (key.equals(Prefs.CHECK_BOOT) || key.equals(Prefs.CHECK_DAILY)) CheckJob.schedule(this, false);
         });
         l.addView(cb);
+
         if (help != null) {
-            TextView h = text(help);
-            h.setPadding(dp(32), 0, 0, dp(8));
+            TextView h = M3.bodySmall(this, help);
+            h.setPadding(M3.dp(this, 32), M3.dp(this, 2), 0, M3.dp(this, 4));
             l.addView(h);
         }
         return l;
-    }
-
-    private int dp(int v) { return (int) (v * getResources().getDisplayMetrics().density + 0.5f); }
-    private TextView text(String s) {
-        TextView t = new TextView(this);
-        t.setText(s);
-        t.setPadding(0, dp(4), 0, dp(4));
-        return t;
-    }
-    private TextView heading(String s) {
-        TextView t = text(s);
-        t.setTextSize(18);
-        t.setTypeface(Typeface.DEFAULT_BOLD);
-        t.setPadding(0, dp(16), 0, dp(4));
-        return t;
-    }
-    private Button button(String s, View.OnClickListener l) {
-        Button b = new Button(this);
-        b.setText(s);
-        b.setOnClickListener(l);
-        return b;
-    }
-    private Button tab(String s, View.OnClickListener l) {
-        Button b = button(s, l);
-        b.setAllCaps(false);
-        b.setGravity(Gravity.CENTER);
-        return b;
     }
 }

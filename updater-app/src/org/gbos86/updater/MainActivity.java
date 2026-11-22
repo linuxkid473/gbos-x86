@@ -12,7 +12,9 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.DocumentsContract;
+import android.view.Gravity;
 import android.view.View;
+import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
@@ -21,6 +23,8 @@ import android.widget.TextView;
 
 import org.gbos86.updater.core.Feed;
 import org.gbos86.updater.core.Util;
+import org.gbos86.updater.ui.M3;
+import org.gbos86.updater.ui.M3Theme;
 
 import java.io.BufferedReader;
 import java.io.InputStream;
@@ -29,94 +33,261 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 /**
- * gbOS86 Updater. Not a trust anchor: it never installs anything itself. It finds updates (the signed feed on the project's GitHub
- * releases), downloads them, and asks the root service (sysupdate.sh request) to copy them into GBOSSYS's update.inbox. The next
- * boot's stage0 checks the signature and every file again before anything changes, and rolls back an update that does not start.
- * It also shows whether the installed system matches the published sources (the modification check).
+ * gbOS86 Updater (Material 3 Edition).
+ * Not a trust anchor: it never installs anything itself. It finds updates (the signed feed on the project's GitHub
+ * releases), downloads them, and asks the root service (sysupdate.sh request) to copy them into GBOSSYS's update.inbox.
+ * The next boot's stage0 checks the signature and every file again before anything changes, and rolls back an update
+ * that does not start. It also shows whether the installed system matches the published sources (the modification check).
  */
 public class MainActivity extends Activity {
     private static final int PICK_FOLDER = 1;
 
     private final Handler ui = new Handler(Looper.getMainLooper());
-    private TextView laptopView, integrityView, updateView, notesView, progressView, folderView;
-    private Button checkButton, installButton, stopButton, rebootButton, auditButton, deepButton, pickButton, stageFolderButton, cancelButton;
+    private TextView updateStatusTitle, updateStatusSubtitle, notesView, progressView;
+    private TextView laptopView, integrityView, integrityBadge, folderView, folderSummaryView;
+    private Button checkButton, installButton, stopButton, rebootButton;
+    private Button auditButton, deepButton, pickButton, stageFolderButton, cancelButton;
     private ProgressBar bar;
+    private LinearLayout notesContainer, folderContainer, actionCard;
+
     private String relPath;
     private volatile boolean busy;
     private static volatile Updater.Info info;
     private static volatile Updater.Audit audit;
     private static volatile Updater.Decision decision;
     private boolean visible;
+    private boolean wasRunning;
 
     @Override
     protected void onCreate(Bundle saved) {
         super.onCreate(saved);
-        int pad = dp(16);
-        LinearLayout col = new LinearLayout(this);
-        col.setOrientation(LinearLayout.VERTICAL);
-        col.setPadding(pad, pad, pad, pad);
 
-        col.addView(heading("This laptop"));
-        laptopView = text("Asking the system ...");
-        col.addView(laptopView);
-        integrityView = text("");
-        col.addView(integrityView);
-        LinearLayout ar = row();
-        auditButton = button("Check for changes", v -> runAudit(false));
-        deepButton = button("Full check (slower)", v -> runAudit(true));
-        ar.addView(auditButton);
-        ar.addView(deepButton);
-        col.addView(ar);
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        int pad = M3.dp(this, 16);
+        root.setPadding(pad, pad, pad, pad * 2);
 
-        col.addView(heading("Updates"));
-        updateView = text("");
-        col.addView(updateView);
-        notesView = text("");
-        col.addView(notesView);
-        LinearLayout ur = row();
-        checkButton = button("Check for updates", v -> refresh(true));
-        installButton = button("Download and install", v -> confirmInstall());
-        ur.addView(checkButton);
-        ur.addView(installButton);
-        col.addView(ur);
-        bar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
-        bar.setMax(1000);
-        col.addView(bar);
-        progressView = text("");
+        // ---------------------------------------------------------------- Top App Header
+        LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.HORIZONTAL);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        header.setPadding(0, M3.dp(this, 8), 0, M3.dp(this, 16));
+
+        LinearLayout titleCol = new LinearLayout(this);
+        titleCol.setOrientation(LinearLayout.VERTICAL);
+        titleCol.addView(M3.eyebrow(this, "GOOGLEBOOK OS"));
+        titleCol.addView(M3.headline(this, "System Update"));
+        header.addView(titleCol, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f));
+
+        Button settingsBtn = M3.tonalButton(this, "Settings", v -> startActivity(new Intent(this, SettingsActivity.class)));
+        header.addView(settingsBtn);
+        root.addView(header);
+
+        // ---------------------------------------------------------------- Hero Card: Updates
+        LinearLayout updateCard = M3.card(this, 20);
+        updateCard.addView(M3.eyebrow(this, "UPDATE STATUS"));
+
+        updateStatusTitle = M3.titleLarge(this, "Checking for updates ...");
+        updateStatusTitle.setPadding(0, M3.dp(this, 4), 0, M3.dp(this, 2));
+        updateCard.addView(updateStatusTitle);
+
+        updateStatusSubtitle = M3.body(this, "");
+        updateStatusSubtitle.setTextIsSelectable(true);
+        updateCard.addView(updateStatusSubtitle);
+
+        // Notes container
+        notesContainer = new LinearLayout(this);
+        notesContainer.setOrientation(LinearLayout.VERTICAL);
+        notesContainer.setPadding(M3.dp(this, 12), M3.dp(this, 10), M3.dp(this, 12), M3.dp(this, 10));
+        notesContainer.setBackground(M3.roundRect(M3Theme.surfaceContainerHigh(this), M3.dp(this, 12)));
+        LinearLayout.LayoutParams nclp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        nclp.setMargins(0, M3.dp(this, 10), 0, M3.dp(this, 10));
+        notesContainer.setLayoutParams(nclp);
+
+        TextView notesHeader = M3.titleMedium(this, "What's new");
+        notesHeader.setTextSize(14);
+        notesContainer.addView(notesHeader);
+
+        notesView = M3.body(this, "");
+        notesView.setTextIsSelectable(true);
+        notesContainer.addView(notesView);
+        notesContainer.setVisibility(View.GONE);
+        updateCard.addView(notesContainer);
+
+        // Progress bar and details
+        bar = M3.progressBar(this);
+        LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, M3.dp(this, 8));
+        blp.setMargins(0, M3.dp(this, 12), 0, M3.dp(this, 6));
+        bar.setLayoutParams(blp);
+        bar.setVisibility(View.GONE);
+        updateCard.addView(bar);
+
+        progressView = M3.bodySmall(this, "");
         progressView.setTypeface(Typeface.MONOSPACE);
-        col.addView(progressView);
-        LinearLayout pr = row();
-        stopButton = button("Stop", v -> UpdateService.stop());
-        rebootButton = button("Restart now", v -> confirmReboot());
-        pr.addView(stopButton);
-        pr.addView(rebootButton);
-        col.addView(pr);
+        progressView.setTextIsSelectable(true);
+        updateCard.addView(progressView);
 
-        col.addView(heading("Install from a folder"));
-        col.addView(text("An update folder (gbos86-update-...) you copied to this laptop yourself, for example to Downloads."));
-        pickButton = button("Choose update folder", v -> startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), PICK_FOLDER));
-        col.addView(pickButton);
-        folderView = text("");
-        col.addView(folderView);
-        stageFolderButton = button("Copy this folder to the system", v -> confirmStageFolder());
-        col.addView(stageFolderButton);
+        // Action Buttons Row inside Hero Card
+        LinearLayout updateActions = new LinearLayout(this);
+        updateActions.setOrientation(LinearLayout.HORIZONTAL);
+        updateActions.setPadding(0, M3.dp(this, 14), 0, 0);
 
-        col.addView(heading("Other"));
-        LinearLayout or = row();
-        cancelButton = button("Remove waiting updates", v -> simple("cancel"));
-        or.addView(cancelButton);
-        or.addView(button("Settings", v -> startActivity(new Intent(this, SettingsActivity.class))));
-        col.addView(or);
+        checkButton = M3.tonalButton(this, "Check for updates", v -> refresh(true));
+        installButton = M3.filledButton(this, "Download and install", v -> confirmInstall());
+        stopButton = M3.outlinedButton(this, "Stop download", v -> UpdateService.stop());
+        rebootButton = M3.filledButton(this, "Restart now", v -> confirmReboot());
 
+        installButton.setVisibility(View.GONE);
+        stopButton.setVisibility(View.GONE);
+        rebootButton.setVisibility(View.GONE);
+
+        updateActions.addView(checkButton);
+        addMarginEnd(checkButton, 10);
+        updateActions.addView(installButton);
+        addMarginEnd(installButton, 10);
+        updateActions.addView(rebootButton);
+        addMarginEnd(rebootButton, 10);
+        updateActions.addView(stopButton);
+
+        updateCard.addView(updateActions);
+        root.addView(updateCard);
+        addMarginBottom(updateCard, 16);
+
+        // ---------------------------------------------------------------- Card 2: This Laptop & Integrity
+        LinearLayout deviceCard = M3.card(this, 20);
+        deviceCard.addView(M3.eyebrow(this, "THIS LAPTOP"));
+
+        TextView deviceTitle = M3.titleLarge(this, "Installed System");
+        deviceTitle.setPadding(0, M3.dp(this, 4), 0, M3.dp(this, 4));
+        deviceCard.addView(deviceTitle);
+
+        laptopView = M3.body(this, "Asking the system ...");
+        laptopView.setTextIsSelectable(true);
+        deviceCard.addView(laptopView);
+
+        deviceCard.addView(M3.divider(this));
+
+        // Integrity status header & badge
+        LinearLayout intHeader = new LinearLayout(this);
+        intHeader.setOrientation(LinearLayout.HORIZONTAL);
+        intHeader.setGravity(Gravity.CENTER_VERTICAL);
+        intHeader.addView(M3.titleMedium(this, "System Integrity"), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f));
+
+        integrityBadge = M3.badge(this, "Checking ...", M3.BADGE_NEUTRAL);
+        intHeader.addView(integrityBadge);
+        deviceCard.addView(intHeader);
+
+        integrityView = M3.bodySmall(this, "");
+        integrityView.setTextIsSelectable(true);
+        integrityView.setPadding(0, M3.dp(this, 6), 0, M3.dp(this, 10));
+        deviceCard.addView(integrityView);
+
+        LinearLayout auditRow = new LinearLayout(this);
+        auditRow.setOrientation(LinearLayout.HORIZONTAL);
+        auditButton = M3.outlinedButton(this, "Check for changes", v -> runAudit(false));
+        deepButton = M3.outlinedButton(this, "Full check (slower)", v -> runAudit(true));
+        auditRow.addView(auditButton);
+        addMarginEnd(auditButton, 10);
+        auditRow.addView(deepButton);
+        deviceCard.addView(auditRow);
+
+        root.addView(deviceCard);
+        addMarginBottom(deviceCard, 16);
+
+        // ---------------------------------------------------------------- Card 3: Install from Folder
+        LinearLayout localCard = M3.card(this, 20);
+        localCard.addView(M3.eyebrow(this, "LOCAL BUNDLE"));
+
+        TextView localTitle = M3.titleLarge(this, "Install from folder");
+        localTitle.setPadding(0, M3.dp(this, 4), 0, M3.dp(this, 4));
+        localCard.addView(localTitle);
+
+        TextView localDesc = M3.body(this, "Deploy an update folder (gbos86-update-...) copied to this laptop (for example in Downloads).");
+        localCard.addView(localDesc);
+
+        folderContainer = new LinearLayout(this);
+        folderContainer.setOrientation(LinearLayout.VERTICAL);
+        folderContainer.setPadding(M3.dp(this, 12), M3.dp(this, 10), M3.dp(this, 12), M3.dp(this, 10));
+        folderContainer.setBackground(M3.roundRect(M3Theme.surfaceContainerHigh(this), M3.dp(this, 12)));
+        LinearLayout.LayoutParams fclp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        fclp.setMargins(0, M3.dp(this, 10), 0, M3.dp(this, 10));
+        folderContainer.setLayoutParams(fclp);
+
+        folderView = M3.titleMedium(this, "No folder selected");
+        folderView.setTextSize(14);
+        folderContainer.addView(folderView);
+
+        folderSummaryView = M3.bodySmall(this, "");
+        folderSummaryView.setTextIsSelectable(true);
+        folderContainer.addView(folderSummaryView);
+        folderContainer.setVisibility(View.GONE);
+        localCard.addView(folderContainer);
+
+        LinearLayout folderActions = new LinearLayout(this);
+        folderActions.setOrientation(LinearLayout.HORIZONTAL);
+        folderActions.setPadding(0, M3.dp(this, 10), 0, 0);
+
+        pickButton = M3.tonalButton(this, "Choose update folder", v ->
+                startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), PICK_FOLDER));
+        stageFolderButton = M3.filledButton(this, "Copy to system", v -> confirmStageFolder());
+        stageFolderButton.setEnabled(false);
+
+        folderActions.addView(pickButton);
+        addMarginEnd(pickButton, 10);
+        folderActions.addView(stageFolderButton);
+        localCard.addView(folderActions);
+
+        root.addView(localCard);
+        addMarginBottom(localCard, 16);
+
+        // ---------------------------------------------------------------- Card 4: Maintenance
+        actionCard = M3.card(this, 20);
+        actionCard.addView(M3.eyebrow(this, "MAINTENANCE"));
+
+        TextView actionTitle = M3.titleLarge(this, "Pending Updates");
+        actionTitle.setPadding(0, M3.dp(this, 4), 0, M3.dp(this, 4));
+        actionCard.addView(actionTitle);
+
+        TextView actionDesc = M3.body(this, "Discard staged or waiting update files from GBOSSYS's update.inbox.");
+        actionCard.addView(actionDesc);
+
+        LinearLayout cancelRow = new LinearLayout(this);
+        cancelRow.setOrientation(LinearLayout.HORIZONTAL);
+        cancelRow.setPadding(0, M3.dp(this, 10), 0, 0);
+        cancelButton = M3.dangerButton(this, "Remove waiting updates", v -> simple("cancel"));
+        cancelRow.addView(cancelButton);
+        actionCard.addView(cancelRow);
+
+        root.addView(actionCard);
+
+        // Wrap root in responsive scaffold (max width 720dp) inside ScrollView
         ScrollView scroll = new ScrollView(this);
-        scroll.addView(col);
+        scroll.setFillViewport(true);
+        scroll.setBackgroundColor(M3Theme.surface(this));
+        View scaffold = M3.responsiveScaffold(this, root, 720);
+        scroll.addView(scaffold);
         setContentView(scroll);
+
         Notifier.channels(this);
         if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
             requestPermissions(new String[] {Manifest.permission.POST_NOTIFICATIONS}, 2);
         CheckJob.schedule(this, false);
         Notifier.cancelAvailable(this);
         refresh(false);
+    }
+
+    private void addMarginEnd(View v, int dp) {
+        LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) v.getLayoutParams();
+        if (lp == null) lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.setMarginEnd(M3.dp(this, dp));
+        v.setLayoutParams(lp);
+    }
+
+    private void addMarginBottom(View v, int dp) {
+        LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) v.getLayoutParams();
+        if (lp == null) lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.bottomMargin = M3.dp(this, dp);
+        v.setLayoutParams(lp);
     }
 
     @Override
@@ -150,17 +321,26 @@ public class MainActivity extends Activity {
         installButton.setVisibility(!run && decision != null && decision.kind == Updater.Kind.AVAILABLE && !UpdateService.State.done ? View.VISIBLE : View.GONE);
         for (Button b : new Button[] {checkButton, auditButton, deepButton, pickButton, cancelButton}) b.setEnabled(!busy && !run);
         stageFolderButton.setEnabled(!busy && !run && relPath != null);
+
+        if (info != null && (info.pending.equals("none") || info.pending.isEmpty()) && !waiting) {
+            actionCard.setVisibility(View.GONE);
+        } else {
+            actionCard.setVisibility(View.VISIBLE);
+        }
+
         if (UpdateService.State.done && run != wasRunning) refresh(false);
         wasRunning = run;
         ui.postDelayed(this::tick, 500);
     }
-    private boolean wasRunning;
 
-    // ------------------------------------------------------------------------------------------------ the checks
+    // -------------------------------------------------------------------------------- The Checks
     private void refresh(boolean userAsked) {
         if (busy) return;
         busy = true;
-        if (userAsked) updateView.setText("Checking ...");
+        if (userAsked) {
+            updateStatusTitle.setText("Checking for updates ...");
+            updateStatusSubtitle.setText("");
+        }
         new Thread(() -> {
             try {
                 Updater.Info i = Updater.info(this);
@@ -168,7 +348,12 @@ public class MainActivity extends Activity {
                 ui.post(this::showLaptop);
                 Updater.Audit a = audit;
                 if (a == null || !a.set.equals(i.set) || System.currentTimeMillis() - a.time > 6 * 3600 * 1000L) {
-                    ui.post(() -> integrityView.setText("Checking for modifications ..."));
+                    ui.post(() -> {
+                        integrityView.setText("Checking for modifications ...");
+                        integrityBadge.setText("Checking");
+                        integrityBadge.setBackground(M3.roundRect(M3Theme.surfaceContainerHighest(this), M3.dp(this, 12)));
+                        integrityBadge.setTextColor(M3Theme.onSurfaceVariant(this));
+                    });
                     try {
                         audit = Updater.audit(this, false);
                     } catch (Exception e) {
@@ -182,17 +367,41 @@ public class MainActivity extends Activity {
                     decision = d;
                     Prefs.get(this).edit().putString("last_check", d.message).putLong("last_check_time", System.currentTimeMillis()).apply();
                     ui.post(() -> {
-                        updateView.setText(d.message);
-                        notesView.setText(f.notes().isEmpty() || d.kind == Updater.Kind.UP_TO_DATE ? "" : "What's new:\n- " + String.join("\n- ", f.notes()));
+                        if (d.kind == Updater.Kind.UP_TO_DATE) {
+                            updateStatusTitle.setText("System is up to date");
+                        } else if (d.kind == Updater.Kind.AVAILABLE) {
+                            updateStatusTitle.setText("Update available: seq " + f.seq);
+                        } else if (d.kind == Updater.Kind.WAITING) {
+                            updateStatusTitle.setText("Update ready to install");
+                        } else {
+                            updateStatusTitle.setText("System Status");
+                        }
+                        updateStatusSubtitle.setText(d.message);
+                        if (!f.notes().isEmpty() && d.kind != Updater.Kind.UP_TO_DATE) {
+                            notesView.setText(String.join("\n• ", f.notes()));
+                            notesContainer.setVisibility(View.VISIBLE);
+                        } else {
+                            notesContainer.setVisibility(View.GONE);
+                        }
                     });
                 } catch (Exception e) {
                     decision = null;
-                    ui.post(() -> { updateView.setText(e.getMessage()); notesView.setText(""); });
+                    ui.post(() -> {
+                        updateStatusTitle.setText("Unable to check updates");
+                        updateStatusSubtitle.setText(e.getMessage());
+                        notesContainer.setVisibility(View.GONE);
+                    });
                 }
             } catch (Root.NoService e) {
-                ui.post(() -> laptopView.setText(e.getMessage()));
+                ui.post(() -> {
+                    laptopView.setText(e.getMessage());
+                    updateStatusTitle.setText("Service unavailable");
+                });
             } catch (Exception e) {
-                ui.post(() -> laptopView.setText("Failed: " + e.getMessage()));
+                ui.post(() -> {
+                    laptopView.setText("Failed: " + e.getMessage());
+                    updateStatusTitle.setText("Error");
+                });
             } finally {
                 busy = false;
             }
@@ -204,10 +413,10 @@ public class MainActivity extends Activity {
         if (i == null) return;
         StringBuilder sb = new StringBuilder();
         sb.append(i.seq > 0 ? "gbOS86 update " + i.seq : "gbOS86 (installed from the USB stick)");
-        sb.append(", Google build ").append(i.googleBuild > 0 ? i.googleBuild : "unknown");
-        if (i.freeKb >= 0) sb.append("\nFree on the system partition: ").append(Util.size(i.freeKb * 1024));
-        if (!i.hasKey()) sb.append("\nNo update key installed: updates are refused. Update once with the USB stick.");
-        if (!"ok".equals(i.hook)) sb.append("\nThe boot hook that installs updates is missing: update once with the USB stick (menu 1).");
+        sb.append(" • Google build ").append(i.googleBuild > 0 ? i.googleBuild : "unknown");
+        if (i.freeKb >= 0) sb.append("\nFree space on system partition: ").append(Util.size(i.freeKb * 1024));
+        if (!i.hasKey()) sb.append("\n⚠ No update key installed: updates are refused. Update once with the USB stick.");
+        if (!"ok".equals(i.hook)) sb.append("\n⚠ Boot hook missing: update once with the USB stick (menu 1).");
         if (!i.last.isEmpty()) sb.append("\nLast result: ").append(i.last);
         laptopView.setText(sb.toString());
     }
@@ -218,12 +427,28 @@ public class MainActivity extends Activity {
         String w = Updater.warning(a);
         String s = Updater.describe(a, info) + (w != null ? "\n\n⚠ " + w : "");
         integrityView.setText(s);
-        integrityView.setTextColor(w != null ? Color.rgb(0xd0, 0x6b, 0x00) : laptopView.getCurrentTextColor());
+
+        if (w != null) {
+            integrityBadge.setText("⚠ Modified");
+            integrityBadge.setBackground(M3.roundRect(M3Theme.warningContainer(this), M3.dp(this, 12)));
+            integrityBadge.setTextColor(M3Theme.onWarningContainer(this));
+        } else if ("ok".equals(a.manifest)) {
+            integrityBadge.setText("✓ Verified");
+            integrityBadge.setBackground(M3.roundRect(M3Theme.successContainer(this), M3.dp(this, 12)));
+            integrityBadge.setTextColor(M3Theme.onSuccessContainer(this));
+        } else {
+            integrityBadge.setText("Unknown");
+            integrityBadge.setBackground(M3.roundRect(M3Theme.surfaceContainerHighest(this), M3.dp(this, 12)));
+            integrityBadge.setTextColor(M3Theme.onSurfaceVariant(this));
+        }
     }
 
     private void runAudit(boolean deep) {
         if (busy) return;
         busy = true;
+        integrityBadge.setText("Auditing ...");
+        integrityBadge.setBackground(M3.roundRect(M3Theme.surfaceContainerHighest(this), M3.dp(this, 12)));
+        integrityBadge.setTextColor(M3Theme.onSurfaceVariant(this));
         integrityView.setText(deep ? "Checking every file, including super.img (a minute or two) ..." : "Checking for modifications ...");
         new Thread(() -> {
             try {
@@ -237,7 +462,7 @@ public class MainActivity extends Activity {
         }).start();
     }
 
-    // ------------------------------------------------------------------------------------------------ install
+    // -------------------------------------------------------------------------------- Install Actions
     private void confirmInstall() {
         final Updater.Decision d = decision;
         if (d == null || d.kind != Updater.Kind.AVAILABLE) return;
@@ -298,7 +523,7 @@ public class MainActivity extends Activity {
         }).start();
     }
 
-    // ------------------------------------------------------------------------------------------------ install from a folder
+    // -------------------------------------------------------------------------------- Folder Picker
     @Override
     protected void onActivityResult(int code, int result, Intent data) {
         super.onActivityResult(code, result, data);
@@ -309,29 +534,38 @@ public class MainActivity extends Activity {
         try {
             docId = DocumentsContract.getTreeDocumentId(tree);
         } catch (Exception e) {
-            folderView.setText("This folder cannot be used: " + e.getMessage());
+            showFolderError("This folder cannot be used: " + e.getMessage());
             return;
         }
-        // The root service reads the folder directly from /data/media/<user>/, so only this device's own shared storage works.
         if (!"com.android.externalstorage.documents".equals(tree.getAuthority()) || !docId.startsWith("primary:")) {
-            folderView.setText("Choose a folder in this device's own storage (for example Downloads). USB drives and SD cards "
+            showFolderError("Choose a folder in this device's own storage (for example Downloads). USB drives and SD cards "
                     + "are not supported here: copy the folder to Downloads first, or from Windows into update.inbox on GBOSSYS.");
             return;
         }
         String rel = docId.substring("primary:".length());
         if (rel.isEmpty() || !rel.matches(Root.ALLOWED) || ("/" + rel + "/").contains("/../") || ("/" + rel + "/").contains("/./")) {
-            folderView.setText("The folder's name or path has characters the updater does not accept: " + rel);
+            showFolderError("The folder's name or path has characters the updater does not accept: " + rel);
             return;
         }
         String summary;
         try {
             summary = readManifestSummary(DocumentsContract.buildDocumentUriUsingTree(tree, docId + "/manifest"));
         } catch (Exception e) {
-            folderView.setText("No update manifest in \"" + rel + "\". Choose the gbos86-update-... folder itself.");
+            showFolderError("No update manifest in \"" + rel + "\". Choose the gbos86-update-... folder itself.");
             return;
         }
         relPath = rel;
-        folderView.setText(rel + "\n" + summary + "\n(not checked yet: the signature is checked when it is copied, and again at restart)");
+        folderContainer.setVisibility(View.VISIBLE);
+        folderView.setText(rel);
+        folderSummaryView.setText(summary + "\n(Signature and files will be verified before staging and switch)");
+        stageFolderButton.setEnabled(true);
+    }
+
+    private void showFolderError(String error) {
+        folderContainer.setVisibility(View.VISIBLE);
+        folderView.setText("Invalid update folder");
+        folderSummaryView.setText(error);
+        stageFolderButton.setEnabled(false);
     }
 
     private String readManifestSummary(Uri manifest) throws Exception {
@@ -342,10 +576,10 @@ public class MainActivity extends Activity {
             for (int i = 0; i < 5; i++) {
                 String l = r.readLine();
                 if (l == null) break;
-                if (l.startsWith("seq ")) sb.append("update ").append(l.substring(4)).append(", ");
-                else if (l.startsWith("google_build ")) sb.append("Google build ").append(l.substring(13)).append(", ");
-                else if (l.startsWith("commit ")) sb.append("commit ").append(l.substring(7, Math.min(l.length(), 19))).append(", ");
-                else if (l.startsWith("created ")) sb.append("made ").append(l.substring(8));
+                if (l.startsWith("seq ")) sb.append("Update ").append(l.substring(4)).append(" • ");
+                else if (l.startsWith("google_build ")) sb.append("Google build ").append(l.substring(13)).append(" • ");
+                else if (l.startsWith("commit ")) sb.append("Commit ").append(l.substring(7, Math.min(l.length(), 19))).append(" • ");
+                else if (l.startsWith("created ")) sb.append("Made ").append(l.substring(8));
             }
         }
         return sb.toString();
@@ -384,34 +618,5 @@ public class MainActivity extends Activity {
             busy = false;
             ui.post(() -> refresh(false));
         }).start();
-    }
-
-    // ------------------------------------------------------------------------------------------------ UI helpers
-    private int dp(int v) { return (int) (v * getResources().getDisplayMetrics().density + 0.5f); }
-    private TextView text(String s) {
-        TextView t = new TextView(this);
-        t.setText(s);
-        t.setTextIsSelectable(true);
-        t.setPadding(0, dp(4), 0, dp(4));
-        return t;
-    }
-    private TextView heading(String s) {
-        TextView t = text(s);
-        t.setTextSize(20);
-        t.setTypeface(Typeface.DEFAULT_BOLD);
-        t.setPadding(0, dp(16), 0, dp(4));
-        return t;
-    }
-    private Button button(String s, View.OnClickListener l) {
-        Button b = new Button(this);
-        b.setText(s);
-        b.setAllCaps(false);
-        b.setOnClickListener(l);
-        return b;
-    }
-    private LinearLayout row() {
-        LinearLayout r = new LinearLayout(this);
-        r.setOrientation(LinearLayout.HORIZONTAL);
-        return r;
     }
 }
