@@ -176,55 +176,16 @@ grep -q 'a11y_console_quiet \$A/printk.saved' "$ROOT/usb/a11y/start.sh"
 grep -q 'a11y_console_restore /a11y/printk.saved' "$ROOT/usb/a11y/stop.sh"
 ! grep -q '^echo 1 > /sys/module/printk/parameters/ignore_loglevel' "$ROOT/usb/a11y/stop.sh"
 
-# Unimplemented framework HALs: drop only ISnapshot and IVideoChatManager; IAqueduct stays.
-sed -n '/^gbos_drop_vintf_hal() {/,/^}/p' "$HOOK" > "$TMP/hal.sh"
-sed -n '/^gbos_hide_unimplemented_hals() {/,/^}/p' "$HOOK" >> "$TMP/hal.sh"
-. "$TMP/hal.sh"
-command mkdir -p "$TMP/vintf" "$TMP/haltmp"
-cat > "$TMP/vintf/com.google.android.snapshot.xml" <<'XML'
-<!--
-    Input:
-        vendor/google/desktop/desktop-services/snapshot/com.google.android.snapshot.xml
--->
-<manifest version="9.0" type="framework">
-    <hal format="aidl">
-        <name>com.google.android.aqueduct</name>
-        <fqname>IAqueduct/default</fqname>
-    </hal>
-    <hal format="aidl">
-        <name>com.google.android.snapshot</name>
-        <version>5</version>
-        <fqname>ISnapshot/default</fqname>
-    </hal>
-</manifest>
-XML
-cat > "$TMP/vintf/com.android.desktop.video_chat.xml" <<'XML'
-<manifest version="9.0" type="framework">
-    <hal format="aidl">
-        <name>com.android.desktop.video_chat</name>
-        <version>2</version>
-        <fqname>IVideoChatManager/default</fqname>
-    </hal>
-</manifest>
-XML
-: > "$TMP/mounts"
-mount() { echo "$*" >> "$TMP/mounts"; }
-log() { :; }
-GBOS_HAL_TMP="$TMP/haltmp" gbos_hide_unimplemented_hals "$TMP/vintf"
-grep -q 'IAqueduct/default' "$TMP/haltmp/com.google.android.snapshot.xml"
-! grep -q 'ISnapshot' "$TMP/haltmp/com.google.android.snapshot.xml"
-[ "$(grep -c '<hal ' "$TMP/haltmp/com.google.android.snapshot.xml")" = 1 ]
-grep -q '^<manifest version="9.0" type="framework">$' "$TMP/haltmp/com.android.desktop.video_chat.xml"
-grep -q '^</manifest>$' "$TMP/haltmp/com.android.desktop.video_chat.xml"
-! grep -q '<hal' "$TMP/haltmp/com.android.desktop.video_chat.xml"
-[ "$(wc -l < "$TMP/mounts")" = 2 ]
-# A changed or missing file is left alone.
-: > "$TMP/mounts"; rm "$TMP/vintf/com.android.desktop.video_chat.xml"
-sed -i 's/ISnapshot/ISnapshotV2/' "$TMP/vintf/com.google.android.snapshot.xml"
-GBOS_HAL_TMP="$TMP/haltmp" gbos_hide_unimplemented_hals "$TMP/vintf"
-[ ! -s "$TMP/mounts" ]
-unset -f mount
-grep -q 'HIDE_UNIMPLEMENTED_HALS:-1}" = 1' "$HOOK"
+# ISnapshot, IAqueduct and IVideoChatManager are system_server's own services (desktop-services.jar): their VINTF
+# declarations must stay, or servicemanager refuses system_server's registration (boot-5, 2026-11-22). Nothing in the
+# hook may bind over those manifests, and the removed HIDE_UNIMPLEMENTED_HALS switch must not come back.
+# (A leading "!" would not trip set -e, so each check exits explicitly.)
+if grep -v '^[[:space:]]*#' "$HOOK" | grep -q -e 'com\.google\.android\.snapshot' -e 'com\.android\.desktop\.video_chat' -e '/system/etc/vintf/manifest'; then
+  echo "hook.sh touches the system VINTF manifests of system_server's snapshot/video-chat services" >&2; exit 1
+fi
+if grep -q 'gbos_hide_unimplemented_hals\|HIDE_UNIMPLEMENTED_HALS' "$HOOK" "$CFG"; then
+  echo "HIDE_UNIMPLEMENTED_HALS is back" >&2; exit 1
+fi
 
 # Coldplug: sleep 1 s only after a pass that loaded new modules.
 sed -n '/^gbos_coldplug() {/,/^}/p' "$ROOT/usb/hwdetect.sh" > "$TMP/coldplug.sh"

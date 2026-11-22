@@ -329,30 +329,6 @@ gbos_configure_boot_debug() {
   fi
 }
 
-# Copy a VINTF manifest without the <hal> blocks that declare the given fqname; prints nothing on success.
-gbos_drop_vintf_hal() {
-  awk -v fq="<fqname>$2</fqname>" '
-    /<hal[ >]/ { inhal = 1; buf = ""; drop = 0 }
-    inhal { buf = buf $0 "\n"; if (index($0, fq)) drop = 1
-            if ($0 ~ /<\/hal>/) { inhal = 0; if (!drop) printf "%s", buf }
-            next }
-    { print }' "$1" > "$3"
-}
-
-# Hide framework HAL declarations that nothing in this image implements (see the call site).
-# $1 = system VINTF manifest directory. GBOS_HAL_TMP overrides the scratch directory (tests).
-gbos_hide_unimplemented_hals() {
-  ghu_tmp=${GBOS_HAL_TMP:-/tmp}
-  for ghu in com.google.android.snapshot.xml:com.google.android.snapshot:ISnapshot/default \
-             com.android.desktop.video_chat.xml:com.android.desktop.video_chat:IVideoChatManager/default; do
-    ghu_file=$1/${ghu%%:*}; ghu_fq=${ghu##*:}
-    [ -f "$ghu_file" ] && grep -q "<fqname>$ghu_fq</fqname>" "$ghu_file" || continue
-    gbos_drop_vintf_hal "$ghu_file" "$ghu_fq" "$ghu_tmp/${ghu%%:*}" &&
-      mount --bind "$ghu_tmp/${ghu%%:*}" "$ghu_file" &&
-      log "hook: unimplemented $ghu_fq VINTF declaration hidden"
-  done
-}
-
 # Google's init.lapis.rc writes its own laptop's CPU power limits on every boot ("on init": PL1 25 W and
 # PL2 55 W to intel-rapl:0 and intel-rapl-mmio:0, plus a TCC offset). gbOS never runs on a Lapis: on the
 # Latitude 7320 (a 7-15 W i7-1180G7) those writes landed after the RAPL drivers loaded (boot-8), and on
@@ -1397,14 +1373,12 @@ SK=/new/vendor/etc/vintf/manifest/android.hardware.security.secretkeeper.trusty.
   && mount --bind /tmp/secretkeeper.xml $SK && : > /tmp/empty.rc \
   && mount --bind /tmp/empty.rc /new/vendor/etc/init/android.hardware.security.secretkeeper.trusty.desktop.rc \
   && log "hook: Secretkeeper VINTF declaration hidden"
-# Two framework services are declared in the system VINTF manifest but nothing in this image implements them.
-# Every lookup then makes servicemanager ask init to lazy-start them ("Control message: Could not find
-# 'aidl/com.google.android.snapshot.ISnapshot/default'" 73 times per boot from storage_metrics_service,
-# IVideoChatManager 67 times from the audio HAL, Latitude 7320, 2026-11-17). Undeclared, a lookup returns null at
-# once. IAqueduct, declared in the same snapshot file, stays. HIDE_UNIMPLEMENTED_HALS=0 in gbos.cfg keeps both.
-if [ "${HIDE_UNIMPLEMENTED_HALS:-1}" = 1 ]; then
-  gbos_hide_unimplemented_hals /new/system/etc/vintf/manifest
-fi
+# Leave com.google.android.snapshot.xml (ISnapshot, IAqueduct) and com.android.desktop.video_chat.xml (IVideoChatManager)
+# alone: system_server implements all three (desktop-services.jar: SnapshotSystemService, DesktopVideoChatManager) and
+# servicemanager refuses to register an undeclared VINTF service. Hiding them (2026-11-17 to 11-22) made system_server's
+# publish fail ("VINTF declaration error", BOOT FAILURE starting DesktopVideoChatManager), so dras and
+# storage_metrics_service waited for them for the whole uptime, and the camera HAL's video-chat client lost its manager.
+# Their "Waited one second" lines until system_server is up (~70 s after the HALs start) are expected.
 LR=/new/vendor/etc/init/init.lapis.rc
 if [ "${KEEP_LAPIS_POWER_LIMITS:-0}" != 1 ] && [ -f "$LR" ] && gbos_filter_lapis_power_limits "$LR" /tmp/init.lapis.rc &&
    ! cmp -s "$LR" /tmp/init.lapis.rc && mount --bind /tmp/init.lapis.rc "$LR"; then
