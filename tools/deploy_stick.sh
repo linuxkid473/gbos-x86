@@ -24,10 +24,6 @@ put() {  # put SRC DST(relative to gbos/): copy when different
 
 echo "deploying to $VOL"
 for f in hook.sh stick_fat.sh install.sh aidiag.sh native_zygote.sh early_patch.sh sensor_vendor_overlay.sh sensor_trial_diag.sh tablet_mode.sh sensordiag.sh hwdetect.sh mask_vendor_modules.sh apex_patch.sh crossystem libkm_compat.so system_ext_manifest.xml soft_gk gbos_fp sysupdate.sh sysupdate.pub gbos86-updater.apk; do put "$U/$f" "$f"; done
-if [ -n "${GBOS_ROTATION_POLICY_OVERLAY:-}" ]; then
-  [ -s "$GBOS_ROTATION_POLICY_OVERLAY" ] || { echo "missing or empty rotation policy overlay: $GBOS_ROTATION_POLICY_OVERLAY" >&2; exit 1; }
-  put "$GBOS_ROTATION_POLICY_OVERLAY" "sensors/gbos-latitude7320-rotation-policy.apk"
-fi
 for d in patched audio installer kmod ksu a11y surface thermal camera display; do
   [ -d "$U/$d" ] || continue
   (cd "$U" && find "$d" -type f ! -name '.DS_Store') | while read -r f; do put "$U/$f" "$f"; done
@@ -42,11 +38,14 @@ if [ -d "$MODS" ]; then
     rm -rf "$G/modules" && cp -R "$U/modules" "$G/modules" && echo "modules/lib/modules/$R/gbos-build-id" >> "$CHANGED"
   fi
 fi
-# the stick's files that this project no longer ships (the removed AI stand-in)
+# the stick's files that this project no longer ships (the removed AI stand-in; the unsigned rotation overlay, now display/)
 [ -d "$G/localai" ] && { printf '  removing localai/\n'; rm -rf "$G/localai"; }
 # gbos/system.manifest names the stick's exact set (docs/system-update.md); after a change it no longer does, and menu 1 would copy a
 # wrong one to the laptop. Remake it with tools/make_system_update.sh manifest if you want the laptop to know its set.
 if [ -s "$CHANGED" ] && [ -f "$G/system.manifest" ]; then printf '  removing system.manifest (it described the stick before this deploy)\n'; rm -f "$G/system.manifest"; fi
+[ -f "$G/sensors/gbos-latitude7320-rotation-policy.apk" ] &&
+  { printf '  removing sensors/gbos-latitude7320-rotation-policy.apk (unsigned; display/ has the signed one)\n'
+    rm -f "$G/sensors/gbos-latitude7320-rotation-policy.apk"; }
 [ -s "$CHANGED" ] || echo "  nothing to copy: the stick already matches usb/"
 sync
 
@@ -58,13 +57,7 @@ if [ -n "$DEV" ] && [ -s "$CHANGED" ]; then
 fi
 BAD=0
 while read -r f; do
-  if [ "$f" = "sensors/gbos-latitude7320-rotation-policy.apk" ] &&
-     [ -n "${GBOS_ROTATION_POLICY_OVERLAY:-}" ]; then
-    VERIFY_SOURCE=$GBOS_ROTATION_POLICY_OVERLAY
-  else
-    VERIFY_SOURCE=$U/$f
-  fi
-  cmp -s "$VERIFY_SOURCE" "$G/$f" || { echo "VERIFY FAILED: $f"; BAD=1; }
+  cmp -s "$U/$f" "$G/$f" || { echo "VERIFY FAILED: $f"; BAD=1; }
 done < "$CHANGED"
 [ $BAD = 0 ] || { echo "some files did not verify; the stick is NOT ejected"; exit 1; }
 echo "verified $(wc -l < "$CHANGED" | tr -d ' ') file(s)"

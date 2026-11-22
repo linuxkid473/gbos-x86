@@ -19,8 +19,18 @@ grep -Fq 'sensor_trial_diag.sh' "$ROOT/tools/make_gbos86_image.sh"
 grep -Fq 'sensor_trial_diag.sh' "$ROOT/usb/install.sh"
 grep -Fq 'tablet_mode.sh' "$ROOT/tools/make_gbos86_image.sh"
 grep -Fq 'tablet_mode.sh' "$ROOT/usb/install.sh"
-grep -Fq 'GBOS_ROTATION_POLICY_OVERLAY' "$ROOT/tools/make_gbos86_image.sh"
-grep -Fq 'GBOS_ROTATION_POLICY_OVERLAY' "$ROOT/tools/deploy_stick.sh"
+# The rotation RRO is committed signed under usb/display/ (shipped by deploy_stick/make_gbos86_image/install.sh with
+# display/); the unsigned aapt2 build passed in GBOS_ROTATION_POLICY_OVERLAY was never registered by Android.
+if grep -q 'GBOS_ROTATION_POLICY_OVERLAY' "$ROOT/tools/make_gbos86_image.sh" "$ROOT/tools/deploy_stick.sh"; then
+  echo "FAIL: GBOS_ROTATION_POLICY_OVERLAY (unsigned overlay path) is back"; exit 1
+fi
+for f in "$ROOT/tools/make_gbos86_image.sh" "$ROOT/tools/deploy_stick.sh"; do
+  grep -Eq '^for d in .* display; do' "$f" || { echo "FAIL: $f does not ship display/"; exit 1; }
+done
+grep -Fq 'for d in sensors camera thermal display;' "$ROOT/usb/install.sh"
+grep -Fq '_sensor_policy_source=$G/display/$_sensor_policy_name' "$ROOT/usb/hook.sh"
+sh "$ROOT/tools/build_rotation_policy_overlay.sh" --check > "$T/rro-check" ||
+  { cat "$T/rro-check"; echo "FAIL: committed rotation overlay is unsigned or differs from its sources"; exit 1; }
 grep -Fq 'fixed-to-user-rotation disabled' "$ROOT/usb/tablet_mode.sh"
 grep -Fq '<bool name="config_supportAutoRotation">true</bool>' \
   "$ROOT/sensors/trogdor/display-policy/res/values/config.xml"
@@ -45,14 +55,14 @@ umount() { printf 'umount %s\n' "$*" >> "$T/mounts"; }
 setup() {
   rm -rf "$T/root" "$T/sys" "$T/gbos" "$T/sensor-overlay" "$T/log" "$T/mounts"
   mkdir -p "$T/root/vendor/lib64" "$T/root/vendor/etc/sensors" \
-    "$T/sys/class/dmi/id" "$T/gbos/sensors"
+    "$T/sys/class/dmi/id" "$T/gbos/sensors" "$T/gbos/display"
   printf '%s' '/vendor/lib64/android.hardware.sensors@2.1-Desktop-IIO-Subhal.so' \
     > "$T/root/vendor/etc/sensors/hals.conf"
   cp "$T/root/vendor/etc/sensors/hals.conf" "$T/expected-hals.conf"
   printf 'library payload\n' > \
     "$T/gbos/sensors/android.hardware.sensors@2.1-trogdor-subhal.so"
   printf 'rotation policy payload\n' > \
-    "$T/gbos/sensors/gbos-latitude7320-rotation-policy.apk"
+    "$T/gbos/display/gbos-latitude7320-rotation-policy.apk"
   cp "$ROOT/usb/sensor_vendor_overlay.sh" "$T/gbos/sensor_vendor_overlay.sh"
   printf 'Dell Inc.\n' > "$T/sys/class/dmi/id/sys_vendor"
   printf 'Latitude 7320 Detachable\n' > "$T/sys/class/dmi/id/product_name"
@@ -78,7 +88,7 @@ grep -Fqx '/vendor/lib64/android.hardware.sensors@2.1-trogdor-subhal.so' \
   "$T/root/vendor/etc/sensors/hals.conf"
 cmp "$T/gbos/sensors/android.hardware.sensors@2.1-trogdor-subhal.so" \
   "$T/root/vendor/lib64/android.hardware.sensors@2.1-trogdor-subhal.so"
-cmp "$T/gbos/sensors/gbos-latitude7320-rotation-policy.apk" \
+cmp "$T/gbos/display/gbos-latitude7320-rotation-policy.apk" \
   "$T/root/vendor/overlay/gbos-latitude7320-rotation-policy.apk"
 gbos_enable_latitude7320_sensors
 [ "$GBOS_SENSOR_HAL_SELECTED" = 1 ] && [ "$GBOS_SENSOR_ROTATION_POLICY_SELECTED" = 1 ]
@@ -118,13 +128,14 @@ gbos_enable_latitude7320_sensors
 cmp "$T/expected-hals.conf" "$T/root/vendor/etc/sensors/hals.conf"
 
 setup
-rm "$T/gbos/sensors/gbos-latitude7320-rotation-policy.apk"
+mv "$T/gbos/display/gbos-latitude7320-rotation-policy.apk" "$T/gbos/sensors/"   # only the old unsigned stick copy
 gbos_enable_latitude7320_sensors
 [ "$GBOS_SENSOR_HAL_SELECTED" = 0 ]
 [ "$GBOS_SENSOR_ROTATION_POLICY_SELECTED" = 0 ]
 [ ! -e "$T/mounts" ]
 cmp "$T/expected-hals.conf" "$T/root/vendor/etc/sensors/hals.conf"
-grep -Fq 'missing display policy overlay' "$T/log"
+grep -Fq "missing display policy overlay $T/gbos/display/gbos-latitude7320-rotation-policy.apk" "$T/log"
+[ ! -e "$T/root/vendor/overlay/gbos-latitude7320-rotation-policy.apk" ]
 
 setup
 FAIL_MOUNT=overlay

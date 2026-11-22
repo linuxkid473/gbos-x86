@@ -95,11 +95,6 @@ done
 if [ -n "${GBOS_SENSOR_PAYLOAD:-}" ]; then
   sh "$ROOT/sensors/trogdor/image_payload.sh" stage "$GBOS_SENSOR_PAYLOAD" "$G"
 fi
-if [ -n "${GBOS_ROTATION_POLICY_OVERLAY:-}" ]; then
-  [ -s "$GBOS_ROTATION_POLICY_OVERLAY" ] || { echo "missing or empty rotation policy overlay: $GBOS_ROTATION_POLICY_OVERLAY" >&2; exit 1; }
-  mkdir -p "$G/sensors"
-  cp "$GBOS_ROTATION_POLICY_OVERLAY" "$G/sensors/gbos-latitude7320-rotation-policy.apk"
-fi
 [ -f "$U/Add-gbOS-to-Windows-BootMenu.bat" ] && cp "$U/Add-gbOS-to-Windows-BootMenu.bat" "$STAGE/gbos/Add-gbOS-to-Windows-BootMenu.bat"
 for d in firmware patched audio installer kmod modules surface ksu thermal display; do cp -R "$U/$d" "$G/$d"; done
 # Stage0 screen reader (Speakup + espeakup, usb/a11y/, filled by tools/fetch_a11y_tools.sh): only used when booting the stick.

@@ -148,20 +148,24 @@ transitions through `ROTATION_0`, `ROTATION_90`, `ROTATION_180` and
 `ROTATION_270`. Setting `SENSOR_HAL=0` skips both the sensor HAL and the
 display-policy changes.
 
-Build the resource overlay against the framework APK from the same Android
-image, then pass it into image assembly:
+The overlay is committed signed as
+`usb/display/gbos-latitude7320-rotation-policy.apk` and ships with `display/`
+(`deploy_stick.sh`, `make_gbos86_image.sh`, `install.sh`); `hook.sh` stages it
+from `$G/display/`. Rebuild it only when `display-policy/` changes, and check
+it, with:
 
 ```
-sh tools/build_rotation_policy_overlay.sh "$AAPT2" framework-res.apk build/gbos-latitude7320-rotation-policy.apk
-GBOS_ROTATION_POLICY_OVERLAY=build/gbos-latitude7320-rotation-policy.apk \
-  GBOS_SENSOR_PAYLOAD=build/sensor-experimental \
-  sh tools/make_gbos86_image.sh build/rotation-policy-test
+sh tools/build_rotation_policy_overlay.sh          # build (throwaway signing key, none kept)
+sh tools/build_rotation_policy_overlay.sh --check  # v2 signature + equality with a fresh build of the sources
 ```
 
-`AAPT2` must be a compatible Android resource compiler. The overlay build
-script verifies its resource value, target package, static status and priority
-before publishing the APK. The ordinary build omits the policy payload unless
-`GBOS_ROTATION_POLICY_OVERLAY` is explicitly supplied.
+It uses `tools/build_static_rro.py` (needs python3 with `cryptography`, no
+aapt2 or framework-res). Its manifest and `resources.arsc` are byte for byte
+the aapt2 build used on hardware until 2026-11-19; that build had no APK
+signature, so PackageManager never registered it (absent from every
+`cmd overlay list android` in boot-8..13) and auto-rotation worked without it.
+`sensor-trial.txt` logs `cmd overlay lookup --verbose` for
+`config_supportAutoRotation`, which names the overlay that supplies the value.
 
 On the Latitude 7320, three user-confirmed static poses suggest the
 accelerometer transform `(x, y, z) = (-raw_x, -raw_y, -raw_z)` after scaling:
