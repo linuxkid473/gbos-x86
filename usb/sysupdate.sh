@@ -546,11 +546,22 @@ su_rollback() { # REASON
 su_booted_ok() { # did one of the tried boots reach boot_completed?
   _s=$(su_st set)
   [ -n "$_s" ] && [ "$(cat "$U/boot-ok" 2>/dev/null)" = "$_s" ] && return 0
+  # Fallback: a tried boot's kmsg.log. Not on a volume the kernel mounted dirty: a boot that ended without a clean unmount can leave
+  # its kmsg.log claiming more bytes than its cluster chain holds, and reading past the chain is a FAT error that makes the kernel set
+  # the whole volume read-only for this boot (boot-4, 2026-11-22, by stick_fat.sh's check). That boot then counts as not confirmed.
+  if su_fat_mounted_dirty; then
+    su_log "boot check: not reading the tried boots' kmsg.log (the volume was not cleanly unmounted; a damaged log would make it read-only)"
+    return 1
+  fi
   for _b in $(su_st boots); do
     case "$_b" in *[!0-9]*|'') continue;; esac
     grep -aqF 'caller=T1;init: processing action (sys.boot_completed=1)' "$G/logs/boot-$_b/kmsg.log" 2>/dev/null && return 0
   done
   return 1
+}
+su_fat_mounted_dirty() { # did this boot's kernel log "Volume was not properly unmounted" for the volume (SU_DEV)?
+  _fd=${SU_DEV##*/}; [ -n "$_fd" ] || return 1
+  ${SU_DMESG:-dmesg} 2>/dev/null | grep -qF "FAT-fs ($_fd): Volume was not properly unmounted"
 }
 su_trying() {
   if su_booted_ok; then su_commit; return 0; fi

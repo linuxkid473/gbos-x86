@@ -18,6 +18,8 @@ Read `README.md` (what/how) and `HANDOFF.md` (chronological log of every bug and
 - Deploy = `tools/deploy_stick.sh` (copies only changed files, verifies after a remount, ejects the right disk: seconds), then the user boots the stick and picks **1**.
   The updater skips the unchanged big items (system image, firmware, modules; `UPDATE_FULL=1` in gbos.cfg forces everything), so an Update is about a minute, and it saves the previous boots' logs first: one stick boot both reads the last test and applies the next change (no separate "save logs" boot). Kernel changes go to
   **both** `/Volumes/EFI/EFI/BOOT/BOOTX64.EFI` (what the firmware boots) and `GBOS/EFI/BOOT/`.
+- On a stick that holds a published update set (`gbos/system.manifest`, e.g. the persistent lab stick) `deploy_stick.sh` refuses and lists
+  what differs: ship the change as an update (`tools/publish_system_update.sh`, bundle into `gbos/update.inbox`) or pass `--over-set`.
 - The stick mounts on macOS as `/Volumes/EFI` and `/Volumes/GBOS`; the disk number changes. Eject with
   `diskutil eject` after `sync`.
 

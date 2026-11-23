@@ -196,6 +196,7 @@ gbos_load_opmodes() { :; }
 mdev() { :; }
 log() { :; }
 sleep() { echo s >> "$TMP/sleeps"; }
+gbos_settle_devices() { sleep; }
 gbos_coldplug_pass() {
   cp_add=$(echo "$CP_PLAN" | cut -d' ' -f1); CP_PLAN=$(echo "$CP_PLAN" | cut -s -d' ' -f2-)
   i=0; while [ $i -lt "${cp_add:-0}" ]; do echo m >> "$GBOS_PROC_MODULES"; i=$((i+1)); done
@@ -209,7 +210,19 @@ cp_case() {
 cp_case "5 3 0" 3 2      # settles: no sleep after the empty pass
 cp_case "0" 1 0          # nothing to load (the hook's second run): no sleep at all
 cp_case "1 1 1 1 1" 4 4  # still loading: capped at 4 passes, each followed by the settle
-unset -f sleep gbos_coldplug_pass mdev
+unset -f sleep gbos_coldplug_pass mdev gbos_settle_devices
+
+# Settle after a pass: returns once the modalias count holds for two polls, at most GBOS_SETTLE_POLLS polls.
+sed -n '/^gbos_settle_devices() {/,/^}/p' "$ROOT/usb/hwdetect.sh" > "$TMP/settle.sh"
+. "$TMP/settle.sh"
+D="$TMP/sysdev"; command mkdir -p "$D/a"; : > "$D/a/modalias"
+sleep() { echo s >> "$TMP/polls"; [ -n "${GROW:-}" ] && { GROW=$((GROW-1)); [ $GROW -ge 0 ] && : > "$D/a/m$GROW"; command mkdir -p "$D/n$GROW" && : > "$D/n$GROW/modalias"; } ; return 0; }
+: > "$TMP/polls"; GROW=; GBOS_SYSFS_DEVICES=$D gbos_settle_devices
+[ "$(wc -l < "$TMP/polls")" = 2 ] || { echo "settle: quiet devices must take 2 polls, took $(wc -l < "$TMP/polls")" >&2; exit 1; }
+: > "$TMP/polls"; GROW=9; GBOS_SYSFS_DEVICES=$D gbos_settle_devices
+[ "$(wc -l < "$TMP/polls")" = 5 ] || { echo "settle: still-growing devices must hit the 5-poll cap, took $(wc -l < "$TMP/polls")" >&2; exit 1; }
+unset -f sleep; unset GROW
+if sed -n '/^gbos_coldplug() {/,/^}/p' "$ROOT/usb/hwdetect.sh" | grep -q 'then sleep 1; fi'; then echo "coldplug: the fixed 1 s settle is back" >&2; exit 1; fi
 
 # Thermal report: zone types, temperatures and trip points from sysfs.
 sed -n '/^gbos_report_thermal() {/,/^}/p' "$ROOT/usb/hwdetect.sh" > "$TMP/thermal.sh"
@@ -282,5 +295,42 @@ command mkdir -p "$P"
 echo package-0 > "$P/name"; echo long_term > "$P/constraint_0_name"; echo 15000000 > "$P/constraint_0_power_limit_uw"; echo 28000000 > "$P/constraint_0_time_window_us"
 GBOS_SYSFS_ROOT="$TMP/thermsys" gbos_report_thermal > "$TMP/thermal2.out"
 grep -qx 'intel-rapl:0 package-0 constraint_0: long_term 15000000 28000000' "$TMP/thermal2.out"
+
+# stage0: USB settle check (stop waiting for a GBOS stick once USB is quiet) and busybox copied only when it changed.
+sed -n '/^usb_settled() {/,/^}/p' "$ROOT/usb/stage0_init.sh" > "$TMP/usbs.sh"
+grep -q 'drivers/uas' "$TMP/usbs.sh" || { echo "usb_settled must also check uas" >&2; exit 1; }
+. "$TMP/usbs.sh"
+U="$TMP/usbsys/bus/usb"; command mkdir -p "$U/devices/1-0:1.0" "$U/devices/usb1" "$U/drivers/usb-storage"
+[ "$(GBOS_SYSFS_ROOT="$TMP/usbsys" usb_settled)" = 2 ] || { echo "usb_settled: device count" >&2; exit 1; }
+command mkdir -p "$U/drivers/usb-storage/1-1:1.0/host0"
+if GBOS_SYSFS_ROOT="$TMP/usbsys" usb_settled >/dev/null; then echo "usb_settled: a stick without its disk must not be settled" >&2; exit 1; fi
+command mkdir -p "$U/drivers/usb-storage/1-1:1.0/host0/target0:0:0/0:0:0:0/block/sdb"
+GBOS_SYSFS_ROOT="$TMP/usbsys" usb_settled >/dev/null || { echo "usb_settled: a stick with its disk is settled" >&2; exit 1; }
+command mkdir -p "$U/drivers/uas/2-1:1.0/host1"
+if GBOS_SYSFS_ROOT="$TMP/usbsys" usb_settled >/dev/null; then echo "usb_settled: a uas stick without its disk must not be settled" >&2; exit 1; fi
+grep -q 'STICK_SETTLE_S' "$ROOT/usb/stage0_init.sh" && grep -q 'n -ge 6' "$ROOT/usb/stage0_init.sh" || { echo "stage0: settle wait or 6 s cap missing" >&2; exit 1; }
+grep -q 'cmp -s /bin/busybox /gbos/busybox' "$ROOT/usb/stage0_init.sh" || { echo "stage0: busybox must be copied only when it changed" >&2; exit 1; }
+if grep -qx 'cp /bin/busybox /gbos/busybox 2>/dev/null' "$ROOT/usb/stage0_init.sh"; then echo "stage0: unconditional busybox copy is back" >&2; exit 1; fi
+
+# Power HAL: i915's interrupt linked under the xe name, only when there is no xe interrupt; the .rc lines carry no '$'.
+sed -n '/^  GBOS_GPU_IRQ_LINK=$/,/^  GBOS_SENSOR_TRIAL_START=$/p' "$HOOK" > "$TMP/irq.sh"
+log() { :; }
+I="$TMP/irq"; command mkdir -p "$I/7" "$I/151/i915" "$I/200"
+GBOS_PROC_IRQ=$I; . "$TMP/irq.sh"
+printf '%s\n' "$GBOS_GPU_IRQ_LINK" | grep -qx '    symlink /proc/irq/151 /dev/power/irq-by-name/xe' || { echo "irq link: wrong rc: $GBOS_GPU_IRQ_LINK" >&2; exit 1; }
+printf '%s\n' "$GBOS_GPU_IRQ_LINK" | grep -qx 'on property:init.svc.vendor.set_power_symlinks=stopped' || { echo "irq link: trigger missing" >&2; exit 1; }
+case "$GBOS_GPU_IRQ_LINK" in *'$'*) echo "irq link: rc line has a \$" >&2; exit 1;; esac
+command mkdir -p "$I/160/xe"; . "$TMP/irq.sh"
+[ -z "$GBOS_GPU_IRQ_LINK" ] || { echo "irq link: must do nothing when xe has its interrupt" >&2; exit 1; }
+rm -rf "$I/160" "$I/151"; . "$TMP/irq.sh"
+[ -z "$GBOS_GPU_IRQ_LINK" ] || { echo "irq link: must do nothing without i915" >&2; exit 1; }
+command mkdir -p "$I/151/i915"; GPU_IRQ_LINK=0; . "$TMP/irq.sh"; unset GPU_IRQ_LINK GBOS_PROC_IRQ
+[ -z "$GBOS_GPU_IRQ_LINK" ] || { echo "irq link: GPU_IRQ_LINK=0 must turn it off" >&2; exit 1; }
+grep -qx '\$GBOS_GPU_IRQ_LINK' "$HOOK" || { echo "irq link: not in the rc" >&2; exit 1; }
+grep -qx 'log.tag.touchpad-inhibitor=ERROR' "$HOOK" 2>/dev/null || grep -q 'echo "log.tag.touchpad-inhibitor=ERROR"' "$HOOK" || { echo "touchpad-inhibitor log level missing" >&2; exit 1; }
+
+for _d in /dev/input /dev/dri /dev/snd; do
+  sed -n '/^on early-init$/,/^on /p' "$HOOK" | grep -qx "    restorecon_recursive $_d" || { echo "early-init must relabel $_d" >&2; exit 1; }
+done
 
 echo "BOOT_TUNING_TEST_PASS"

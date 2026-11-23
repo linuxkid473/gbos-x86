@@ -44,14 +44,32 @@ modprobe -q rtsx_pci_sdmmc 2>/dev/null && log "rtsx_pci_sdmmc loaded (Realtek SD
 # gbos/install.sh). The stick wins when present, unless the NVMe install exists and the stick's
 # gbos.cfg doesn't ask for it (MODE=install or BOOT_FROM=stick). NVMe shows up long before USB,
 # so give the stick a few seconds after GBOSSYS appears.
+# Once GBOSSYS is there, stop as soon as USB has settled instead of a fixed 6 s: no new USB device for STICK_SETTLE_S (2 s) and
+# every usb-storage interface has its disk. A fixed 6 s cost every NVMe boot (and every persistent-stick boot, whose own
+# volume is GBOSSYS) ~5.7 s waiting for a stick that never comes. Still at most 6 s.
+usb_settled() {
+  # prints the number of USB devices; returns 1 while a usb-storage/uas interface has no SCSI disk yet
+  _r=${GBOS_SYSFS_ROOT:-/sys}
+  ls "$_r/bus/usb/devices" 2>/dev/null | wc -l
+  for _i in "$_r"/bus/usb/drivers/usb-storage/*:* "$_r"/bus/usb/drivers/uas/*:*; do
+    [ -e "$_i" ] || continue
+    ls -d "$_i"/host*/target*/*/block/* >/dev/null 2>&1 || return 1
+  done
+  return 0
+}
 log "waiting for LABEL=GBOS (USB) or LABEL=GBOSSYS (NVMe) ..."
-STICK=; SYS=; n=0
+STICK=; SYS=; n=0; usbn=; still=0
 for i in $(seq 1 60); do
   mdev -s
   STICK=$(findfs LABEL=GBOS 2>/dev/null)
   SYS=$(findfs LABEL=GBOSSYS 2>/dev/null)
   [ -n "$STICK" ] && break
-  [ -n "$SYS" ] && { n=$((n+1)); [ $n -ge 6 ] && break; }
+  if [ -n "$SYS" ]; then
+    n=$((n+1)); [ $n -ge 6 ] && break
+    _u=$(usb_settled) && _ok=1 || _ok=0
+    if [ "$_u" = "$usbn" ]; then still=$((still+1)); else still=0; usbn=$_u; fi
+    [ $_ok = 1 ] && [ $still -ge ${STICK_SETTLE_S:-2} ] && { log "USB settled ($usbn devices, no GBOS stick) after $n s with GBOSSYS"; break; }
+  fi
   sleep 1
 done
 [ -n "$STICK$SYS" ] || fail "no GBOS (USB) or GBOSSYS (NVMe) volume after 60s (block devices: $(ls /sys/class/block | tr '\n' ' '))"
@@ -112,7 +130,9 @@ fi
 log "found gbos volume on $FROM at $DEV (stick=${STICK:-none} nvme=${SYS:-none})"
 mount -t vfat -o rw,flush,umask=000 $DEV /gbos || fail "mount $DEV failed"
 G=/gbos/gbos
-cp /bin/busybox /gbos/busybox 2>/dev/null
+# Only when it differs: the volume is mounted with flush, and rewriting this 2 MB file on every boot cost ~5 s on a USB stick
+# (boot-5 2026-11-22: 9.6 s mount -> 14.7 s first log line).
+cmp -s /bin/busybox /gbos/busybox 2>/dev/null || { cp /bin/busybox /gbos/busybox 2>/dev/null && log "busybox copied to the volume (it changed)"; }
 
 # Boot-numbered log directory on the stick
 N=1; while [ -e $G/logs/boot-$N ]; do N=$((N+1)); done

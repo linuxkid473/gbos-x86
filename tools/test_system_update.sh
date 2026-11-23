@@ -135,6 +135,14 @@ install_set "$B1"; inbox "$B2"; boot >/dev/null
 echo '14,6193,121590821,-,caller=T1;init: processing action (sys.boot_completed=1) from (/system/etc/init/hw/init.rc:1245)' > "$G/logs/boot-$((BOOTN - 1))/kmsg.log"
 check "commit from the tried boot's kmsg.log" "[ \$(boot) = 0 ] && [ ! -f '$G/update/state' ]"
 
+# --- the same, but this boot mounted the volume dirty: the tried boot's kmsg.log is not read (a damaged one makes the FAT read-only)
+install_set "$B1"; inbox "$B2"; boot >/dev/null
+echo '14,6193,121590821,-,caller=T1;init: processing action (sys.boot_completed=1) from (/system/etc/init/hw/init.rc:1245)' > "$G/logs/boot-$((BOOTN - 1))/kmsg.log"
+printf '#!/bin/sh\necho "[    9.6] FAT-fs (sdz2): Volume was not properly unmounted. Some data may be corrupt. Please run fsck."\n' > "$T/fakedmesg"; chmod +x "$T/fakedmesg"
+dboot() { mkdir -p "$G/logs/boot-$BOOTN"; SU_DMESG="$T/fakedmesg" EB boot "$G" "$G/logs/boot-$BOOTN" "$BOOTN" --efi-dir "$EFI" --dev /dev/sdz2 > "$T/boot.log" 2>&1; _r=$?; BOOTN=$((BOOTN + 1)); echo $_r; }
+check "dirty mount: kmsg.log not read, no commit yet" "dboot >/dev/null; [ -f '$G/update/state' ] && grep -q 'not reading the tried boots' '$G/update/status.txt' '$T/boot.log' '$G'/logs/boot-*/sysupdate.txt 2>/dev/null"
+check "clean mount of another device: kmsg.log still commits" "SU_DMESG='$T/fakedmesg' EB boot '$G' '$G/logs/boot-'\$BOOTN \$BOOTN --efi-dir '$EFI' --dev /dev/sdy2 >/dev/null 2>&1; [ ! -f '$G/update/state' ]"
+
 # --- rollback after N failed boots
 install_set "$B1"; inbox "$B2"; boot >/dev/null
 boot >/dev/null; boot >/dev/null

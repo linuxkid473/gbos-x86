@@ -841,6 +841,21 @@ fi
     mkdir /data/system/devices 0775 system system
     mkdir /data/system/devices/idc 0775 system system$IDCRC"
   fi
+  # Google's power HAL (libperfmgr) writes the GPU interrupt's CPU affinity through /dev/power/irq-by-name/xe, a link that
+  # vendor's set_power_symlinks makes only for the xe driver. On i915 every write failed (1,374 "Failed to write to node" in
+  # boot-5's logcat, 2026-11-22) and the media-playback IRQ hint never applied. Point the same name at i915's interrupt; the IRQ
+  # number is the same kernel's after switch_root, so it is resolved here and the .rc line needs no shell.
+  GBOS_GPU_IRQ_LINK=
+  if [ "${GPU_IRQ_LINK:-1}" = 1 ] && ! ls -d ${GBOS_PROC_IRQ:-/proc/irq}/*/xe >/dev/null 2>&1; then
+    for _gi in ${GBOS_PROC_IRQ:-/proc/irq}/*/i915; do
+      [ -e "$_gi" ] || break
+      _gi=${_gi%/i915}; _gi=/proc/irq/${_gi##*/}
+      GBOS_GPU_IRQ_LINK="on property:init.svc.vendor.set_power_symlinks=stopped
+    symlink $_gi /dev/power/irq-by-name/xe"
+      log "hook: power HAL: /dev/power/irq-by-name/xe -> $_gi (i915's interrupt; vendor only links xe)"
+      break
+    done
+  fi
   GBOS_SENSOR_TRIAL_START=
   GBOS_TABLET_MODE_START=
   GBOS_TABLET_MODE_SERVICE=
@@ -974,10 +989,17 @@ service gbos_camera_capture /system/bin/sh /postinstall/gbos/installer/bin/camer
 
 # DRM card0 is configured directly in stage0_init before Android init starts.
 on early-init
+    # /dev/input, /dev/dri and /dev/snd were made by stage0's mdev before Android, so they carry tmpfs instead of their policy
+    # labels (input_device, gpu_device, audio_device): boot-5 (2026-11-22) logged denials for touchpad-inhibitor, the composer,
+    # surfaceflinger and system_server on them, hidden only by permissive mode.
+    restorecon_recursive /dev/input
+    restorecon_recursive /dev/dri
+    restorecon_recursive /dev/snd
     setprop sys.gbos_dri_fixed 1
 $GBOS_ROTATION_OVERRIDE_PROP
 on property:sys.gbos_dri_fixed=1
     restart vendor.drm-widevine-hal
+$GBOS_GPU_IRQ_LINK
 
 on post-fs-data
 $IDCRC
@@ -1277,6 +1299,10 @@ DROP='^ro.boot.hypervisor.protected_vm.supported=|^ro.surface_flinger.has_wide_c
     echo "log.tag.drmhwc=WARN"
     echo "persist.log.tag.drmhwc=WARN"
   fi
+  # touchpad-inhibitor polls once a second for the detachable keyboard's touchpad and logs 3 lines each time it is absent
+  # (2,142 of boot-5's logcat lines, 2026-11-22, pushing real logs out of the rotated files). It must keep running: it is what
+  # inhibits the touchpad when the keyboard is attached and folded. ERROR keeps its real failures.
+  echo "log.tag.touchpad-inhibitor=ERROR"
   if [ "$GPU_SW" = 1 ]; then
     echo "ro.surface_flinger.supports_background_blur=0"
     # Read by optimize.sh: animations and window blur are only switched off while the CPU composites (hardware GPUs keep Google's defaults).

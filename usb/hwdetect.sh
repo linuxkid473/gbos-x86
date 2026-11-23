@@ -185,6 +185,18 @@ gbos_coldplug_pass() {
   gbos_load_ipu6_isys
 }
 
+# After a pass that loaded drivers: wait until their new devices stop appearing (the modalias count is unchanged for two 0.2 s
+# polls), at most 1 s. Was a fixed 1 s per pass (~3 s of the Latitude 7320's 4 passes); a device that shows up later is still
+# caught by the next pass and by gbos_wait_devices.
+gbos_settle_devices() {
+  _sd_last=$(find ${GBOS_SYSFS_DEVICES:-/sys/devices} -name modalias 2>/dev/null | wc -l); _sd_same=0; _sd_t=0
+  while [ $_sd_t -lt ${GBOS_SETTLE_POLLS:-5} ]; do
+    sleep ${GBOS_SETTLE_STEP:-0.2}; _sd_t=$((_sd_t+1))
+    _sd_n=$(find ${GBOS_SYSFS_DEVICES:-/sys/devices} -name modalias 2>/dev/null | wc -l)
+    if [ "$_sd_n" = "$_sd_last" ]; then _sd_same=$((_sd_same+1)); [ $_sd_same -ge 2 ] && return 0; else _sd_same=0; _sd_last=$_sd_n; fi
+  done
+}
+
 gbos_coldplug() {
   [ -f ${GBOS_MODALIAS:-/lib/modules/$(uname -r)/modules.alias} ] || { log "hwdetect: no modules.alias, skipping coldplug"; return 1; }
   # Not loaded by alias: ACPI video (brightness keys), battery already built in.
@@ -193,7 +205,7 @@ gbos_coldplug() {
     gbos_coldplug_pass || return 1
     # The 1 s settle is only for devices created by drivers this pass loaded. A pass that loaded nothing new has
     # nothing to wait for: the hook's second coldplug spent its whole 1.1 s here ("122 (was 122)", Latitude 7320).
-    if [ "$(wc -l < ${GBOS_PROC_MODULES:-/proc/modules})" -ne $before ]; then sleep 1; fi
+    if [ "$(wc -l < ${GBOS_PROC_MODULES:-/proc/modules})" -ne $before ]; then gbos_settle_devices; fi
     gbos_load_opmodes; mdev -s 2>/dev/null
     now=$(wc -l < ${GBOS_PROC_MODULES:-/proc/modules})
     log "hwdetect: coldplug pass $p: $now modules loaded (was $before)"
