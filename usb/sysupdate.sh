@@ -18,6 +18,7 @@
 #   install-app [G] [BOOTN]                init service at boot_completed: install gbos86-updater.apk with pm when it changed, then
 #                                          tell the app the laptop started (its update check)
 #   audit [G] [--deep]                     does the installed system match its system.manifest? (the app's modification check)
+#   cleanup [G]                            Android, root (the app's request): delete the folder the installed update was staged from
 #   info [G]                               machine-readable set/key/space facts for the app
 #   setinfo DIR                            id/seq/google_build/commit of the set in a gbos folder (install.sh)
 #   menu1-check STICKG NVMEG / menu1-finish STICKG NVMEG    the stick's menu 1 (install.sh)
@@ -889,9 +890,49 @@ cmd_request() {
           echo "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) app: update staged from $(basename "$_real") after the app warned that this system is modified ($_aw); the user chose \"Install anyway\""
         } > "$U/history.part" && mv -f "$U/history.part" "$U/history.txt"; sync
       fi
+      [ $_r = 0 ] && su_record_source "$_real" "$_base"
       if [ $_r = 0 ]; then echo "$_o" | tail -n 3 | respond done; else echo "$_o" | tail -n 5 | respond failed; fi;;
+    cleanup) ( set -- cleanup "$G"; if [ -n "${SU_BB:-}" ]; then "$SU_BB" sh "$0" "$@"; else sh "$0" "$@"; fi ) 2>&1 | respond done;;
     *) echo "unknown action '$_act'" | respond failed;;
   esac
+}
+
+# The bundle folder an update was staged from (the app's download, or a folder in the user's shared storage), kept by root on /data
+# (GBOSSYS's stage0 cannot read Android's encrypted storage). After that set is committed, `cleanup` deletes the folder from the
+# laptop's own storage: the update finished, the copy on GBOSSYS was installed, and the bundle is only taking space.
+SU_SRCREC=${SU_SRCREC:-/data/misc/gbos86/staged-source}
+su_record_source() { # REAL_BUNDLE_DIR BASE_DIR
+  mkdir -p "${SU_SRCREC%/*}" 2>/dev/null && chmod 700 "${SU_SRCREC%/*}" 2>/dev/null
+  { echo "source $1"; echo "base $2"; echo "set $(su_sha "$1/manifest")"; } > "$SU_SRCREC.part" 2>/dev/null &&
+    chmod 600 "$SU_SRCREC.part" && mv -f "$SU_SRCREC.part" "$SU_SRCREC" || su_log "could not record the staged bundle's folder"
+}
+# cleanup [G]: delete the recorded bundle folder once its set is the installed one (system.manifest) and no update is being tried.
+# Deletes only a gbos86-update-* folder under the recorded base whose manifest is still that set; otherwise it leaves it alone.
+cmd_cleanup() {
+  su_gbos "${1:-}"; U=$G/update
+  [ -f "$SU_SRCREC" ] || { echo "cleanup: nothing recorded"; return 0; }
+  _cs=$(sed -n 's/^source //p' "$SU_SRCREC" | head -n 1); _cb=$(sed -n 's/^base //p' "$SU_SRCREC" | head -n 1)
+  _cset=$(sed -n 's/^set \([0-9a-f]\{64\}\)$/\1/p' "$SU_SRCREC" | head -n 1)
+  if [ -f "$U/state" ]; then echo "cleanup: an update is being tried; kept $(basename "$_cs")"; return 0; fi
+  if ls "$G/update.inbox" 2>/dev/null | grep -q '^gbos86-update-'; then echo "cleanup: an update waits in update.inbox; kept $(basename "$_cs")"; return 0; fi
+  _ci=$([ -f "$G/system.manifest" ] && su_sha "$G/system.manifest")
+  if [ -z "$_cset" ] || [ "$_cset" != "$_ci" ]; then
+    rm -f "$SU_SRCREC"; echo "cleanup: $(basename "$_cs") was not installed (rolled back or replaced); kept it"; return 0
+  fi
+  case "$(basename "$_cs")" in gbos86-update-*) ;; *) rm -f "$SU_SRCREC"; echo "cleanup: $_cs is not an update folder; kept it"; return 0;; esac
+  case "$_cs" in "$_cb"/?*) ;; *) rm -f "$SU_SRCREC"; echo "cleanup: $_cs is outside $_cb; kept it"; return 0;; esac
+  if [ -d "$_cs" ] && [ ! -L "$_cs" ]; then
+    if [ "$(su_sha "$_cs/manifest" 2>/dev/null)" = "$_cset" ]; then
+      rm -rf "$_cs"; su_log "cleanup: deleted $_cs (set ${_cset%"${_cset#????????????}"} is installed)"
+      echo "cleanup: deleted $(basename "$_cs") from this laptop's storage (the update is installed)"
+    else
+      echo "cleanup: $(basename "$_cs") changed since it was staged; kept it"
+    fi
+  else
+    echo "cleanup: $(basename "$_cs") is already gone"
+  fi
+  rm -f "$SU_SRCREC"
+  return 0
 }
 
 # init, at boot_completed (hook.sh adds the service when gbos/gbos86-updater.apk exists): install or update the gbOS86 Updater app
@@ -1041,6 +1082,7 @@ case "$_cmd" in
   request) cmd_request "$@";;
   boot-ok) cmd_boot_ok "$@";;
   install-app) su_tmp; cmd_install_app "$@";;
+  cleanup) cmd_cleanup "$@";;
   audit) cmd_audit "$@";;
   info) su_tmp; cmd_info "$@";;
   setinfo) su_tmp; cmd_setinfo "$@";;

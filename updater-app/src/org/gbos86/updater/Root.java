@@ -14,7 +14,7 @@ import java.util.Map;
 /**
  * Talks to the root service (sysupdate.sh request, started by init when this app sets sys.gbos86.sysupdate). The request goes in
  * files/request.txt (only this app and root can write there), the answer comes back in files/response.txt. One request at a time.
- * Actions: info, audit, status, stage, cancel, reboot (docs/system-update.md, "The app").
+ * Actions: info, audit, status, stage, cancel, cleanup, reboot (docs/system-update.md, "The app").
  */
 final class Root {
     private Root() {}

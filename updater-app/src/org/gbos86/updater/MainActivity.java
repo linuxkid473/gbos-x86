@@ -610,6 +610,10 @@ public class MainActivity extends Activity {
                         "accepted_warning", accepted),
                         body -> ui.post(() -> progressView.setText(body)));
                 r = (res.ok ? "" : "Failed:\n") + res.body;
+                if (res.ok) {   // CheckJob deletes the folder once this set is installed (Updater.cleanupAfterCommit)
+                    java.util.regex.Matcher m = java.util.regex.Pattern.compile("gbos86-update-([0-9]{1,14})-[0-9a-f]+$").matcher(rel);
+                    if (m.find()) Prefs.get(this).edit().putLong("staged_seq", Long.parseLong(m.group(1))).apply();
+                }
             } catch (Exception e) {
                 r = "Failed: " + e.getMessage();
             }

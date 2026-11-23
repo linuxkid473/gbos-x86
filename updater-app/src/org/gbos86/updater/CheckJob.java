@@ -15,12 +15,14 @@ import org.gbos86.updater.core.Feed;
  * It never downloads the update itself.
  */
 public class CheckJob extends JobService {
-    static final int JOB_BOOT = 1, JOB_DAILY = 2;
+    static final int JOB_BOOT = 1, JOB_DAILY = 2, JOB_CLEANUP = 3;
     private volatile Thread worker;
 
     static void schedule(Context c, boolean atBoot) {
         JobScheduler js = c.getSystemService(JobScheduler.class);
         ComponentName cn = new ComponentName(c, CheckJob.class);
+        // After every start, without a network: delete an installed update's bundle folders (Updater.cleanupAfterCommit).
+        if (atBoot) js.schedule(new JobInfo.Builder(JOB_CLEANUP, cn).setMinimumLatency(20000).setOverrideDeadline(10 * 60 * 1000L).build());
         if (atBoot && Prefs.checkAtBoot(c)) {
             js.schedule(new JobInfo.Builder(JOB_BOOT, cn).setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
                     .setMinimumLatency(30000).setOverrideDeadline(6 * 3600 * 1000L).build());
@@ -38,6 +40,16 @@ public class CheckJob extends JobService {
     @Override
     public boolean onStartJob(JobParameters params) {
         worker = new Thread(() -> {
+            if (params.getJobId() == JOB_CLEANUP) {
+                try {
+                    String r = Updater.cleanupAfterCommit(this);
+                    if (r != null) Prefs.get(this).edit().putString("last_cleanup", r).apply();
+                } catch (Exception e) {
+                    Prefs.get(this).edit().putString("last_cleanup", "Cleanup failed: " + e.getMessage()).apply();
+                }
+                jobFinished(params, false);
+                return;
+            }
             try {
                 check(this);
             } catch (Exception e) {

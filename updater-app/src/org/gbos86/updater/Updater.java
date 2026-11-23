@@ -301,6 +301,24 @@ final class Updater {
         return result;
     }
 
+    /**
+     * After an update this app staged is committed (the laptop runs its set and no update is being tried): deletes this app's
+     * download folder and asks the root service to delete the bundle folder it was staged from (a folder picked in shared storage,
+     * e.g. Downloads). Runs after the user unlocks (CheckJob), because both live in encrypted storage. Returns what happened, or null.
+     */
+    static String cleanupAfterCommit(Context c) throws Exception {
+        long staged = Prefs.get(c).getLong("staged_seq", 0);
+        if (staged == 0) return null;
+        Info i = info(c);
+        if (!"none".equals(i.pending) && !i.pending.isEmpty()) return null;   // still being tried: wait for the next start
+        if (!i.inbox.isEmpty()) return null;                                     // staged, not installed yet (no restart since)
+        Prefs.get(c).edit().remove("staged_seq").apply();
+        if (i.seq != staged) return null;                                       // rolled back or replaced: keep the user's files
+        deleteTree(new File(c.getFilesDir(), "updates"));
+        Root.Result r = Root.call(c, "cleanup", null, null);
+        return r.body;
+    }
+
     static Util.Progress prefixed(Util.Progress p, String prefix) {
         if (p == null) return null;
         return (ph, d, t) -> p.update(prefix + ph, d, t);

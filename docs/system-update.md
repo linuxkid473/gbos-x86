@@ -279,8 +279,14 @@ Any refusal leaves everything as it was and boots the current system.
   the new set's `sysupdate.sh`. If the engine stops with an unexpected error during a switch, the hook runs it once more to undo.
 * **Did it work?** While trying, `hook.sh` adds a service that, a minute after `sys.boot_completed`, writes the set id to
   `update/boot-ok`. The next start commits when `boot-ok` holds the set id, or when a tried start's `kmsg.log` has
-  `init: processing action (sys.boot_completed=1)`. **Commit** deletes `update.prev`, the kernel copy and the journal. After a
-  commit there is no rollback.
+  `init: processing action (sys.boot_completed=1)` (not read when this start found the volume not cleanly unmounted). **Commit**
+  deletes `update.prev`, the kernel copy and the journal. After a commit there is no rollback.
+* **Cleaning up the laptop's storage:** when the app stages a bundle, the root service records its folder in
+  `/data/misc/gbos86/staged-source` (root only). After the next starts commit that set, the app's cleanup job (after unlock, no
+  network needed) deletes its own `files/updates/` and asks the root service (`cleanup`) to delete the recorded folder, for example the
+  `gbos86-update-...` folder copied to Downloads. The root service deletes it only when the installed `system.manifest` is that set,
+  no update is waiting or being tried, the folder is a `gbos86-update-*` folder under the recorded base, and its manifest is unchanged.
+  After a rollback the folder is kept.
 * **Rollback** after `SYSUPDATE_ATTEMPTS` tries without success: the journal is undone, the old kernel is written back the same
   safe way and the laptop restarts. With a new Google build that Android already ran (`hook.sh` writes `update/android-started`), it
   is held instead (see above) until the user asks with `update/rollback-request`.

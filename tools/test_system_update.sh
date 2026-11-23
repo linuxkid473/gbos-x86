@@ -381,5 +381,31 @@ check "lockdown: boot-ok refuses instead of failing silently" "! LK mi-fatro boo
 chmod 755 "$PI/gbos"
 check "lockdown: install-app logs the mount lines every boot" "mkdir -p '$T/ia/logs/boot-4' && : > '$T/ia/gbos86-updater.apk' && PATH=/nonexistent LK mi-ro-dev install-app '$T/ia' 4 >/dev/null 2>&1; grep -q 'mounts: $PI: 30 25' '$T/ia/logs/boot-4/updater-app.txt' && grep -q 'mounts: $RWD/stick: 32 20' '$T/ia/logs/boot-4/updater-app.txt'"
 
+# --- cleanup: the folder an installed update was staged from is deleted from the laptop's storage, and only that one
+CG=$T/cg/gbos; CB=$T/cg/media0; CR=$T/cg/rec/staged-source; mkdir -p "$CG/update" "$CB/Download/gbos86-update-5-abc" "$T/cg/rec"
+echo 'gbos86-set 1 seq 5' > "$CB/Download/gbos86-update-5-abc/manifest"; echo f > "$CB/Download/gbos86-update-5-abc/hook.sh"
+CL() { SU_SRCREC="$CR" "$BB" sh "$ROOT/usb/sysupdate.sh" "$@"; }
+CS=$(sha256sum "$CB/Download/gbos86-update-5-abc/manifest" | cut -c1-64)
+rec() { { echo "source $1"; echo "base $CB"; echo "set $CS"; } > "$CR"; }
+cp "$CB/Download/gbos86-update-5-abc/manifest" "$CG/system.manifest"
+check "cleanup: nothing recorded: nothing deleted" "CL cleanup '$CG' | grep -q 'nothing recorded' && [ -d '$CB/Download/gbos86-update-5-abc' ]"
+rec "$CB/Download/gbos86-update-5-abc"; echo x > "$CG/update/state"
+check "cleanup: update still being tried: kept, record kept" "CL cleanup '$CG' | grep -q 'being tried' && [ -d '$CB/Download/gbos86-update-5-abc' ] && [ -f '$CR' ]"
+rm -f "$CG/update/state"; mkdir -p "$CG/update.inbox/gbos86-update-6-def"
+check "cleanup: an update waits in update.inbox: kept" "CL cleanup '$CG' | grep -q 'waits in update.inbox' && [ -d '$CB/Download/gbos86-update-5-abc' ] && [ -f '$CR' ]"
+rmdir "$CG/update.inbox/gbos86-update-6-def"; echo other > "$CG/system.manifest"
+check "cleanup: another set installed (rolled back): kept, record dropped" "CL cleanup '$CG' | grep -q 'was not installed' && [ -d '$CB/Download/gbos86-update-5-abc' ] && [ ! -f '$CR' ]"
+cp "$CB/Download/gbos86-update-5-abc/manifest" "$CG/system.manifest"; mkdir -p "$CB/Download/notes"; cp "$CB/Download/gbos86-update-5-abc/manifest" "$CB/Download/notes/manifest"; rec "$CB/Download/notes"
+check "cleanup: not a gbos86-update-* folder: kept" "CL cleanup '$CG' | grep -q 'not an update folder' && [ -d '$CB/Download/notes' ]"
+mkdir -p "$T/cg/elsewhere/gbos86-update-5-abc"; cp "$CB/Download/gbos86-update-5-abc/manifest" "$T/cg/elsewhere/gbos86-update-5-abc/"; rec "$T/cg/elsewhere/gbos86-update-5-abc"
+check "cleanup: outside the recorded base: kept" "CL cleanup '$CG' | grep -q 'is outside' && [ -d '$T/cg/elsewhere/gbos86-update-5-abc' ]"
+rec "$CB/Download/gbos86-update-5-abc"; echo changed >> "$CB/Download/gbos86-update-5-abc/manifest"
+check "cleanup: folder changed since staging: kept" "CL cleanup '$CG' | grep -q 'changed since' && [ -d '$CB/Download/gbos86-update-5-abc' ]"
+cp "$CG/system.manifest" "$CB/Download/gbos86-update-5-abc/manifest"; rec "$CB/Download/gbos86-update-5-abc"
+check "cleanup: installed set, nothing pending: folder deleted, record dropped" "CL cleanup '$CG' | grep -q 'deleted gbos86-update-5-abc' && [ ! -e '$CB/Download/gbos86-update-5-abc' ] && [ ! -f '$CR' ] && [ -d '$CB/Download' ]"
+rec "$CB/Download/gbos86-update-5-abc"
+check "cleanup: already gone: says so" "CL cleanup '$CG' | grep -q 'already gone' && [ ! -f '$CR' ]"
+check "request: a successful stage records its folder, cleanup is a request action" "grep -q 'su_record_source \"\$_real\" \"\$_base\"' '$ROOT/usb/sysupdate.sh' && grep -q '^    cleanup) ' '$ROOT/usb/sysupdate.sh'"
+
 [ $FAILS = 0 ] && { echo SYSTEM_UPDATE_TEST_PASS; exit 0; }
 echo "$FAILS FAILED"; exit 1
