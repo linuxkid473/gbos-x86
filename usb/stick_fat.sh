@@ -229,6 +229,38 @@ gbos_fat_rt_setup() { # DEV
 # Paths (volume-relative, lower case) that fsck.fat -n names in its output: the files and directories it found something wrong with.
 gbos_fsck_named_paths() { grep '^/' "$1" 2>/dev/null | grep -v ': [0-9]* files, [0-9]*/[0-9]* clusters$' | tr 'A-Z' 'a-z'; }
 
+# A forced power-off leaves the files that were open for appending (kmsg.log, logcat.txt) longer in their directory entry than their
+# cluster chain: fsck says "File size is X bytes, cluster chain length is Y bytes." (boots 4-7 of the persistent stick, 2026-11-22/23).
+# gbos_fsck_log_truncations prints "Y PATH" for each such file under /gbos/logs/ and returns 0 only when, apart from those, fsck found
+# nothing but what gbos_fsck_only_dirty accepts. Any other problem, or a damaged file anywhere else, returns 1: nothing is repaired.
+gbos_fsck_log_truncations() { # OUTPUT_FILE STATE_OFFSET
+  _lt=${1}.rest
+  awk -v rest="$_lt" '
+    function flush() { if (p != "") print p > rest; p = "" }
+    /^\// && !/: [0-9]+ files, [0-9]+\/[0-9]+ clusters$/ { flush(); p = $0; next }
+    p != "" && match($0, /^  File size is [0-9]+ bytes, cluster chain length is [0-9]+ bytes\.$/) {
+      split($0, w, " "); q = tolower(p)
+      if (q ~ /^\/gbos\/logs\/boot-[0-9]+\/[a-z0-9._-]+$/ && w[10] + 0 < w[4] + 0) { print w[10], p; p = ""; skip = 1; next }
+      flush(); print $0 > rest; next }
+    skip && /^  Truncating file to [0-9]+ bytes\.$/ { skip = 0; next }
+    { skip = 0; flush(); print $0 > rest }
+    END { flush() }' "$1" > "$1.trunc" || { rm -f "$_lt" "$1.trunc"; return 1; }
+  touch "$_lt"
+  if [ -s "$1.trunc" ] && gbos_fsck_only_dirty "$_lt" "$2"; then cat "$1.trunc"; rm -f "$_lt" "$1.trunc"; return 0; fi
+  rm -f "$_lt" "$1.trunc"; return 1
+}
+# Cut each listed log file to its cluster chain through the mounted volume. truncate(2) to a size the chain holds frees nothing and
+# never reads data past the chain, so it cannot trip the FAT error that reading the file would. FAT_REPAIR_LOGS=0 turns it off.
+gbos_fat_repair_logs() { # MP LIST_FILE ("BYTES /PATH" lines) -> prints how many were cut
+  _rn=0
+  while read -r _ry _rp; do
+    case "$_rp" in */../*|*/./*) continue;; esac
+    $GBOS_FAT_BB truncate -s "$_ry" "$1$_rp" 2>/dev/null && _rn=$((_rn + 1))
+  done < "$2"
+  $GBOS_FAT_BB sync
+  echo $_rn
+}
+
 # The kernel's FAT messages in a previous boot's kmsg.log (whole file, first events): "MOUNTED_DIRTY_S|READ_ONLY_S|FIRST_ERROR", empty
 # fields when absent. READ_ONLY_S is "Filesystem has been set read-only": a FAT error with errors=remount-ro (stage0's mount, the
 # default) made the superblock read-only. From then on no file can be created (EROFS) while files that were already open (kmsg.log)
@@ -337,8 +369,16 @@ gbos_fat_boot_check() { # DEV MP LOGDIR
     $GBOS_FAT_BB df "$_bm" >/dev/null 2>&1           # statfs: the driver recounts free clusters and rewrites a stale FSInfo hint
     $GBOS_FAT_BB sync
     _bt0=$(cut -d' ' -f1 /proc/uptime 2>/dev/null)
-    _brc=0
+    _brc=0; _brep=
     $GBOS_FAT_BB timeout 120 $G/installer/lib/ld-musl-x86_64.so.1 --library-path $G/installer/lib "$_bf" -n "$_bd" > "$_br.fsck" 2>&1 || _brc=$?
+    # Only damage a forced power-off leaves in our own logs: cut those files to their chains, then check again (one pass).
+    if [ $_brc != 0 ] && [ "${FAT_REPAIR_LOGS:-1}" = 1 ] && gbos_fsck_log_truncations "$_br.fsck" "$_bo2" > "$_br.trunc"; then
+      _bru=$(gbos_fat_repair_logs "$_bm" "$_br.trunc")
+      _brep="repaired $_bru of $(wc -l < "$_br.trunc") log file(s) a forced power-off left longer than their data: $(awk '{ printf "%s%s (%s bytes)", s, $2, $1; s = ", " }' "$_br.trunc")"
+      cat "$_br.fsck" > "$_br.fsck0"; _brc0=$_brc; _brc=0
+      $GBOS_FAT_BB timeout 120 $G/installer/lib/ld-musl-x86_64.so.1 --library-path $G/installer/lib "$_bf" -n "$_bd" > "$_br.fsck" 2>&1 || _brc=$?
+    fi
+    rm -f "$_br.trunc"
     _bt1=$(cut -d' ' -f1 /proc/uptime 2>/dev/null)
     [ -n "$2" ] && kill -CONT "$2" 2>/dev/null
     _bl=$(sed -n 's/^Reclaimed \([0-9]*\) unused cluster.*/\1/p' "$_br.fsck" | head -1)
@@ -361,13 +401,15 @@ gbos_fat_boot_check() { # DEV MP LOGDIR
       _bn="fsck found problems${_bw:+ (in ${_bw% })}; opening a damaged file would make the kernel set the whole volume read-only"
     fi
   fi
+  [ -n "${_brep:-}" ] && _bv="$_brep; then $_bv"
   [ $_bp = 0 ] && _bn=
   { echo "$_bd at $_bm, $_bt: $_bs"
     [ $_bp = 1 ] && echo "(the kernel found the dirty flag set when stage0 mounted it: \"Volume was not properly unmounted\")"
     gbos_fat_prev_shutdown "$_bld" $_bp "$_bn"
+    [ -n "${_brep:-}" ] && { echo "--- fsck.fat -n $_bd before the repair (rc=$_brc0)"; cat "$_br.fsck0"; }
     [ $_bk = 1 ] && { echo "--- fsck.fat -n $_bd (rc=$_brc, uptime $_bt0 -> $_bt1 s)"; cat "$_br.fsck"; echo "---"; }
     echo "$_bv"; } > "$_br" 2>/dev/null
-  rm -f "$_br.fsck"
+  rm -f "$_br.fsck" "$_br.fsck0"
   # Safety net: the volume should still be read-write here. If a FAT error made it read-only, nothing can create a file on it for the
   # rest of the boot (this report, fat-shutdown.txt, logcat): say so in kmsg, which the already-open kmsg.log still records.
   _bro=; _bro=$(gbos_fat_ro_now "$_bd" "$_bm") && echo "$_bm is READ-ONLY now (FAT error: $_bro): no file can be created on it this boot" >> "$_br"

@@ -28,7 +28,7 @@ fi
 
 # The gbos FAT volume (the stick, or the NVMe install's GBOSSYS): report the previous shutdown and run a read-only fsck.fat when it was not
 # clean (fat-check.txt), and start the watcher that remounts it read-only at init's last shutdown step, so the next boot finds it clean.
-# usb/stick_fat.sh; gbos.cfg FAT_FSCK=auto|1|0, FAT_CLEAR_DIRTY=1|0, FAT_SHUTDOWN_RO=1|0, FAT_SHUTDOWN_SYSRQ=1|0. Reports: fat-check.txt,
+# usb/stick_fat.sh; gbos.cfg FAT_FSCK=auto|1|0, FAT_CLEAR_DIRTY=1|0, FAT_REPAIR_LOGS=1|0, FAT_SHUTDOWN_RO=1|0, FAT_SHUTDOWN_SYSRQ=1|0. Reports: fat-check.txt,
 # fat-shutdown.txt (armed now; failures appended at shutdown).
 if [ -f $G/stick_fat.sh ] && . $G/stick_fat.sh; then
   gbos_fat_boot_check "$DEV" /gbos "$L"

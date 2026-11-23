@@ -59,6 +59,28 @@ mkimg() { # FILE 32|16
 }
 setbyte() { printf "\\$(printf %o "$3")" | dd of="$1" bs=1 seek="$2" count=1 conv=notrunc 2>/dev/null; }
 fsck_n() { $LOADER "$U/installer/bin/fsck.fat" -n "$1" > "$2" 2>&1; }
+
+# --- the log-file repair's parser, on fsck.fat 4.2's real output from the persistent stick (boot-8, 2026-11-23)
+fk() { printf '%s\n' 'fsck.fat 4.2 (2021-01-31)' 'There are differences between boot sector and its backup.' \
+  'This is mostly harmless. Differences: (offset:original/backup)' '  65:01/00' '  Not automatically fixing this.' "$@" \
+  'Dirty bit is set. Fs was not properly unmounted and some data may be corrupt.' ' Automatically removing dirty bit.' '' \
+  'Leaving filesystem unchanged.' '/dev/sda2: 7506 files, 1131544/2093057 clusters' > "$TMP/fk"; }
+fk '/GBOS/LOGS/boot-7/kmsg.log' '  File size is 1298432 bytes, cluster chain length is 1261568 bytes.' '  Truncating file to 1261568 bytes.' \
+   '/GBOS/LOGS/boot-5/logcat.txt' '  File size is 73728 bytes, cluster chain length is 65536 bytes.' '  Truncating file to 65536 bytes.'
+[ "$(gbos_fsck_log_truncations "$TMP/fk" 65)" = "$(printf '1261568 /GBOS/LOGS/boot-7/kmsg.log\n65536 /GBOS/LOGS/boot-5/logcat.txt')" ] \
+  || { gbos_fsck_log_truncations "$TMP/fk" 65; fail "log truncations: the stick's boot-8 output not recognised"; }
+fk '/GBOS/HOOK.SH' '  File size is 9000 bytes, cluster chain length is 4096 bytes.' '  Truncating file to 4096 bytes.'
+! gbos_fsck_log_truncations "$TMP/fk" 65 >/dev/null || fail "log truncations: a damaged file outside logs/ must not be repaired"
+fk '/GBOS/LOGS/boot-7/kmsg.log' '  File size is 1298432 bytes, cluster chain length is 1261568 bytes.' '  Truncating file to 1261568 bytes.' \
+   '/GBOS/LOGS/boot-7' '  Directory has no . entry.'
+! gbos_fsck_log_truncations "$TMP/fk" 65 >/dev/null || fail "log truncations: any other problem means no repair"
+fk '/GBOS/LOGS/boot-7/kmsg.log' '  File size is 4096 bytes, cluster chain length is 8192 bytes.' '  Truncating file to 8192 bytes.'
+! gbos_fsck_log_truncations "$TMP/fk" 65 >/dev/null || fail "log truncations: a chain longer than the size is not this damage"
+fk '/GBOS/LOGS/../HOOK.SH' '  File size is 9000 bytes, cluster chain length is 4096 bytes.' '  Truncating file to 4096 bytes.'
+! gbos_fsck_log_truncations "$TMP/fk" 65 >/dev/null || fail "log truncations: a path with .. is never repaired"
+fk
+! gbos_fsck_log_truncations "$TMP/fk" 65 >/dev/null || fail "log truncations: nothing to repair returns 1 (the dirty-only path handles it)"
+ok "log truncations: only log files under gbos/logs/boot-N whose size exceeds the chain, and nothing else wrong"
 # a lost cluster: cluster 5 marked end-of-chain in the first FAT only (the FATs differ: a real problem), or in both (only a lost cluster)
 lose_cluster() { # FILE 32|16 [both]
   rs=$(od -A n -t u2 -j 14 -N 2 "$1" | tr -d ' ')
@@ -490,6 +512,7 @@ log() { echo "$*" >> /t/stage0.log; }
 e0=$(dmesg | grep -c "FAT-fs (${D##*/}): error")
 GBOS_FAT_BB=/bb/busybox GBOS_FAT_TMP=/tmp/ram GBOS_FAT_RT=/tmp/rt GBOS_FAT_RT_MOUNT=0 GBOS_KMSG=/dev/null GBOS_KMSG_OUT=/dev/null
 GBOS_DMESG="echo FAT-fs (${D##*/}): Volume was not properly unmounted. Some data may be corrupt."
+FAT_REPAIR_LOGS=$(cat /t/repair 2>/dev/null || echo 1)
 . /s/stick_fat.sh
 gbos_fat_boot_check "$D" /m "$L"
 gbos_fat_start_shutdown_watch "$D" /m "$L"
@@ -497,8 +520,11 @@ WP=$(sed -n 's/.*shutdown watcher pid \([0-9]*\) .*/\1/p' /t/stage0.log); [ -n "
 e1=$(dmesg | grep -c "FAT-fs (${D##*/}): error")
 st=$(awk '$5 == "/m" { for (i = 7; i <= NF && $i != "-"; i++); split($(i + 3), o, ","); print o[1] }' /proc/self/mountinfo)
 echo "RESULT sb=$st errors=$((e1 - e0)) check=$([ -f $L/fat-check.txt ] && echo yes || echo no) shutdown=$([ -f $L/fat-shutdown.txt ] && echo yes || echo no) clear=${GBOS_FAT_CLEAR:-}"
+echo "SIZE $(stat -c %s $G/logs/boot-3/kmsg.log)"
 [ -f $L/fat-check.txt ] && cat $L/fat-check.txt; cat /t/stage0.log
-umount /m; losetup -d "$D"; rm -f run.img /t/stage0.log
+umount /m; losetup -d "$D"
+/u/installer/lib/ld-musl-x86_64.so.1 --library-path /u/installer/lib /u/installer/bin/fsck.fat -n run.img > /t/after.fsck 2>&1; echo "AFTER rc=$?"; sed 's/^/AFTER /' /t/after.fsck
+rm -f run.img /t/stage0.log /t/after.fsck
 EOF
   docker run --rm --privileged -v "$U":/u:ro -v "$TMP/k3":/t -v "$TMP/k3a.sh":/k.sh:ro alpine:3.24 sh /k.sh > "$TMP/k3a.out" 2>&1 || { cat "$TMP/k3a.out"; fail "kernel test k3: image"; }
   python3 -I - "$TMP/k3/img" <<'EOF' || fail "kernel test k3: damaging the directory entry"
@@ -512,15 +538,27 @@ EOF
   $LOADER "$U/installer/bin/fsck.fat" -n "$TMP/k3/img" > "$TMP/k3.fsck" 2>&1 || :
   grep -q '^/gbos/logs/boot-3/kmsg.log$' "$TMP/k3.fsck" && grep -q 'File size is .* cluster chain length is' "$TMP/k3.fsck" || { cat "$TMP/k3.fsck"; fail "k3 fixture: fsck does not see the damage"; }
   git -C "$ROOT" show 23208d6:usb/stick_fat.sh > "$TMP/old_stick_fat.sh" 2>/dev/null || : > "$TMP/old_stick_fat.sh"
-  for v in new old; do
-    f=$U/stick_fat.sh; [ $v = new ] || f=$TMP/old_stick_fat.sh
+  for v in new norepair old; do
+    f=$U/stick_fat.sh; [ $v = old ] && f=$TMP/old_stick_fat.sh
     [ -s "$f" ] || { echo "skip: no old stick_fat.sh (git history) for the negative control"; continue; }
+    if [ $v = norepair ]; then echo 0 > "$TMP/k3/repair"; else rm -f "$TMP/k3/repair"; fi
     docker run --rm --privileged -v "$U":/u:ro -v "$BB":/bb/busybox:ro -v "$TMP/k3":/t -v "$TMP/k3b.sh":/k.sh:ro -v "$f":/s/stick_fat.sh:ro alpine:3.24 sh /k.sh \
       > "$TMP/k3$v.out" 2>&1 || { cat "$TMP/k3$v.out"; fail "kernel test k3 ($v)"; }
   done
-  grep -q '^RESULT sb=rw errors=0 check=yes shutdown=yes clear=0$' "$TMP/k3new.out" \
-    && grep -q '^previous boot (boot-3): its files were not read: fsck found problems (in /gbos/logs/boot-3/kmsg.log); ' "$TMP/k3new.out" \
-    && grep -q 'FAT-CHECK .*PROBLEMS FOUND' "$TMP/k3new.out" && ! grep -q 'READ-ONLY' "$TMP/k3new.out" || { cat "$TMP/k3new.out"; fail "kernel k3: the boot check tripped the FAT error"; }
+  # default: the damaged log is cut to its chain through the mounted volume, fsck then finds only the dirty flag, the flag will be cleared
+  # at shutdown, the previous boot's files are read, no FAT error, and fsck afterwards finds no damaged file
+  grep -q '^RESULT sb=rw errors=0 check=yes shutdown=yes clear=1$' "$TMP/k3new.out" \
+    && grep -q 'FAT-CHECK .*repaired 1 of 1 log file(s) a forced power-off left longer than their data: /gbos/logs/boot-3/kmsg.log ([0-9]* bytes); then fsck.fat -n: no errors besides the dirty flag' "$TMP/k3new.out" \
+    && grep -q '^--- fsck.fat -n .* before the repair (rc=1)$' "$TMP/k3new.out" \
+    && grep -q '^previous boot (boot-3) fat-shutdown.txt:$' "$TMP/k3new.out" && ! grep -q 'its files were not read' "$TMP/k3new.out" \
+    && ! grep -q '^AFTER .*File size is' "$TMP/k3new.out" && ! grep -q 'READ-ONLY' "$TMP/k3new.out" \
+    || { cat "$TMP/k3new.out"; fail "kernel k3: the damaged log was not repaired safely"; }
+  ok "kernel: a log file a forced power-off left longer than its chain is cut to the chain; fsck then clean; no FAT error"
+  # FAT_REPAIR_LOGS=0: the previous behaviour (nothing changed, the file not opened, flag left set)
+  grep -q '^RESULT sb=rw errors=0 check=yes shutdown=yes clear=0$' "$TMP/k3norepair.out" \
+    && grep -q '^previous boot (boot-3): its files were not read: fsck found problems (in /gbos/logs/boot-3/kmsg.log); ' "$TMP/k3norepair.out" \
+    && grep -q 'FAT-CHECK .*PROBLEMS FOUND' "$TMP/k3norepair.out" && grep -q '^AFTER .*File size is' "$TMP/k3norepair.out" \
+    && ! grep -q 'READ-ONLY' "$TMP/k3norepair.out" || { cat "$TMP/k3norepair.out"; fail "kernel k3: FAT_REPAIR_LOGS=0 changed something"; }
   if [ -s "$TMP/old_stick_fat.sh" ]; then
     grep -q '^RESULT sb=ro errors=[1-9][0-9]* check=no shutdown=no ' "$TMP/k3old.out" || { cat "$TMP/k3old.out"; fail "kernel k3 negative control: the old boot check did not trip (fixture?)"; }
     ok "kernel boot-4 replica: the old check makes the volume read-only (no fat-check.txt, no fat-shutdown.txt); the new one leaves it read-write"
