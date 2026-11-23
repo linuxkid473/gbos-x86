@@ -211,7 +211,7 @@ for _f in "$REL"/*.tar "$REL/$NAME.manifest" "$REL/gbos86-update.feed"; do
 done
 echo "  set $SETID, seq $SEQ, Google build $GB, commit $COMMIT"
 [ -n "$DELTA" ] && echo "  delta covers seq $(cat "$T/baseseqs")" || echo "  no delta (no earlier update to build it from)"
-[ -n "$GOOGLE" ] && echo "  new-Google-build laptops can rebuild super.img from $GURL (Settings > Experimental features in the app)"
+[ -n "$GOOGLE" ] && echo "  new-Google-build laptops can rebuild super.img from $GURL (Settings > General > Google builds in the app; on by default)"
 echo "  files: $REL"
 
 if [ $UPLOAD = 0 ]; then echo "not uploaded (--no-upload)"; exit 0; fi

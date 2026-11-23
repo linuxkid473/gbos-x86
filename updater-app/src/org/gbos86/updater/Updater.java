@@ -226,7 +226,7 @@ final class Updater {
         if (d.needsSuper && !Prefs.googleDirect(c)) {
             d.kind = Kind.BLOCKED;
             d.message = "Update " + f.seq + " brings a new Google build (" + f.googleBuild + ", you have " + i.googleBuild + "). Update with "
-                    + "the USB stick (menu 1), or turn on Settings > Experimental features > \"Download new Google builds directly from "
+                    + "the USB stick (menu 1), or turn on Settings > General > Google builds > \"Download new Google builds from "
                     + "Google\" (several GB).";
             return d;
         }

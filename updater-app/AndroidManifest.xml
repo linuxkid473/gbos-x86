@@ -2,7 +2,7 @@
 <!-- gbOS86 Updater: finds gbOS86 system updates on the project's GitHub releases (a signed feed), downloads them, and asks the root
      service started by init (hook.sh, sysupdate.sh request) to copy them to GBOSSYS. It never installs anything itself: the next boot
      checks every file against the signature first. See docs/system-update.md.
-     Permissions: INTERNET (the feed, the update, and, only with the experimental setting, Google's image), ACCESS_NETWORK_STATE (the
+     Permissions: INTERNET (the feed, the update, and, for an update that brings a new Google build, Google's image), ACCESS_NETWORK_STATE (the
      check waits for a network), POST_NOTIFICATIONS ("update available"), RECEIVE_BOOT_COMPLETED (the check after a start),
      FOREGROUND_SERVICE(_DATA_SYNC) (a download continues with the window closed). -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"

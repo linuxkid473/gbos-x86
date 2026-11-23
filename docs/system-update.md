@@ -155,13 +155,18 @@ The app's default update source is this checkout's GitHub `origin` (or `REPO=OWN
   the reasons, e.g. `... after the app warned that this system is modified (norecord,unpublished); the user chose "Install anyway"`.
   The first update from the app installs every file and writes a `system.manifest`, so later checks are exact.
 * **Settings**, on two tabs. **General:** check when the laptop starts (on), check once a day (on), delete old boot logs when GBOSSYS is
-  short of space (off), the update source. **Experimental features:** "Download new Google builds directly from Google" (off).
+  short of space (off), "Download new Google builds from Google" (on; a size warning comes before each such download), the update
+  source. **Experimental:** nothing at the moment.
 * **Permissions:** internet, network state (the check waits for a network), notifications (granted by the boot service when it first
   installs the app; "Don't allow" is kept), start at boot, and a foreground service for the download.
 
-### Experimental: new Google builds straight from Google
+### New Google builds straight from Google
 
-With the setting on, an update that brings a new Google build is installed without the stick. The app reads the directory of Google's
+Settings > General > Google builds > "Download new Google builds from Google" is **on by default** since 2026-11-23 (it was an
+experimental opt-in; a user who turned it off keeps it off). Before anything starts, the app shows a "Large download" dialog: the
+GitHub and Google download sizes, the free space needed on the data partition and on GBOSSYS, the time it takes, and a warning when the
+network is metered ("Download anyway"). With the setting on, an update that brings a new Google build is installed without the stick.
+The patches for the new build (usb/patched/, made with `tools/port_build.sh --write`) are part of the signed update itself. The app reads the directory of Google's
 `recovery.zip` with two small range requests, then inflates the raw disk image inside it as one stream: the GPT and the `super` partition's
 liblp metadata come from its first megabytes, the bytes of the six partitions go straight to their place in `super.img` (a Java port of
 `make_super.py`, so the result is byte for byte the published one), and reading stops after the last of them. The zip is never stored. Then

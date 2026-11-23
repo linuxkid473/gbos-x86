@@ -482,10 +482,39 @@ public class MainActivity extends Activity {
     }
 
     private void confirmDownload(Updater.Decision d) {
+        if (d.needsSuper) { confirmGoogleDownload(d); return; }
+        confirmDownloadNow(d);
+    }
+
+    /** A new Google build comes from Google itself: say how big, how long and what it needs, before anything starts. */
+    private void confirmGoogleDownload(Updater.Decision d) {
+        Feed f = d.feed;
+        long sup = f.googleSuper.bytes, git = d.asset == null ? 0 : d.asset.size;
+        android.net.ConnectivityManager cm = getSystemService(android.net.ConnectivityManager.class);
+        boolean metered = cm != null && cm.isActiveNetworkMetered();
+        String msg = "Update " + f.seq + " brings a new Google build (" + f.googleBuild + "). Its system image is Google's, so the app downloads "
+                + "it from Google (dl.google.com) and rebuilds super.img on this laptop.\n\n"
+                + "• Download: " + Util.size(git) + " from GitHub, plus about " + Util.size(sup * 2) + " from Google (at most Google's "
+                + "whole file, about 7.7 GB).\n"
+                + "• Free space needed: about " + Util.size(sup + git * 2 + (64L << 20)) + " on this laptop's data partition while it works, "
+                + "and " + Util.size(sup + (128L << 20)) + " on GBOSSYS.\n"
+                + "• Time: often an hour or more. Keep the laptop plugged in and awake. If the app is closed or the laptop sleeps, Google's "
+                + "part starts over.\n"
+                + (metered ? "\n⚠ This network is metered (mobile data or a data limit). Several GB will count against it: use Wi-Fi without a limit.\n" : "")
+                + "\nNothing from Google is trusted: every partition and the rebuilt image must match the signed update before it is installed.";
+        new AlertDialog.Builder(this)
+                .setTitle("Large download: about " + Util.size(sup * 2 + git))
+                .setMessage(msg)
+                .setPositiveButton(metered ? "Download anyway" : "Continue", (x, y) -> confirmDownloadNow(d))
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void confirmDownloadNow(Updater.Decision d) {
         String msg = d.message + "\n\nIt is downloaded now and installed at the next restart, after its signature and every file are checked "
                 + "again. Your apps and data are kept. If the new system does not finish starting, the previous one comes back by itself.";
         if (d.needsSuper)
-            msg += "\n\nExperimental: the new Google build is downloaded from Google and super.img is rebuilt here. Use Wi-Fi; this can take "
+            msg += "\n\nThe new Google build is downloaded from Google and super.img is rebuilt here. Use Wi-Fi; this can take "
                     + "a long time. Keep the laptop plugged in and awake.";
         new AlertDialog.Builder(this)
                 .setTitle("Download update " + d.feed.seq + "?")

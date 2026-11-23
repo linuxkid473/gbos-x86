@@ -124,6 +124,27 @@ public class SettingsActivity extends Activity {
         contentCol.addView(storageCard);
         addMarginBottom(storageCard, 16);
 
+        // Card: Google builds (the Android system image, super.img), from Google's own download
+        LinearLayout featCard = M3.card(this, 20);
+        featCard.addView(M3.eyebrow(this, "GOOGLE BUILDS"));
+        TextView featTitle = M3.titleLarge(this, "Google system image");
+        featTitle.setPadding(0, M3.dp(this, 4), 0, M3.dp(this, 8));
+        featCard.addView(featTitle);
+
+        featCard.addView(checkTile("Download new Google builds from Google", Prefs.EXP_GOOGLE, Prefs.GOOGLE_DIRECT_DEFAULT,
+                "Some updates bring a new Google build (the Android system image, super.img). It is Google's, so it is not on GitHub: "
+                        + "the app reads Google's official recovery image from dl.google.com, takes only the partitions it needs, and "
+                        + "rebuilds super.img on this laptop. The update's own patches for that build come signed with the update.\n\n"
+                        + "Before it starts, the app shows how much it will download and asks you.\n"
+                        + "• Network: several GB (Google's file is about 7.7 GB; it is read up to the last partition needed). Use Wi-Fi "
+                        + "without a data limit.\n"
+                        + "• Storage: about 4 GB free on this laptop's data partition while it works, and about 3.8 GB on GBOSSYS.\n"
+                        + "• Time: often an hour or more. Keep the laptop plugged in and awake; if the app is closed, Google's part starts over.\n"
+                        + "• Safety: every partition and the result must match the hashes in the signed update before anything is installed.\n\n"
+                        + "Turned off, an update that needs a new Google build is installed with the USB stick (menu 1)."));
+        contentCol.addView(featCard);
+        addMarginBottom(featCard, 16);
+
         // Card 3: Update Source Feed
         LinearLayout sourceCard = M3.card(this, 20);
         sourceCard.addView(M3.eyebrow(this, "UPDATE SOURCE"));
@@ -207,25 +228,10 @@ public class SettingsActivity extends Activity {
         contentCol.addView(warnCard);
         addMarginBottom(warnCard, 16);
 
-        // Feature Card
-        LinearLayout featCard = M3.card(this, 20);
-        featCard.addView(M3.eyebrow(this, "STANDALONE SUPER REBUILD"));
-        TextView featTitle = M3.titleLarge(this, "Google Recovery Image Fetching");
-        featTitle.setPadding(0, M3.dp(this, 4), 0, M3.dp(this, 8));
-        featCard.addView(featTitle);
-
-        featCard.addView(checkTile("Download new Google builds directly from Google", Prefs.EXP_GOOGLE, false,
-                "Some updates bring a new Google build (the Android system image, super.img). Because it is large and proprietary to Google, "
-                        + "it is not hosted on GitHub.\n\n"
-                        + "When enabled, the app downloads Google's official recovery image from dl.google.com, extracts only the necessary "
-                        + "partitions, and rebuilds super.img locally on this laptop.\n\n"
-                        + "• Network: Requires up to ~8 GB download. Use an unmetered Wi-Fi connection.\n"
-                        + "• Resumption: Streaming resumes automatically if dropped, but restarting the app restarts the fetch.\n"
-                        + "• Storage: Requires ~4 GB temporary space on /data and ~3.8 GB on GBOSSYS.\n"
-                        + "• Verification: The result is strictly verified against the signed release manifest before installing.\n\n"
-                        + "Without this setting, updates requiring a new Google build are applied via USB stick (menu 1)."));
-
-        contentCol.addView(featCard);
+        TextView none = M3.body(this, "No experimental features right now. Downloading new Google builds from Google is now under "
+                + "General > Google builds.");
+        none.setPadding(0, M3.dp(this, 4), 0, 0);
+        contentCol.addView(none);
     }
 
     // ---------------------------------------------------------------- UI Helpers
