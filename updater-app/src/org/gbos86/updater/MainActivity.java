@@ -16,6 +16,7 @@ import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.ScrollView;
@@ -67,17 +68,16 @@ public class MainActivity extends Activity {
         int pad = M3.dp(this, 16);
         root.setPadding(pad, pad, pad, pad * 2);
 
-        // ---------------------------------------------------------------- Top App Header
+        // ---------------------------------------------------------------- Top App Header: banner, then title and Settings
+        boolean wide = M3.wide(this);
+        ImageView banner = M3.banner(this, R.drawable.gbos_header, wide ? 4.2f : 2.6f, 20);
+        root.addView(banner, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
         LinearLayout header = new LinearLayout(this);
         header.setOrientation(LinearLayout.HORIZONTAL);
         header.setGravity(Gravity.CENTER_VERTICAL);
-        header.setPadding(0, M3.dp(this, 8), 0, M3.dp(this, 16));
-
-        LinearLayout titleCol = new LinearLayout(this);
-        titleCol.setOrientation(LinearLayout.VERTICAL);
-        titleCol.addView(M3.eyebrow(this, "GOOGLEBOOK OS"));
-        titleCol.addView(M3.headline(this, "System Update"));
-        header.addView(titleCol, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f));
+        header.setPadding(M3.dp(this, 4), M3.dp(this, 16), 0, M3.dp(this, 16));
+        header.addView(M3.headline(this, "System Update"), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f));
 
         Button settingsBtn = M3.tonalButton(this, "Settings", v -> startActivity(new Intent(this, SettingsActivity.class)));
         header.addView(settingsBtn);
@@ -150,8 +150,6 @@ public class MainActivity extends Activity {
         updateActions.addView(stopButton);
 
         updateCard.addView(updateActions);
-        root.addView(updateCard);
-        addMarginBottom(updateCard, 16);
 
         // ---------------------------------------------------------------- Card 2: This Laptop & Integrity
         LinearLayout deviceCard = M3.card(this, 20);
@@ -191,8 +189,7 @@ public class MainActivity extends Activity {
         auditRow.addView(deepButton);
         deviceCard.addView(auditRow);
 
-        root.addView(deviceCard);
-        addMarginBottom(deviceCard, 16);
+
 
         // ---------------------------------------------------------------- Card 3: Install from Folder
         LinearLayout localCard = M3.card(this, 20);
@@ -237,8 +234,7 @@ public class MainActivity extends Activity {
         folderActions.addView(stageFolderButton);
         localCard.addView(folderActions);
 
-        root.addView(localCard);
-        addMarginBottom(localCard, 16);
+
 
         // ---------------------------------------------------------------- Card 4: Maintenance
         actionCard = M3.card(this, 20);
@@ -258,13 +254,30 @@ public class MainActivity extends Activity {
         cancelRow.addView(cancelButton);
         actionCard.addView(cancelRow);
 
-        root.addView(actionCard);
+        // ---------------------------------------------------------------- Layout: two columns on a laptop screen, one on a narrow window
+        // Left: what changes the system (online update, local folder). Right: what is installed now (laptop, integrity, waiting files).
+        if (wide) {
+            LinearLayout cols = new LinearLayout(this);
+            cols.setOrientation(LinearLayout.HORIZONTAL);
+            cols.setBaselineAligned(false);
+            LinearLayout left = column(updateCard, localCard), right = column(deviceCard, actionCard);
+            LinearLayout.LayoutParams llp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f);
+            llp.setMarginEnd(M3.dp(this, 16));
+            cols.addView(left, llp);
+            cols.addView(right, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f));
+            root.addView(cols);
+        } else {
+            for (View card : new View[] {updateCard, deviceCard, localCard, actionCard}) {
+                root.addView(card);
+                addMarginBottom(card, 16);
+            }
+        }
 
-        // Wrap root in responsive scaffold (max width 720dp) inside ScrollView
+        // Wrap root in responsive scaffold (max width 1200dp on a wide screen, 720dp otherwise) inside ScrollView
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
         scroll.setBackgroundColor(M3Theme.surface(this));
-        View scaffold = M3.responsiveScaffold(this, root, 720);
+        View scaffold = M3.responsiveScaffold(this, root, wide ? 1200 : 720);
         scroll.addView(scaffold);
         setContentView(scroll);
 
@@ -274,6 +287,16 @@ public class MainActivity extends Activity {
         CheckJob.schedule(this, false);
         Notifier.cancelAvailable(this);
         refresh(false);
+    }
+
+    private LinearLayout column(View... cards) {
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+        for (View card : cards) {
+            col.addView(card);
+            addMarginBottom(card, 16);
+        }
+        return col;
     }
 
     private void addMarginEnd(View v, int dp) {

@@ -13,6 +13,7 @@ import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
 import android.widget.FrameLayout;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.TextView;
@@ -71,11 +72,22 @@ public final class M3 {
         return card(c, 16);
     }
 
+    /** Width the content gets inside responsiveScaffold: the window minus its side margins, at most maxWidthDp. */
+    public static int contentWidthDp(Context c, int maxWidthDp) {
+        int avail = c.getResources().getConfiguration().screenWidthDp - 32;
+        return maxWidthDp > 0 ? Math.min(maxWidthDp, avail) : avail;
+    }
+
+    /** True when the window is wide enough (a laptop screen, not a phone) for two columns of cards. */
+    public static boolean wide(Context c) {
+        return c.getResources().getConfiguration().screenWidthDp >= 840;
+    }
+
     public static View responsiveScaffold(Context c, View innerContent, int maxWidthDp) {
         FrameLayout outer = new FrameLayout(c);
         outer.setBackgroundColor(M3Theme.surface(c));
         FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
-                maxWidthDp > 0 ? dp(c, maxWidthDp) : FrameLayout.LayoutParams.MATCH_PARENT,
+                maxWidthDp > 0 ? dp(c, contentWidthDp(c, maxWidthDp)) : FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.WRAP_CONTENT,
                 Gravity.CENTER_HORIZONTAL
         );
@@ -83,6 +95,26 @@ public final class M3 {
         lp.setMargins(horiz, 0, horiz, 0);
         outer.addView(innerContent, lp);
         return outer;
+    }
+
+    /**
+     * A banner picture with rounded corners, drawn at width / aspect height and cropped to the middle (the picture's own
+     * edges are empty background, so a wide window shows a thinner band of the same artwork).
+     */
+    public static ImageView banner(Context c, int drawableRes, float aspect, int radiusDp) {
+        ImageView v = new ImageView(c) {
+            @Override
+            protected void onMeasure(int w, int h) {
+                int width = View.MeasureSpec.getSize(w);
+                setMeasuredDimension(width, Math.round(width / aspect));
+            }
+        };
+        v.setImageResource(drawableRes);
+        v.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        v.setBackground(roundRect(M3Theme.surfaceContainer(c), dp(c, radiusDp)));
+        v.setClipToOutline(true);
+        v.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        return v;
     }
 
     // -------------------------------------------------------------------------------- Buttons
