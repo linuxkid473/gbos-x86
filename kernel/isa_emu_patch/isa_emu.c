@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  * Userspace emulation of x86 instructions that Skylake-family CPUs lack
- * (GFNI, AVX-VNNI(-INT8), SHA-NI, 256-bit VAES/VPCLMULQDQ, AVX-IFMA).
+ * (GFNI, AVX-VNNI(-INT8), SHA-NI, 256-bit VAES/VPCLMULQDQ, AVX-IFMA), and the ADX
+ * instructions (ADCX/ADOX) that Haswell lacks.
  * Entered from the #UD handler for user-mode faults. AVX-512 and AMX are not handled.
  */
 #include <linux/sched.h>
@@ -17,6 +18,7 @@
 #include <linux/spinlock.h>
 #include <linux/sort.h>
 #include <linux/string.h>
+#include <linux/stddef.h>
 #include <asm/insn.h>
 #include <asm/insn-eval.h>
 #include <asm/ptrace.h>
@@ -47,6 +49,7 @@ enum op_kind {
 	K_NONE, K_GF2P8MUL, K_GF2P8AFF, K_GF2P8AFFINV, K_VNNI_BUSD, K_VNNI_WSSD, K_VNNI8,
 	K_IFMA_L, K_IFMA_H, K_VAES, K_CLMUL,
 	K_SHA1NEXTE, K_SHA1MSG1, K_SHA1MSG2, K_SHA256RNDS2, K_SHA256MSG1, K_SHA256MSG2, K_SHA1RNDS4,
+	K_ADCX, K_ADOX,		/* general-purpose registers, handled by try_adx() */
 };
 
 struct op {
@@ -248,6 +251,85 @@ static void do_emulate(struct op *o, struct xregs_state *xs, const u8 *mem)
 	vreg_store(xs, o->dst, len, d, o->vex);
 }
 
+/* ---- ADX: ADCX/ADOX on general-purpose registers (no FPU state) ---- */
+
+/* ModRM register number -> pt_regs slot */
+static const unsigned short gpr_off[16] = {
+	offsetof(struct pt_regs, ax), offsetof(struct pt_regs, cx), offsetof(struct pt_regs, dx),
+	offsetof(struct pt_regs, bx), offsetof(struct pt_regs, sp), offsetof(struct pt_regs, bp),
+	offsetof(struct pt_regs, si), offsetof(struct pt_regs, di), offsetof(struct pt_regs, r8),
+	offsetof(struct pt_regs, r9), offsetof(struct pt_regs, r10), offsetof(struct pt_regs, r11),
+	offsetof(struct pt_regs, r12), offsetof(struct pt_regs, r13), offsetof(struct pt_regs, r14),
+	offsetof(struct pt_regs, r15),
+};
+
+static unsigned long *gpr(struct pt_regs *regs, int n)
+{
+	return (unsigned long *)((char *)regs + gpr_off[n]);
+}
+
+/*
+ * ADCX Gy,Ey = 66 [REX] 0F 38 F6 /r (dst += src + CF, sets CF only)
+ * ADOX Gy,Ey = F3 [REX] 0F 38 F6 /r (dst += src + OF, sets OF only)
+ * BoringSSL's bn_mulx4x_mont / bn_sqrx8x_internal / ecp_nistz256 *x paths use them unconditionally in
+ * Google's builds (compiled for an ADX-capable CPU). The 66 here is a mandatory prefix, not an operand-size
+ * override: the operand is 64-bit with REX.W, else 32-bit (zero-extended into the destination).
+ * Returns K_ADCX/K_ADOX once the instruction was handled (emulated, or SIGSEGV sent), else K_NONE.
+ */
+static int try_adx(struct insn *insn, struct pt_regs *regs)
+{
+	insn_byte_t p;
+	u8 modrm, rex = 0;
+	int i, pfx = 0, wide, reg, cout, kind;
+	unsigned long flag, *dst;
+	u64 src = 0;
+
+	if (insn->vex_prefix.nbytes || insn->opcode.nbytes != 3 || insn->opcode.bytes[0] != 0x0f ||
+	    insn->opcode.bytes[1] != 0x38 || insn->opcode.bytes[2] != 0xf6)
+		return K_NONE;
+	for_each_insn_prefix(insn, i, p) {
+		if (p == 0x66)
+			pfx |= 1;
+		else if (p == 0xf3)
+			pfx |= 2;
+		else if (p == 0xf2 || p == 0xf0)
+			return K_NONE;		/* not ADX (LOCK is #UD on real hardware too) */
+	}
+	if (pfx != 1 && pfx != 2)
+		return K_NONE;
+	if (insn->rex_prefix.nbytes) {
+		if (insn->rex_prefix.nbytes != 1)
+			return K_NONE;		/* REX2 (APX) */
+		rex = insn->rex_prefix.value;
+	}
+	kind = pfx == 1 ? K_ADCX : K_ADOX;
+	modrm = insn->modrm.value;
+	wide = !!X86_REX_W(rex);
+	reg = X86_MODRM_REG(modrm) + (X86_REX_R(rex) ? 8 : 0);
+
+	if (X86_MODRM_MOD(modrm) == 3) {
+		src = *gpr(regs, X86_MODRM_RM(modrm) + (X86_REX_B(rex) ? 8 : 0));
+	} else {
+		void __user *addr = insn_get_addr_ref(insn, regs);
+
+		if (addr == (void __user *)-1L)
+			return K_NONE;
+		if (copy_from_user(&src, addr, wide ? 8 : 4)) {
+			force_sig_fault(SIGSEGV, SEGV_MAPERR, addr);
+			return kind;
+		}
+	}
+
+	flag = kind == K_ADCX ? X86_EFLAGS_CF : X86_EFLAGS_OF;
+	dst = gpr(regs, reg);
+	*dst = emu_adx(*dst, src, !!(regs->flags & flag), wide, &cout);
+	if (cout)
+		regs->flags |= flag;
+	else
+		regs->flags &= ~flag;
+	regs->ip += insn->length;
+	return kind;
+}
 
 /* ---- profile: which (file, offset) traps most ---- */
 #define PROF_SLOTS 16384
@@ -338,6 +420,20 @@ static void prof_dump(void)
 			prof[top[i]].kind, prof[top[i]].off, prof[top[i]].path);
 }
 
+/* Statistics for one emulated instruction at `ip`. */
+static void count_hit(unsigned long ip, int kind)
+{
+	static atomic64_t total;
+	long n = atomic64_inc_return(&total);
+
+	prof_hit(ip, kind);
+	if (!(n & 0xfffff)) {
+		pr_info("isa_emu: %ld instructions emulated (last: %s[%d] kind=%d)\n",
+			n, current->comm, task_pid_nr(current), kind);
+		prof_dump();
+	}
+}
+
 bool isa_emu_handle_ud(struct pt_regs *regs)
 {
 	unsigned char buf[MAX_INSN_SIZE];
@@ -345,14 +441,20 @@ bool isa_emu_handle_ud(struct pt_regs *regs)
 	struct op o;
 	u8 mem[32];
 	struct xregs_state *xs;
-	int nbuf;
+	unsigned long ip = regs->ip;
+	int nbuf, kind;
 
-	if (!isa_emu_enabled || !user_mode(regs) || !boot_cpu_has(X86_FEATURE_XSAVE))
+	if (!isa_emu_enabled || !user_mode(regs))
 		return false;
 	nbuf = insn_fetch_from_user(regs, buf);
 	if (nbuf <= 0 || !insn_decode_from_regs(&insn, regs, buf, nbuf))
 		return false;
-	if (!classify(&insn, &o))
+	kind = try_adx(&insn, regs);
+	if (kind != K_NONE) {
+		count_hit(ip, kind);
+		return true;
+	}
+	if (!boot_cpu_has(X86_FEATURE_XSAVE) || !classify(&insn, &o))
 		return false;
 
 	if (o.rm < 0) {
@@ -386,16 +488,6 @@ bool isa_emu_handle_ud(struct pt_regs *regs)
 	fpu_emu_end();
 
 	regs->ip += insn.length;
-	{
-		static atomic64_t total;
-		long n = atomic64_inc_return(&total);
-
-		prof_hit(regs->ip - insn.length, o.kind);
-		if (!(n & 0xfffff)) {
-			pr_info("isa_emu: %ld instructions emulated (last: %s[%d] kind=%d)\n",
-				n, current->comm, task_pid_nr(current), o.kind);
-			prof_dump();
-		}
-	}
+	count_hit(regs->ip - insn.length, o.kind);
 	return true;
 }

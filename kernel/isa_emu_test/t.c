@@ -1,4 +1,5 @@
-/* Freestanding test: runs instructions Skylake lacks and checks against known answers / native oracles. */
+/* Freestanding test: runs instructions Skylake (and, for ADX, Haswell) lacks and checks against known answers /
+ * native oracles. `run_qemu.py KERNEL Haswell` exercises the ADX emulation (QEMU's Skylake-Client has ADX). */
 #include <immintrin.h>
 #include <stdint.h>
 
@@ -191,6 +192,37 @@ void _start_c(void)
 		__m256i full = _mm256_zextsi128_si256(r); (void)all; (void)full;
 		uint32_t o[4]; _mm_storeu_si128((void *)o, r);
 		check("vpdpbusd xmm (4)", o[0] == 4);
+	}
+	/* ADX (Haswell lacks it; run with CPU=Haswell so QEMU raises #UD): two interleaved carry chains as in
+	 * BoringSSL's bn_mulx4x_mont. ADCX must leave OF alone and ADOX must leave CF alone. */
+	{
+		uint64_t a[4] = { ~0ULL, ~0ULL, 5, ~0ULL }, b[4] = { 1, 0, 7, 0 };
+		uint64_t c[4] = { 0x8000000000000000ULL, 0x8000000000000000ULL, 1, 2 }, m[3] = { 0x8000000000000000ULL, 0, 3 };
+		uint64_t mem = 0x8000000000000000ULL;
+		unsigned char cf, of;
+		uint32_t w = 0xffffffffu;
+		uint64_t wide = 0xdeadbeefffffffffULL;
+		__asm__ volatile(
+			"test %[a0],%[a0]\n"			/* CF = OF = 0 */
+			"adcx %[b0],%[a0]\n adox %[m0],%[c0]\n"
+			"adcx %[b1],%[a1]\n adox %[m1],%[c1]\n"
+			"adcx %[b2],%[a2]\n adox %[m2],%[c2]\n"
+			"adcx %[b3],%[a3]\n adox %[mem],%[c3]\n"	/* m1, m2, mem: memory operands */
+			"setc %[cf]\n seto %[of]\n"
+			: [a0] "+r"(a[0]), [a1] "+r"(a[1]), [a2] "+r"(a[2]), [a3] "+r"(a[3]),
+			  [c0] "+r"(c[0]), [c1] "+r"(c[1]), [c2] "+r"(c[2]), [c3] "+r"(c[3]), [cf] "=m"(cf), [of] "=m"(of)
+			: [b0] "r"(b[0]), [b1] "r"(b[1]), [b2] "r"(b[2]), [b3] "r"(b[3]),
+			  [m0] "r"(m[0]), [m1] "m"(m[1]), [m2] "m"(m[2]), [mem] "m"(mem)
+			: "cc");
+		/* a: ff..ff+1 -> 0 c1; ff..ff+0+1 -> 0 c1; 5+7+1 = 13 c0; ff..ff+0+0 = ff..ff c0
+		 * c: 8..0+8..0 -> 0 o1; 8..0+0+1 = 8..01 o0; 1+3 = 4 o0; 2+8..0 = 8..02 o0 */
+		check("adcx/adox interleaved chains",
+		      !a[0] && !a[1] && a[2] == 13 && a[3] == ~0ULL && !cf &&
+		      !c[0] && c[1] == 0x8000000000000001ULL && c[2] == 4 && c[3] == 0x8000000000000002ULL && !of);
+		__asm__ volatile("stc\n adcx %[one],%[w]\n setc %[cf]\n" : [w] "+r"(w), [cf] "=m"(cf) : [one] "r"(0u) : "cc");
+		check("adcx r32 (ffffffff+0+CF = 0, CF=1)", w == 0 && cf == 1);
+		__asm__ volatile("stc\n adcx %[z],%k[x]\n setc %[cf]\n" : [x] "+r"(wide), [cf] "=m"(cf) : [z] "r"(0u) : "cc");
+		check("adcx r32 zero-extends into r64", wide == 0 && cf == 1);
 	}
 	puts_(fails ? "ISA_EMU_TEST_FAIL\n" : "ISA_EMU_TEST_PASS\n");
 	sc3(169, 0xfee1dead, 0x28121969, 0x4321fedc); /* reboot(POWER_OFF) */
