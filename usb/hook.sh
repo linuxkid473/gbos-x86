@@ -503,8 +503,12 @@ gbos_gpu_enable() {
   gbos_gpu_bind "libgbm (amdgpu backend)" libgbm.amdgpu.so $V/lib64/libgbm.so $GBOS_LIBGBM_SHA
   # RADV (Mesa's AMD Vulkan driver, tools/radv-android/build.sh) when it is on the stick and an amdgpu card is bound; otherwise (or when it
   # cannot be bound) SwiftShader. GPU_VULKAN in gbos.cfg: auto (default), radv, swiftshader.
-  if [ "$(gbos_gpu_vulkan)" = radv ] && gbos_gpu_bind "Vulkan driver (RADV, AMD GPU)" vulkan.radv.so $V/lib64/hw/vulkan.intel.so $GBOS_VKINTEL_SHA; then :
-  else gbos_gpu_bind "Vulkan driver (SwiftShader, CPU)" vulkan.swiftshader.so $V/lib64/hw/vulkan.intel.so $GBOS_VKINTEL_SHA || GPU_SW=0
+  # GPU_VK records which one is bound: with RADV the GPU renders, so only SwiftShader counts as software rendering for the UI
+  # (ro.gbos.software_rendering below: optimize.sh turns the animations off only then; issue 53).
+  GPU_VK=
+  if [ "$(gbos_gpu_vulkan)" = radv ] && gbos_gpu_bind "Vulkan driver (RADV, AMD GPU)" vulkan.radv.so $V/lib64/hw/vulkan.intel.so $GBOS_VKINTEL_SHA; then GPU_VK=radv
+  elif gbos_gpu_bind "Vulkan driver (SwiftShader, CPU)" vulkan.swiftshader.so $V/lib64/hw/vulkan.intel.so $GBOS_VKINTEL_SHA; then GPU_VK=swiftshader
+  else GPU_SW=0
   fi
 }
 # --- end software rendering ---
@@ -1306,7 +1310,9 @@ DROP='^ro.boot.hypervisor.protected_vm.supported=|^ro.surface_flinger.has_wide_c
   if [ "$GPU_SW" = 1 ]; then
     echo "ro.surface_flinger.supports_background_blur=0"
     # Read by optimize.sh: animations and window blur are only switched off while the CPU composites (hardware GPUs keep Google's defaults).
-    echo "ro.gbos.software_rendering=1"
+    # Not with RADV: GPU_SW=1 also covers amdgpu with a hardware Vulkan driver (gralloc, HWC props), and setting this there zeroed the
+    # animation scales on every boot (issue 53, Ryzen AI 7 350 / Radeon 860M).
+    [ "$GPU_VK" = radv ] || echo "ro.gbos.software_rendering=1"
     echo "persist.sys.sf.disable_blurs=1"
     echo "ro.launcher.blur.appLaunch=0"
     # Hardware cursor & overlay planes:
