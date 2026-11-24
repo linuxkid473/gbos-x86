@@ -175,7 +175,8 @@ def render(values):
 def main():
     if sys.argv[1] == '--check':
         resolved = parse(open(sys.argv[2]).read())
-        bad = {k: resolved.get(k, 'n') for k in REQUIRED if resolved.get(k, 'n') != OVERRIDES[k]}
+        want = {**GENERIC, **OVERRIDES}  # REQUIRED names come from either table (VMD is a GENERIC one)
+        bad = {k: resolved.get(k, 'n') for k in REQUIRED if resolved.get(k, 'n') != want[k]}
         missed = {k: resolved.get(k, 'n') for k, v in OVERRIDES.items() if resolved.get(k, 'n') != v}
         print('not resolved as requested:', missed or 'none')
         gmiss = sorted(k for k, v in GENERIC.items() if resolved.get(k, 'n') != v)
