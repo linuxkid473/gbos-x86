@@ -91,6 +91,27 @@ tools/verify_system_update.sh build/system-updates/gbos86-update-...   # the dev
   the laptop when its build-tied hashes match the stick's files. `deploy_stick.sh` deletes a stick's `system.manifest` when it changes
   files, because the manifest would no longer describe the stick.
 
+## Releasing from main (maintainer): `tools/release.sh`
+
+One command wraps everything below with the checks first; nothing is uploaded until all pass:
+
+```sh
+tools/release.sh check --tree /path/to/stick/gbos                     # checks only, no key needed
+tools/release.sh publish --key /media/offline-stick/gbos86-key/sysupdate-private.pem --tree /path/to/stick/gbos [--dry-run]
+```
+
+1. **git:** on `main` (`--branch`), no uncommitted changes in `usb/ lapis/ tools/ updater-app/`, `HEAD` = `origin/main`.
+2. **Google build:** `lapis/BUILD` and `usb/patched/MANIFEST` name the same build (else `tools/port_build.sh --write`); the tree's
+   `super.img` is that build (dump.erofs, when the `gbos-erofs` image exists).
+3. **Key:** `usb/sysupdate.pub` is a real key, and the private key's public half.
+4. **Tests:** `sh -n`, `test_system_update.sh`, `test_updater_core.sh`.
+5. **Googlebook OS check** (what the app's Googlebook OS card needs before it offers "Download Rn and install"): reads the published
+   feed. A newer Google build than published needs Google's `recovery.zip` still served and `super_parts.py` proving `super.img` from
+   `lapis/parts` (which must be that build), so the feed gets its Google lines; otherwise it stops (`--allow-stick-only` publishes
+   without them, laptops then use the stick). An older Google build than published is refused. `--check-google` also runs
+   `tools/check_new_build.sh`.
+6. Runs `publish_system_update.sh` (it asks before uploading), then downloads the live feed and checks it is the one just signed.
+
 ## Publishing an update on GitHub (maintainer)
 
 ```sh

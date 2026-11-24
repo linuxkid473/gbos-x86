@@ -188,8 +188,9 @@ mk_src "$T/sy" 16000001 vy; sed -i 's/^gbos_sysupdate_stage0$/: no hook/' "$T/sy
 install_set "$B1"; _s=$(snap); inbox "$B2"; mkdir -p "$G/logs/boot-$BOOTN"
 (export SYSUPDATE_TEST_FREE_KB=10; EB boot "$G" "$G/logs/boot-$BOOTN" "$BOOTN" --efi-dir "$EFI") >/dev/null 2>&1; BOOTN=$((BOOTN + 1))
 check "refused: not enough space to switch" "[ \"\$(snap)\" = \"\$_s\" ] && grep -q 'needs .* KB free' '$G/update/status.txt'"
-install_set "$B1"; cp "$ROOT/usb/sysupdate.pub" "$G/sysupdate.pub"; _s=$(snap); inbox "$B2"
-check "refused: no key installed (the repo's placeholder)" "[ \$(boot) = 0 ] && [ \"\$(snap)\" = \"\$_s\" ] && grep -q 'no signing key' '$G/update/status.txt'"
+# the placeholder as the repo first shipped it (the repo's own file holds the real key once the maintainer commits it)
+install_set "$B1"; printf 'gbos86-sysupdate-key 1\nnone: no signing key is installed\n' > "$G/sysupdate.pub"; _s=$(snap); inbox "$B2"
+check "refused: no key installed (the placeholder)" "[ \$(boot) = 0 ] && [ \"\$(snap)\" = \"\$_s\" ] && grep -q 'no signing key' '$G/update/status.txt'"
 install_set "$B1"; echo SYSUPDATE=0 >> "$G/gbos.cfg"; inbox "$B2"
 check "SYSUPDATE=0 leaves the inbox alone" "[ \$(boot) = 0 ] && [ -n \"\$(ls '$G/update.inbox')\" ] && [ ! -f '$G/update/state' ]"
 

@@ -300,6 +300,7 @@ driver inside Google's userspace under QEMU.
 | `usb/install.sh` | NVMe/eMMC/SATA installer and updater (`MODE=install`) |
 | `usb/sysupdate.sh`, `usb/sysupdate.pub` | system updates without the stick: signed bundles, checked and switched in by stage0 (from `early_patch.sh`), rollback; the public key (placeholder until the project's is committed). [`docs/system-update.md`](docs/system-update.md) |
 | `updater-app/` | the gbOS86 Updater app (plain Java, `updater-app/build.sh`): checks the signed feed on GitHub, downloads updates (experimental: a new Google build straight from Google), stages them through a root init service, and checks the system for modifications |
+| `tools/release.sh` | the maintainer's release command: every check (git, Google build, key, tests, Googlebook OS feed lines), then publish |
 | `tools/publish_system_update.sh`, `tools/super_parts.py` | publish a signed update on GitHub releases for the app; prove `super.img` can be rebuilt from Google's download |
 | `usb/apex_patch.sh` | binds the patched libcrypto over the APEX copies (run from init.rc) |
 | `usb/gbos.cfg` | user settings: `MODE` (ask/live/install/boot), `DENSITY`, `RESOLUTION`, `LOAD_I915`, ... |
