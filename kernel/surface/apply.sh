@@ -21,18 +21,23 @@ SRC=${SRC:-/build/src}
 cd "$SRC"
 
 # git apply, not patch: the gbos-kbuild image (kernel/docker/Dockerfile) has git but no patch(1). It works on a plain tree (no .git).
-apply_once() { # patch file, a file that exists once it is applied
-  if [ -e "$2" ] && git apply -p1 -R --check "$1" >/dev/null 2>&1; then
-    echo "surface: already applied $(basename "$1")"
+# Idempotent through a stamp per patch in .gbos-surface/ (a reverse check cannot tell: 0002 changes the files 0001 adds).
+STAMP=.gbos-surface
+mkdir -p $STAMP
+apply_once() { # patch file
+  n=$(basename "$1")
+  if [ -f "$STAMP/$n" ]; then
+    echo "surface: already applied $n"
   else
     git apply -p1 "$1"
-    echo "surface: applied $(basename "$1")"
+    : > "$STAMP/$n"
+    echo "surface: applied $n"
   fi
 }
-apply_once $P/0001-mwifiex-Add-quirk-resetting-the-PCI-bridge-on-MS-Sur.patch drivers/net/wireless/marvell/mwifiex/pcie_quirks.c
-apply_once $P/0002-mwifiex-pcie-disable-bridge_d3-for-Surface-gen4.patch drivers/net/wireless/marvell/mwifiex/pcie_quirks.c
-apply_once $P/0003-hid-Add-support-for-Intel-Precise-Touch-and-Stylus.patch drivers/hid/ipts/main.c
-apply_once $P/0004-hid-ipts-Fix-size-of-synthesized-HID-data-report.patch drivers/hid/ipts/main.c
+apply_once $P/0001-mwifiex-Add-quirk-resetting-the-PCI-bridge-on-MS-Sur.patch
+apply_once $P/0002-mwifiex-pcie-disable-bridge_d3-for-Surface-gen4.patch
+apply_once $P/0003-hid-Add-support-for-Intel-Precise-Touch-and-Stylus.patch
+apply_once $P/0004-hid-ipts-Fix-size-of-synthesized-HID-data-report.patch
 
 python3 - drivers/iommu/intel/iommu.c <<'EOF'
 import sys
