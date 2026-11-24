@@ -787,6 +787,43 @@ DROP='^ro.boot.hypervisor.protected_vm.supported=|^ro.surface_flinger.has_wide_c
   fi
 } > /tmp/vendor.build.prop && mount --bind /tmp/vendor.build.prop /new/vendor/build.prop \
   && log "hook: vendor build.prop: protected_vm.supported hidden, sRGB-only display, lcd_density=${DENSITY:-stock}, software GPU props=${GPU_SW:-0}"
+# On AMD CPUs, Intel Houdini (libhoudini.so) fails to initialize (0x00010002), breaking all
+# arm64-only apps such as SettingsIntelligence (Settings search). Switch to Berberis
+# (libndk_translation.so), which is already present in the image and activates via berberis_arm_or_arm64.rc.
+if grep -q 'AuthenticAMD' /proc/cpuinfo 2>/dev/null && [ -f /new/system/lib64/libndk_translation.so ]; then
+  _nb_i=0
+  for _nb_f in /new/system/build.prop /new/system/etc/prop.default /new/system_ext/etc/build.prop /new/product/etc/build.prop /new/vendor/default.prop /new/vendor/build.prop /new/odm/etc/build.prop; do
+    if [ -f "$_nb_f" ] && grep -q '^ro\.dalvik\.vm\.native\.bridge=libhoudini\.so$' "$_nb_f" 2>/dev/null; then
+      _nb_i=$((_nb_i + 1))
+      sed 's/^ro\.dalvik\.vm\.native\.bridge=libhoudini\.so$/ro.dalvik.vm.native.bridge=libndk_translation.so/' "$_nb_f" > "/tmp/nb_prop_${_nb_i}.prop" \
+        && mount --bind "/tmp/nb_prop_${_nb_i}.prop" "$_nb_f" \
+        && log "hook: AMD CPU: switched native.bridge to libndk_translation.so in $_nb_f"
+    fi
+  done
+  [ "$_nb_i" = 0 ] && log "hook: AMD CPU: ro.dalvik.vm.native.bridge=libhoudini.so not found in checked prop files"
+fi
+# On non-Intel GPUs (GPU_SW=1, e.g. amdgpu), Intel VA-API (iHD_drv_video.so) cannot open the
+# DRM render node and libdesktop_camera_common panics with Option::unwrap() on None in
+# HardwareJpegDecoderVaapi. Disable hardware JPEG decoding so the USB camera HAL falls back
+# to software MJPEG decoding (mjpg_to_nv12).
+if [ "$GPU_SW" = 1 ] && [ -f /new/vendor/etc/camera/internal_usb_camera_info.txtpb ]; then
+  sed 's/^use_hardware_jpeg_decoder: true$/use_hardware_jpeg_decoder: false/' /new/vendor/etc/camera/internal_usb_camera_info.txtpb > /tmp/internal_usb_camera_info.txtpb \
+    && mount --bind /tmp/internal_usb_camera_info.txtpb /new/vendor/etc/camera/internal_usb_camera_info.txtpb \
+    && log "hook: USB camera: disabled VA-API hardware JPEG decoder (non-Intel GPU)"
+fi
+# Vulkan stream manipulators (VcEffects, StreamAdapter, CropRotate) fail on non-Intel Vulkan
+# (RADV/SwiftShader reporting Vulkan 1.1) because vulkano requires Vulkan 1.2 or
+# khr_image_format_list for ext_image_drm_format_modifier, aborting camera open (-38).
+# Disable stream_manipulators when GPU_SW=1 for direct USB camera passthrough.
+if [ "$GPU_SW" = 1 ] && [ -f /new/vendor/etc/camera/effect_config_usb.json ]; then
+  cat > /tmp/effect_config_usb.json << 'EOF'
+{
+    "stream_manipulators": []
+}
+EOF
+  mount --bind /tmp/effect_config_usb.json /new/vendor/etc/camera/effect_config_usb.json \
+    && log "hook: USB camera: disabled Vulkan stream_manipulators in effect_config_usb.json (non-Intel GPU)"
+fi
 # Only one Trusty VM may own CID 200: drop the plain launcher's auto-start so the on-demand
 # (accessor-registering) launcher runs it, falling back to non-protected by itself.
 R=/new/system_ext/etc/init/desktop-trusty_security_vm_launcher.rc
