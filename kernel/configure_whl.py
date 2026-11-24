@@ -73,7 +73,7 @@ _y('WLAN_VENDOR_REALTEK', 'WLAN_VENDOR_MEDIATEK', 'WLAN_VENDOR_ATH', 'WLAN_VENDO
 # MWIFIEX_SDIO: Google Pixelbook (2017, "Eve") Wi-Fi is an SDIO 88W8897 (UNCONFIRMED): hwdetect shows no network device on PCI or USB.
 _m('MWIFIEX', 'MWIFIEX_PCIE', 'MWIFIEX_USB', 'MWIFIEX_SDIO')
 _m('IWLDVM', 'RTW88', 'RTW88_PCI', 'RTW88_8822BE', 'RTW88_8822CE', 'RTW88_8723DE', 'RTW88_8821CE',
-   'RTW89', 'RTW89_PCI', 'RTW89_8852AE', 'RTW89_8852BE', 'RTW89_8852CE', 'RTW89_8851BE', 'RTW89_8922AE',
+   'RTW89', 'RTW89_PCI', 'RTW89_8852AE', 'RTW89_8852BE', 'RTW89_8852BTE', 'RTW89_8852CE', 'RTW89_8851BE', 'RTW89_8922AE',
    'MT76_CORE', 'MT7921E', 'MT7921U', 'MT7925E', 'MT7615E', 'MT76x2E',
    'ATH10K', 'ATH10K_PCI', 'ATH11K', 'ATH11K_PCI', 'ATH12K', 'BRCMFMAC', 'BRCMFMAC_PCIE', 'BRCMFMAC_USB')
 # Bluetooth (USB btusb covers Intel/Realtek/MediaTek/Qualcomm/Broadcom; Intel 8087:* on USB, newer on PCIe).
@@ -122,6 +122,10 @@ _m('DELL_LAPTOP', 'DELL_WMI', 'DELL_SMBIOS', 'DELL_WMI_DESCRIPTOR', 'THINKPAD_AC
    'FUJITSU_LAPTOP', 'PANASONIC_LAPTOP', 'LG_LAPTOP', 'INTEL_HID_EVENT', 'INTEL_VBTN', 'INTEL_WMI_SBL_FW_UPDATE',
    'INTEL_PMC_CORE', 'INT3400_THERMAL', 'INT340X_THERMAL', 'INTEL_RAPL', 'X86_PKG_TEMP_THERMAL', 'WMI',
    'CHROME_PLATFORMS', 'ACPI_WMI', 'RFKILL_INPUT')
+# AMD s2idle: without amd_pmc the SoC never reaches S0i3 during suspend (amdgpu logs "Power consumption will be higher as the kernel
+# has not been compiled with CONFIG_AMD_PMC", ~40% battery overnight; issue 51). Binds by ACPI id (AMDI0005..) through coldplug.
+# AMD_PMF is left out: it needs AMDTEE + AMD_SFH_HID and is not required for S0i3.
+_m('AMD_PMC')
 # Storage / card reader / webcam / ethernet
 _y('MMC', 'USB_VIDEO_CLASS')
 _m('MMC_SDHCI', 'MMC_SDHCI_PCI', 'MMC_REALTEK_PCI', 'MISC_RTSX_PCI', 'MISC_RTSX_USB', 'R8169', 'E1000E', 'IGC',
