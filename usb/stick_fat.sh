@@ -433,13 +433,28 @@ gbos_fat_watch() { # DEV MP LOGDIR CLEAR [COPIER_SUBSHELL COPIER_CAT]
   done
 }
 
+# Kernel lines that say the stick stopped taking writes (FAT error, I/O error, USB reset or disconnect, SCSI offline).
+GBOS_FAT_ERRPAT=${GBOS_FAT_ERRPAT:-'FAT-fs \(|I/O error|USB disconnect|reset (high|super|Super)|rejecting I/O|offline device|Remounting filesystem read-only'}
+
+# One line now: uptime, kmsg.log's size as Linux sees it, whether the copier's cat still runs, the superblock state.
+gbos_fat_status() { # MP LOGDIR COPIER_CAT PROC
+  _su=?; [ -r "$4/uptime" ] && read -r _su _sv < "$4/uptime"
+  _sk=$($GBOS_FAT_BB stat -c %s "$2/kmsg.log" 2>"$GBOS_FAT_NULL") || _sk=
+  _sc=dead; [ -z "$3" ] && _sc="not found"; [ -n "$3" ] && kill -0 "$3" 2>"$GBOS_FAT_NULL" && _sc=alive
+  echo "uptime ${_su} s: kmsg.log ${_sk:-?} bytes, kmsg copier cat ${_sc}, superblock $(gbos_fat_sb_state "$1" "$4" || echo ?)"
+}
+
 gbos_fat_shutdown() { # KMSG_SECONDS DEV MP LOGDIR CLEAR [COPIER_SUBSHELL COPIER_CAT]
-  # This line reaches kmsg.log through the copier, which still runs: the last line of that log. Nothing else is written to the volume
-  # unless something fails. It also says whether the volume is read-only already (a FAT error this boot, see gbos_fat_kmsg_fat_events):
+  # This line reaches kmsg.log through the copier, which still runs: the last line of that log. Besides the status line below, nothing
+  # else is written to the volume unless something fails. It also says whether the volume is read-only already (a FAT error this boot, see gbos_fat_kmsg_fat_events):
   # then the remount has nothing to do, and nothing was written to the volume since that error but files that were already open.
   _sx=; [ "$(gbos_fat_sb_state "$3" "$GBOS_FAT_RT/proc")" = ro ] && _sx="; $3 is ALREADY read-only (a FAT error earlier this boot?)"
   echo "<5>gbos-fat: shutdown: init reached its unmount step at $1 s; stopping the kmsg copier, remounting $3 read-only$([ "$5" = 1 ] && echo ' and clearing the dirty flag' || echo ', leaving the dirty flag as it is')$_sx (end of this log)" >&4
   [ -n "${GBOS_FAT_SYNC_PID:-}" ] && kill -KILL "$GBOS_FAT_SYNC_PID" 2>/dev/null   # KILL: it inherits the watcher's ignored TERM
+  # Written while the volume is still writable, so the next boot sees how this boot ended: whether kmsg.log still grew, the copier ran,
+  # and what held the volume open. No line after it but a FAILED one means the remount worked.
+  { echo "shutdown step at $1 s: $(gbos_fat_status "$3" "$4" "$7" "$GBOS_FAT_RT/proc")"; gbos_fat_writers "$3" "$GBOS_FAT_RT/proc" "$GBOS_FAT_RT/sys"
+  } >> "$4/fat-shutdown.txt" 2>"$GBOS_FAT_NULL"
   $GBOS_FAT_BB sleep 0.05
   gbos_fat_stop_copier "$6" "$7"
   gbos_fat_finish "$2" "$3" "$4/fat-shutdown.txt" "$GBOS_FAT_RT/proc" "$GBOS_FAT_RT/sys" "$GBOS_FAT_RT/blk" "$GBOS_FAT_RT" "$5"
@@ -450,8 +465,22 @@ gbos_fat_shutdown() { # KMSG_SECONDS DEV MP LOGDIR CLEAR [COPIER_SUBSHELL COPIER
 # forced power-off cost every logcat file rotated during the boot, not only the open one: boot 6 left logcat.txt.01-.05 at 0 bytes, and
 # chkdsk deleted all six of boot 11's (HANDOFF.md 2026-11-24). A background child of stage0 like the watcher, so it outlives switch_root
 # (busybox at /gbos/busybox, the mount point is still /gbos). gbos.cfg FAT_SYNC_S=seconds, 0 = off.
-gbos_fat_syncer() { # MP SECONDS
+#
+# Before each sync it appends one gbos_fat_status line to LOGDIR/fat-heartbeat.txt (FAT_HEARTBEAT=1, the default; at most
+# FAT_HEARTBEAT_MAX lines), then any new kernel line matching GBOS_FAT_ERRPAT: boots 10/11 (2026-11-23) stopped writing every log
+# about a minute into the boot although the user shut down cleanly, and the last heartbeat that reached the stick dates that stop.
+gbos_fat_syncer() { # MP SECONDS [LOGDIR [COPIER_SUBSHELL COPIER_CAT]]
+  _hn=0; _he=0; _hp=$GBOS_FAT_RT/proc; [ -r "$_hp/self/mountinfo" ] || _hp=$GBOS_PROC
   while $GBOS_FAT_BB sleep "$2"; do
+    if [ -n "${3:-}" ] && [ "${FAT_HEARTBEAT:-1}" = 1 ] && [ $_hn -lt ${FAT_HEARTBEAT_MAX:-480} ]; then
+      _hn=$((_hn + 1))
+      _hd=$($GBOS_FAT_BB dmesg 2>"$GBOS_FAT_NULL" | $GBOS_FAT_BB grep -E "$GBOS_FAT_ERRPAT" 2>"$GBOS_FAT_NULL") || _hd=
+      _hx=0; [ -n "$_hd" ] && _hx=$(echo "$_hd" | $GBOS_FAT_BB wc -l)
+      { echo "$(gbos_fat_status "$1" "$3" "${5:-}" "$_hp"), kernel error lines $_hx"
+        [ "$_hx" -gt "$_he" ] && echo "$_hd" | $GBOS_FAT_BB tail -n $((_hx - _he)) | $GBOS_FAT_BB sed 's/^/  /'
+      } >> "$3/fat-heartbeat.txt" 2>"$GBOS_FAT_NULL"
+      _he=$_hx   # fewer than last time: the ring buffer wrapped, count from what it holds now
+    fi
     $GBOS_FAT_BB sync -f "$1" || return 1
   done
 }
@@ -467,7 +496,7 @@ gbos_fat_start_shutdown_watch() { # DEV MP LOGDIR
   _ws=$(gbos_fat_sync_interval)
   if [ "${FAT_SHUTDOWN_RO:-1}" = 0 ]; then
     echo "not armed: FAT_SHUTDOWN_RO=0" > "$_wr" 2>/dev/null; log "hook: fat: no read-only remount at shutdown (FAT_SHUTDOWN_RO=0)"
-    if [ -n "$_ws" ]; then ( gbos_fat_syncer "$2" "$_ws" ) & log "hook: fat: syncing $2 every $_ws s (pid $!)"; fi
+    if [ -n "$_ws" ]; then ( gbos_fat_syncer "$2" "$_ws" "$3" ) & log "hook: fat: syncing $2 every $_ws s (pid $!)"; fi
     return 0
   fi
   if [ -n "$GBOS_FAT_BB" ] && [ ! -x "$GBOS_FAT_BB" ]; then
@@ -485,7 +514,7 @@ gbos_fat_start_shutdown_watch() { # DEV MP LOGDIR
     exec 3<"${GBOS_KMSG:-/dev/kmsg}" 4>"${GBOS_KMSG_OUT:-/dev/kmsg}" 2>"${GBOS_FAT_ERR:-/dev/null}"
     GBOS_FAT_NULL=$_wn
     GBOS_FAT_SYNC_PID=
-    if [ -n "$_ws" ]; then gbos_fat_syncer "$2" "$_ws" & GBOS_FAT_SYNC_PID=$!; fi
+    if [ -n "$_ws" ]; then gbos_fat_syncer "$2" "$_ws" "$3" $_wc & GBOS_FAT_SYNC_PID=$!; fi
     gbos_fat_watch "$1" "$2" "$3" "${GBOS_FAT_CLEAR:-0}" $_wc ) &
   log "hook: fat: shutdown watcher pid $! (kmsg copier: ${_wc:-not found}; clear the flag at shutdown: ${GBOS_FAT_CLEAR:-0}${_wm:+; missing in $GBOS_FAT_RT: $_wm}); remounts $2 read-only at init's unmount step; syncs $2 every ${_ws:-(off)} s"
 }

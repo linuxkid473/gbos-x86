@@ -292,6 +292,7 @@ case $a in
   losetup) echo "losetup $*" >> "$FAKE_MOUNTS"; rm -rf "$FAKE_SYS/block/${2##*/}/loop";;
   mknod) ;;
   sync) echo "sync $*" >> "${FAKE_SYNCS:-/dev/null}";;
+  dmesg) cat "${FAKE_DMESG:-/dev/null}";;
   *) exec ${REAL_BB:+"$REAL_BB"} "$a" "$@";;
 esac
 EOF
@@ -344,7 +345,12 @@ watch_case 0 1
 [ "$(wc -l < "$FAKE_MOUNTS")" = 2 ] || fail "remounted more than once: $(cat "$FAKE_MOUNTS")"
 grep -q "^<5>gbos-fat: $MP is read-only (remount, dirty flag cleared, mountinfo: ro)$" "$TMP/kmsg.out" || { cat "$TMP/kmsg.out"; fail "no success message"; }
 [ "$(gbos_fat_byte "$TMP/blk" 65)" = 0 ] || fail "dirty flag not cleared after the remount"
-[ "$(wc -l < "$LD/fat-shutdown.txt")" = 1 ] || fail "success wrote to the volume: $(cat "$LD/fat-shutdown.txt")"
+# besides the armed line only the shutdown step's status (uptime, kmsg.log, copier, superblock, what holds the volume): no FAILED line
+grep -q "^shutdown step at 313.731 s: uptime ? s: kmsg.log ? bytes, kmsg copier cat alive, superblock rw$" "$LD/fat-shutdown.txt" \
+  || { cat "$LD/fat-shutdown.txt" "$TMP/watch.err"; fail "no shutdown status line"; }
+grep -q "^  open for writing: pid 4242 (logcat) fd 5 -> $MP/gbos/logs/logcat.txt$" "$LD/fat-shutdown.txt" || { cat "$LD/fat-shutdown.txt"; fail "writer not in the status"; }
+[ "$(grep -v -e '^armed at boot: ' -e '^shutdown step at ' -e '^  open for writing: ' -e '^  read-write loop device: ' "$LD/fat-shutdown.txt")" = "" ] \
+  || fail "success wrote more to the volume: $(cat "$LD/fat-shutdown.txt")"
 ok "watcher: ignores SIGTERM, waits for init's unmount step (not lookalikes), survives EOF, stops the copier, detaches rw loops, remounts, clears the flag"
 grep -q "^<5>gbos-fat: shutdown: .*, remounting $MP read-only and clearing the dirty flag (end of this log)$" "$TMP/kmsg.out" || { cat "$TMP/kmsg.out"; fail "start line: clear"; }
 watch_case 0 0
@@ -373,21 +379,37 @@ ok "watcher: EBUSY retried, writers and loops written to fat-shutdown.txt, then 
 # periodic syncfs of the volume during the session (FAT_SYNC_S), stopped at init's unmount step
 for v in abc 0 -5 1x; do [ -z "$(FAT_SYNC_S=$v gbos_fat_sync_interval)" ] || fail "FAT_SYNC_S='$v' must be off"; done
 [ "$(FAT_SYNC_S=30 gbos_fat_sync_interval)" = 30 ] && [ "$(FAT_SYNC_S= gbos_fat_sync_interval)" = 30 ] && [ "$( (unset FAT_SYNC_S; gbos_fat_sync_interval) )" = 30 ] || fail "FAT_SYNC_S default/30"
-export FAKE_SYNCS=$TMP/syncs; rm -f "$FAKE_SYNCS"; FAT_SYNC_S=1
+export FAKE_SYNCS=$TMP/syncs FAKE_DMESG=$TMP/dmesg; rm -f "$FAKE_SYNCS"; FAT_SYNC_S=1
+printf '[   12.5] usb 2-2.3: reset SuperSpeed USB device number 3 using xhci_hcd\n[   12.6] i915 0000:00:02.0: fine\n' > "$FAKE_DMESG"
 watch_case 0 1
 FAT_SYNC_S=0
 grep -q "syncs $MP every 1 s" "$LOG" || { cat "$LOG"; fail "syncer not in the watcher's start line"; }
 _n=$(grep -c "^sync -f $MP\$" "$FAKE_SYNCS" 2>/dev/null || :)
 [ "${_n:-0}" -ge 2 ] || fail "syncer: ${_n:-0} syncs of $MP in ~2 s: $(cat "$FAKE_SYNCS" 2>/dev/null)"
 sleep 2.5; [ "$(grep -c . "$FAKE_SYNCS")" = "$_n" ] || fail "syncer still running after the shutdown step: $(grep -c . "$FAKE_SYNCS") > $_n"
-[ "$(wc -l < "$LD/fat-shutdown.txt")" = 1 ] || fail "syncer wrote to fat-shutdown.txt: $(cat "$LD/fat-shutdown.txt")"
+[ "$(grep -v -e '^armed at boot: ' -e '^shutdown step at ' -e '^  open for writing: ' -e '^  read-write loop device: ' "$LD/fat-shutdown.txt")" = "" ] \
+  || fail "syncer wrote to fat-shutdown.txt: $(cat "$LD/fat-shutdown.txt")"
+# heartbeat: one status line per sync, the matching kernel line once (not again on the next beat), nothing after the shutdown step
+HB=$LD/fat-heartbeat.txt
+[ "$(grep -c '^uptime ? s: kmsg.log ? bytes, kmsg copier cat alive, superblock rw, kernel error lines 1$' "$HB")" -ge 2 ] \
+  || { cat "$HB" 2>/dev/null; fail "heartbeat lines"; }
+[ "$(grep -c '^  ' "$HB")" = 1 ] && grep -q '^  \[   12.5\] usb 2-2.3: reset SuperSpeed USB device' "$HB" && ! grep -q i915 "$HB" \
+  || { cat "$HB"; fail "heartbeat: kernel error line once"; }
+[ "$(grep -c '^uptime' "$HB")" -le "$_n" ] || fail "heartbeat after the shutdown step"
+_hb=$(grep -c . "$HB"); unset FAKE_DMESG
 # FAT_SHUTDOWN_RO=0: no watcher, the syncer still runs
 rm -f "$FAKE_SYNCS"; rm -rf "$LD"; mkdir -p "$LD"; : > "$LOG"
 GBOS_FAT_BB=$TMP/fakebb FAT_SHUTDOWN_RO=0 FAT_SYNC_S=1; gbos_fat_start_shutdown_watch /dev/sda2 "$MP" "$LD"; GBOS_FAT_BB=; FAT_SHUTDOWN_RO=1; FAT_SYNC_S=0
 SP=$(sed -n 's/.*syncing .* every 1 s (pid \([0-9]*\)).*/\1/p' "$LOG"); [ -n "$SP" ] || { cat "$LOG"; fail "FAT_SHUTDOWN_RO=0: no syncer"; }
 PIDS="$PIDS $SP"; waitfor 'grep -q "^sync -f $MP\$" "$FAKE_SYNCS" 2>/dev/null' || fail "FAT_SHUTDOWN_RO=0: syncer never synced"
 kill -KILL "$SP" 2>/dev/null || :; unset FAKE_SYNCS
+grep -q '^uptime ? s: kmsg.log ? bytes, kmsg copier cat not found, superblock ?, kernel error lines 0$' "$LD/fat-heartbeat.txt" \
+  || { cat "$LD/fat-heartbeat.txt"; fail "FAT_SHUTDOWN_RO=0: heartbeat"; }
+rm -rf "$LD"; mkdir -p "$LD"; GBOS_FAT_BB=$TMP/fakebb FAT_SYNC_S=1 FAT_HEARTBEAT=0; ( gbos_fat_syncer "$MP" 1 "$LD" ) & SP=$!; PIDS="$PIDS $SP"
+sleep 1.5; kill -KILL "$SP" 2>/dev/null || :; GBOS_FAT_BB=; FAT_SYNC_S=0; FAT_HEARTBEAT=1
+[ ! -e "$LD/fat-heartbeat.txt" ] || fail "FAT_HEARTBEAT=0 still wrote fat-heartbeat.txt"
 ok "syncer: syncfs of the volume every FAT_SYNC_S s, stopped at the unmount step, off for 0/garbage, also without the watcher"
+ok "heartbeat: status line before each sync (kmsg.log size, copier, superblock), new kernel error lines once, FAT_HEARTBEAT=0 off"
 # the emergency remount working (a kworker makes it read-only a little later), and FAT_SHUTDOWN_SYSRQ=0
 rm -f "$FAKE_MOUNT_FAIL" "$FAKE_MOUNTS"; mkrt; : > "$FAKE_MOUNT_FAIL"; rm -rf "$LD"; mkdir -p "$LD"
 ( while ! grep -q u "$RT/proc/sysrq-trigger"; do sleep 0.05; done; sleep 0.2; sed -i 's/ - vfat \([^ ]*\) rw,/ - vfat \1 ro,/' "$FAKE_MI" ) &
