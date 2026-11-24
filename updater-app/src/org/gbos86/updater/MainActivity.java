@@ -46,6 +46,9 @@ public class MainActivity extends Activity {
     private final Handler ui = new Handler(Looper.getMainLooper());
     private TextView updateStatusTitle, updateStatusSubtitle, notesView, progressView;
     private TextView laptopView, integrityView, integrityBadge, folderView, folderSummaryView;
+    private TextView googleTitle, googleDetail, googleStatus;
+    private Button googleCheckButton, googleInstallButton;
+    private long finishingSince;
     private Button checkButton, installButton, stopButton, rebootButton;
     private Button auditButton, deepButton, pickButton, stageFolderButton, cancelButton;
     private ProgressBar bar;
@@ -191,6 +194,30 @@ public class MainActivity extends Activity {
 
 
 
+        // ---------------------------------------------------------------- Card: Googlebook OS (Google's system image)
+        LinearLayout googleCard = M3.card(this, 20);
+        googleCard.addView(M3.eyebrow(this, "GOOGLEBOOK OS"));
+        googleTitle = M3.titleLarge(this, "Googlebook OS");
+        googleTitle.setPadding(0, M3.dp(this, 4), 0, M3.dp(this, 2));
+        googleCard.addView(googleTitle);
+        googleDetail = M3.bodySmall(this, "Asking the system ...");
+        googleDetail.setTextIsSelectable(true);
+        googleCard.addView(googleDetail);
+        googleStatus = M3.body(this, "");
+        googleStatus.setTextIsSelectable(true);
+        googleStatus.setPadding(0, M3.dp(this, 8), 0, 0);
+        googleCard.addView(googleStatus);
+        LinearLayout googleActions = new LinearLayout(this);
+        googleActions.setOrientation(LinearLayout.HORIZONTAL);
+        googleActions.setPadding(0, M3.dp(this, 14), 0, 0);
+        googleCheckButton = M3.tonalButton(this, "Check for updates", v -> refresh(true));
+        googleInstallButton = M3.filledButton(this, "Download and install", v -> confirmInstall());
+        googleInstallButton.setVisibility(View.GONE);
+        googleActions.addView(googleCheckButton);
+        addMarginEnd(googleCheckButton, 10);
+        googleActions.addView(googleInstallButton);
+        googleCard.addView(googleActions);
+
         // ---------------------------------------------------------------- Card 3: Install from Folder
         LinearLayout localCard = M3.card(this, 20);
         localCard.addView(M3.eyebrow(this, "LOCAL BUNDLE"));
@@ -255,19 +282,20 @@ public class MainActivity extends Activity {
         actionCard.addView(cancelRow);
 
         // ---------------------------------------------------------------- Layout: two columns on a laptop screen, one on a narrow window
-        // Left: what changes the system (online update, local folder). Right: what is installed now (laptop, integrity, waiting files).
+        // Left: what changes the system (gbOS86 update, Googlebook OS version, local folder). Right: what is installed now (laptop,
+        // integrity, waiting files).
         if (wide) {
             LinearLayout cols = new LinearLayout(this);
             cols.setOrientation(LinearLayout.HORIZONTAL);
             cols.setBaselineAligned(false);
-            LinearLayout left = column(updateCard, localCard), right = column(deviceCard, actionCard);
+            LinearLayout left = column(updateCard, googleCard, localCard), right = column(deviceCard, actionCard);
             LinearLayout.LayoutParams llp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f);
             llp.setMarginEnd(M3.dp(this, 16));
             cols.addView(left, llp);
             cols.addView(right, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f));
             root.addView(cols);
         } else {
-            for (View card : new View[] {updateCard, deviceCard, localCard, actionCard}) {
+            for (View card : new View[] {updateCard, googleCard, deviceCard, localCard, actionCard}) {
                 root.addView(card);
                 addMarginBottom(card, 16);
             }
@@ -342,7 +370,14 @@ public class MainActivity extends Activity {
         boolean waiting = UpdateService.State.done || (decision != null && decision.kind == Updater.Kind.WAITING);
         rebootButton.setVisibility(waiting ? View.VISIBLE : View.GONE);
         installButton.setVisibility(!run && decision != null && decision.kind == Updater.Kind.AVAILABLE && !UpdateService.State.done ? View.VISIBLE : View.GONE);
-        for (Button b : new Button[] {checkButton, auditButton, deepButton, pickButton, cancelButton}) b.setEnabled(!busy && !run);
+        googleInstallButton.setVisibility(!run && decision != null && decision.kind == Updater.Kind.AVAILABLE && decision.needsSuper
+                && !UpdateService.State.done ? View.VISIBLE : View.GONE);
+        for (Button b : new Button[] {checkButton, googleCheckButton, auditButton, deepButton, pickButton, cancelButton}) b.setEnabled(!busy && !run);
+        // the update is being confirmed in this start (sysupdate.sh boot-ok, a minute after boot_completed): look again until it is
+        if (decision != null && decision.kind == Updater.Kind.FINISHING && !busy && System.currentTimeMillis() - finishingSince > 15000) {
+            finishingSince = System.currentTimeMillis();
+            refresh(false);
+        }
         stageFolderButton.setEnabled(!busy && !run && relPath != null);
 
         if (info != null && (info.pending.equals("none") || info.pending.isEmpty()) && !waiting) {
@@ -363,6 +398,7 @@ public class MainActivity extends Activity {
         if (userAsked) {
             updateStatusTitle.setText("Checking for updates ...");
             updateStatusSubtitle.setText("");
+            googleStatus.setText("Checking for a newer version ...");
         }
         new Thread(() -> {
             try {
@@ -396,10 +432,13 @@ public class MainActivity extends Activity {
                             updateStatusTitle.setText("Update available: seq " + f.seq);
                         } else if (d.kind == Updater.Kind.WAITING) {
                             updateStatusTitle.setText("Update ready to install");
+                        } else if (d.kind == Updater.Kind.FINISHING) {
+                            updateStatusTitle.setText("Finishing the update ...");
                         } else {
                             updateStatusTitle.setText("System Status");
                         }
                         updateStatusSubtitle.setText(d.message);
+                        showGoogle(i, f, d);
                         if (!f.notes().isEmpty() && d.kind != Updater.Kind.UP_TO_DATE) {
                             notesView.setText(String.join("\n• ", f.notes()));
                             notesContainer.setVisibility(View.VISIBLE);
@@ -410,6 +449,7 @@ public class MainActivity extends Activity {
                 } catch (Exception e) {
                     decision = null;
                     ui.post(() -> {
+                        googleStatus.setText("Could not check for a newer version: " + e.getMessage());
                         updateStatusTitle.setText("Unable to check updates");
                         updateStatusSubtitle.setText(e.getMessage());
                         notesContainer.setVisibility(View.GONE);
@@ -442,6 +482,29 @@ public class MainActivity extends Activity {
         if (!"ok".equals(i.hook)) sb.append("\n⚠ Boot hook missing: update once with the USB stick (menu 1).");
         if (!i.last.isEmpty()) sb.append("\nLast result: ").append(i.last);
         laptopView.setText(sb.toString());
+        String v = Updater.installedGoogleVersion(i);
+        googleTitle.setText("Googlebook OS " + Feed.googleName(v, i.googleBuild));
+        googleDetail.setText((v != null ? v + " • " : "") + "Google build " + (i.googleBuild > 0 ? i.googleBuild : "unknown"));
+    }
+
+    /** The Googlebook OS card: is a newer Google build published (inside a gbOS86 update), and can it be downloaded from Google? */
+    private void showGoogle(Updater.Info i, Feed f, Updater.Decision d) {
+        String have = Feed.googleName(Updater.installedGoogleVersion(i), i.googleBuild);
+        if (f.googleBuild <= i.googleBuild || i.googleBuild <= 0) {
+            googleStatus.setText(d.kind == Updater.Kind.FINISHING || d.kind == Updater.Kind.WAITING ? d.message
+                    : "Googlebook OS " + have + " is the newest version gbOS86 supports.");
+            return;
+        }
+        String name = Feed.googleName(f.googleVersion, f.googleBuild);
+        if (d.kind == Updater.Kind.AVAILABLE && d.needsSuper) {
+            long git = d.asset == null ? 0 : d.asset.size, google = f.googleSuper.bytes * 2;
+            googleStatus.setText("Googlebook OS " + name + " is available (" + (f.googleVersion != null ? f.googleVersion + ", " : "")
+                    + "Google build " + f.googleBuild + "), with gbOS86 update " + f.seq + ". Download: about " + Util.size(google)
+                    + " from Google and " + Util.size(git) + " from GitHub. It is installed at the next restart; apps and data are kept.");
+            googleInstallButton.setText("Download " + name + " and install");
+        } else {
+            googleStatus.setText("Googlebook OS " + name + " (Google build " + f.googleBuild + ") is published. " + d.message);
+        }
     }
 
     private void showIntegrity() {

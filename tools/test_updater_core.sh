@@ -30,7 +30,7 @@ SET=$(printf set | sha256sum | cut -c1-64)
 feed() { # extra lines on stdin replace the google lines
   {
     echo "gbos86-update-feed 1"; echo "seq 4242"; echo "set $SET"; echo "name gbos86-update-000000004242-$(echo $SET | cut -c1-12)"
-    echo "commit 1234567890123456789012345678901234567890"; echo "google_build 16000001"; echo "created 2026-11-20T12:00:00Z"
+    echo "commit 1234567890123456789012345678901234567890"; echo "google_build 16000001"; echo "google_version CL3B.260622.276.R5"; echo "created 2026-11-20T12:00:00Z"
     echo "base $(printf base | sha256sum | cut -c1-64)"; echo "url https://github.com/test/repo/releases/download/sysupdate-4242/"
     echo "asset full x-full.tar 10 $SET"; echo "asset manifest x.manifest 10 $SET"
     echo "google_zip https://dl.google.com/device/recovery/lapis-user/16000001/recovery.zip"; cat; echo "note a test update"
@@ -40,6 +40,7 @@ feed() { # extra lines on stdin replace the google lines
 feed < "$T/google.lines"; sign "$T/fb" "$T/feed.good"
 { cat "$T/google.lines"; echo "surprise 1"; } | feed; sign "$T/fb" "$T/feed.unknown"
 feed < "$T/google.lines"; sed -i 's/^end [0-9]*$/end 3/' "$T/fb"; sign "$T/fb" "$T/feed.badend"
+feed < "$T/google.lines"; sed -i 's/^google_version .*/google_version cl3b;rm/' "$T/fb"; sign "$T/fb" "$T/feed.badversion"
 feed < "$T/google.lines"; sed -i 's#^google_zip .*#google_zip https://example.com/recovery.zip#' "$T/fb"; sign "$T/fb" "$T/feed.badurl"
 sed 's/^google_part vendor_a [0-9]* /google_part vendor_a 16384 /' "$T/google.lines" | feed; sign "$T/fb" "$T/feed.wrongsize"
 sed "s/^google_part vendor_a \([0-9]*\) .*/google_part vendor_a \1 $SET/" "$T/google.lines" | feed; sign "$T/fb" "$T/feed.wrongsha"

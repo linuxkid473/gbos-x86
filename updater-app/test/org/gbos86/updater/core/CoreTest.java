@@ -42,6 +42,11 @@ public class CoreTest {
         Feed f = Feed.parseSigned(read("feed.good"), mod);
         check("feed: parses and verifies", f.seq == 4242 && f.googleBuild == 16000001 && f.asset("full") != null && f.googleParts.size() == 2
                 && f.canRebuildSuper() && f.bases.size() == 1 && f.notes.size() == 1);
+        check("feed: google_version and its short name", "CL3B.260622.276.R5".equals(f.googleVersion)
+                && "R5".equals(Feed.googleName(f.googleVersion, f.googleBuild)));
+        check("googleName: no version -> build number", "build 16658739".equals(Feed.googleName(null, 16658739))
+                && "R4".equals(Feed.googleName("CL3B.260622.276.R4", 16658739)) && "ABC1".equals(Feed.googleName("ABC1", 1)));
+        throwsWith("feed: a malformed google_version is refused", "google_version", () -> Feed.parseSigned(read("feed.badversion"), mod));
         throwsWith("feed: another key is refused", "signature", () -> Feed.parseSigned(read("feed.good"), other));
         byte[] t = read("feed.good");
         t[30] ^= 1;

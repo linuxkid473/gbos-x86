@@ -86,6 +86,8 @@ else
     && echo "note: you have uncommitted changes under usb/; they are NOT published (the set is commit $COMMIT exactly)" >&2
 fi
 GBUILD=$(sed -n 's/^BUILD_ID=//p' "$BUILDFILE" 2>/dev/null | head -n 1)
+# the build's name (e.g. CL3B.260622.276.R5): the app shows "Googlebook OS R5" instead of a bare build number
+GVERSION=$(sed -n 's/^VERSION=//p' "$BUILDFILE" 2>/dev/null | head -n 1 | grep -E '^[A-Z0-9][A-Z0-9.]{0,39}$' || true)
 [ -n "$GURL" ] || GURL=$(sed -n 's/^URL=//p' "$BUILDFILE" 2>/dev/null | head -n 1)
 
 # ------------------------------------------------------------------------------------------------ the bases (earlier published sets)
@@ -182,6 +184,7 @@ say "feed"
 {
   echo "gbos86-update-feed 1"
   echo "seq $SEQ"; echo "set $SETID"; echo "name $NAME"; echo "commit $COMMIT"; echo "google_build $GB"
+  [ "$GB" = "$GBUILD" ] && [ -n "$GVERSION" ] && echo "google_version $GVERSION"
   echo "created $(sed -n 's/^created //p' "$B/manifest")"
   cut -d' ' -f2 "$T/use" | while read -r _m; do [ -n "$_m" ] && echo "base $(sha "$_m")"; done
   echo "url $URLBASE"

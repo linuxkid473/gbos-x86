@@ -181,7 +181,7 @@ final class Updater {
         return Feed.parseSigned(b, i.pub);
     }
 
-    enum Kind { UP_TO_DATE, AVAILABLE, BLOCKED, WAITING }
+    enum Kind { UP_TO_DATE, AVAILABLE, BLOCKED, WAITING, FINISHING }
 
     static final class Decision {
         Kind kind;
@@ -191,9 +191,22 @@ final class Updater {
         Feed.Asset asset;
     }
 
+    /** The running Googlebook OS version (ro.build.id, e.g. CL3B.260622.276.R4) when it is the Google build the set records. */
+    static String installedGoogleVersion(Info i) {
+        String id = android.os.Build.ID, inc = android.os.Build.VERSION.INCREMENTAL;
+        if (id == null || !id.matches("[A-Z0-9][A-Z0-9.]{0,39}")) return null;
+        return i.googleBuild <= 0 || String.valueOf(i.googleBuild).equals(inc) ? id : null;
+    }
+
     static Decision decide(Context c, Info i, Audit a, Feed f) {
         Decision d = new Decision();
         d.feed = f;
+        if ("trying".equals(i.pending)) {   // this start runs the new set: sysupdate.sh boot-ok commits it a minute after boot_completed
+            d.kind = Kind.FINISHING;
+            d.message = "Finishing the update: it is confirmed about a minute after the laptop has started. If this stays for more "
+                    + "than a few minutes, restart the laptop.";
+            return d;
+        }
         if (!"none".equals(i.pending)) {
             d.kind = Kind.WAITING;
             d.message = "An update is being installed (" + i.pending + "). Restart the laptop to finish it.";

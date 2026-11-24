@@ -31,7 +31,7 @@ public final class Feed {
     }
 
     public long seq, googleBuild;
-    public String set, name, commit, created, url, googleZip;
+    public String set, name, commit, created, url, googleZip, googleVersion;
     public final List<String> bases = new ArrayList<>();
     public final Map<String, Asset> assets = new HashMap<>();
     public final List<Part> googleParts = new ArrayList<>();
@@ -43,6 +43,19 @@ public final class Feed {
     }
 
     public Asset asset(String kind) { return assets.get(kind); }
+
+    /**
+     * A Google build as people name it: "R5" from a version like CL3B.260622.276.R5, else the version, else "build N".
+     * Display only (the version comes from the signed feed or from the running system's ro.build.id).
+     */
+    public static String googleName(String version, long build) {
+        if (version != null) {
+            Matcher m = Pattern.compile(".*\\.(R[0-9]{1,3})").matcher(version);
+            if (m.matches()) return m.group(1);
+            if (!version.isEmpty()) return version;
+        }
+        return build > 0 ? "build " + build : "unknown";
+    }
     public String assetUrl(Asset a) { return url + a.file; }
     public boolean canRebuildSuper() { return googleZip != null && googleSuper != null && !googleParts.isEmpty(); }
     public List<String> notes() { return Collections.unmodifiableList(notes); }
@@ -96,6 +109,7 @@ public final class Feed {
                 case "name": f.name = re(NAME, v, "name"); break;
                 case "commit": f.commit = re(Pattern.compile("[0-9a-f]{40}"), v, "commit"); break;
                 case "google_build": f.googleBuild = num(SEQ, v, "google_build"); break;
+                case "google_version": f.googleVersion = re(Pattern.compile("[A-Z0-9][A-Z0-9.]{0,39}"), v, "google_version"); break;
                 case "created": f.created = re(Pattern.compile("[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z"), v, "created"); break;
                 case "base": f.bases.add(re(HEX64, v, "base")); break;
                 case "url": f.url = re(URL, v, "url"); break;
