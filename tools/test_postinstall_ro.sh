@@ -111,8 +111,8 @@ if [ "${1:-}" = --inner ]; then
   grep -q 'cancel: writing through' $L/sysupdate.txt && grep -q 'GBOS_STICK_RW= /new/postinstall: .* /new/postinstall ro,' $L/sysupdate.txt \
     && ok "it logged its choice and the mount lines to logs/boot-7/sysupdate.txt" || bad "sysupdate.txt: $(cat $L/sysupdate.txt 2>&1)"
   mkdir -p $G/update && printf 'set=abc\nphase=trying\n' > $G/update/state
-  $SUE SYSUPDATE_TEST=1 /new/postinstall/busybox sh $P/sysupdate.sh boot-ok > $W/su2 2>&1 && [ "$(cat $G/update/boot-ok 2>/dev/null)" = abc ] \
-    && ok "sysupdate boot-ok records the tried set through /dev/gbos-rw/stick" || bad "boot-ok: $(cat $W/su2)"
+  $SUE SYSUPDATE_TEST=1 /new/postinstall/busybox sh $P/sysupdate.sh boot-ok > $W/su2 2>&1 && [ ! -e $G/update/state ] && grep -q 'committed' $G/update/status.txt \
+    && ok "sysupdate boot-ok commits the tried set through /dev/gbos-rw/stick (one restart)" || bad "boot-ok: $(cat $W/su2)"
   rm -f $G/update/boot-ok $G/update/state
   # an older hook.sh (no /dev/gbos-rw): its own mount namespace, with the busybox unshare stage0 ships
   $BB umount $R/stick && mkdir -p $G/update.inbox/gbos86-update-202611220000-bbbbbbbbbbbb

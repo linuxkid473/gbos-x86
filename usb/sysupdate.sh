@@ -14,7 +14,7 @@
 #   cancel [--gbos G]                      remove bundles waiting in update.inbox (nothing installed is touched)
 #   status [--gbos G]                      installed set, pending update, last result
 #   request                                init service for the app: one request from the app's private folder (docs/system-update.md)
-#   boot-ok [G]                            init service at boot_completed while an update is being tried: marks the boot good
+#   boot-ok [G]                            init service a minute after boot_completed while an update is being tried: commits it (one restart)
 #   install-app [G] [BOOTN]                init service at boot_completed: install gbos86-updater.apk with pm when it changed, then
 #                                          tell the app the laptop started (its update check)
 #   audit [G] [--deep]                     does the installed system match its system.manifest? (the app's modification check)
@@ -972,6 +972,14 @@ cmd_boot_ok() {
   [ -n "$SU_TEST" ] || [ "$(getprop sys.boot_completed 2>/dev/null)" = 1 ] || exit 0
   su_rw_check "$G"
   echo "$_s" > "$U/boot-ok.part" && sync && mv -f "$U/boot-ok.part" "$U/boot-ok" && sync
+  # One restart is enough: the tried set reached boot_completed, so commit it now instead of at the next start. A failed tried boot
+  # never gets here (no boot-ok), so the next start still rolls back. If this is cut short, phase=committing / boot-ok make the next
+  # start's stage0 finish the commit. A set held after failed tries (new Google build) commits the same way once it does start.
+  [ "$(su_st phase)" = trying ] || exit 0
+  BN=$(su_st boots); BN=${BN##* }
+  su_commit
+  [ -n "$SU_TEST" ] || am broadcast -a org.gbos86.updater.BOOT_CHECK -n "$SU_PKG/.BootReceiver" -f 0x20 >/dev/null 2>&1   # the app: show it, clean up
+  return 0
 }
 
 # ---------------------------------------------------------------------------------------------------------------- menu 1 (install.sh)

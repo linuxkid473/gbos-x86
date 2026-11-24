@@ -125,11 +125,16 @@ check "good update: phase trying, try 1" "[ \"\$(st phase)\" = trying ] && [ \"\
 check "good update: inbox emptied, .stamps dropped" "[ -z \"\$(ls '$G/update.inbox')\" ] && [ ! -e '$G/.stamps' ]"
 S2=$(snap)
 android_ok
-check "boot-ok + next boot commits" "[ \$(boot) = 0 ] && [ ! -f '$G/update/state' ] && [ ! -e '$G/update.prev' ] && [ ! -e '$G/update/engine.sh' ]"
+check "boot-ok commits in the same start (one restart)" "[ ! -f '$G/update/state' ] && [ ! -e '$G/update.prev' ] && [ ! -e '$G/update/engine.sh' ] && grep -q committed '$G/update/status.txt'"
+check "the start after a boot-ok commit changes nothing" "[ \$(boot) = 0 ] && [ ! -f '$G/update/state' ]"
 check "after commit the set is unchanged" "[ \"\$(snap)\" = \"\$S2\" ]"
 check "no rollback after commit (three more boots)" "boot >/dev/null; boot >/dev/null; [ \$(boot) = 0 ] && [ \"\$(snap)\" = \"\$S2\" ]"
 check "status.txt says committed" "grep -q committed '$G/update/status.txt'"
 
+# --- boot-ok written but the commit cut short (power off right after): the next start commits from boot-ok
+install_set "$B1"; inbox "$B2"; boot >/dev/null
+sed -n 's/^set=//p' "$G/update/state" > "$G/update/boot-ok"
+check "boot-ok file alone: the next start commits" "[ \$(boot) = 0 ] && [ ! -f '$G/update/state' ] && [ ! -e '$G/update.prev' ]"
 # --- commit via kmsg.log (no boot-ok file)
 install_set "$B1"; inbox "$B2"; boot >/dev/null
 echo '14,6193,121590821,-,caller=T1;init: processing action (sys.boot_completed=1) from (/system/etc/init/hw/init.rc:1245)' > "$G/logs/boot-$((BOOTN - 1))/kmsg.log"

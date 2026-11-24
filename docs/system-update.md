@@ -141,6 +141,14 @@ The app's default update source is this checkout's GitHub `origin` (or `REPO=OWN
   `update.inbox`. If the laptop lacks a file the delta does not carry (the root service says `NEEDS-FILES`), the app takes the full
   bundle by itself. The download runs as a foreground service with a notification, so it continues with the window closed; Stop
   stops it, and the next try resumes. When the update is staged, **Restart now** restarts the laptop.
+* **Googlebook OS card.** Shows the running Google build by name (`ro.build.id`, e.g. `CL3B.260622.276.R4` → **Googlebook OS
+  R4**). **Check for updates** reads the same feed: when the newest gbOS86 update brings a newer Google build (`google_build`, named by
+  `google_version`), the card says so and offers **Download R5 and install**. That is the same install as the update card's (a new
+  Google build only comes inside a signed gbOS86 update, with patches for it): first the **Large download** dialog (sizes from GitHub
+  and Google, free space, time, metered-network warning; Continue/Cancel), then the usual confirmation. A newer build that cannot be
+  downloaded (no Google lines, the setting is off, not enough space) is shown with the reason.
+* **One restart.** After **Restart now** the update is installed during the start and confirmed about a minute after Android has
+  started (`boot-ok`, below); meanwhile the app says **Finishing the update ...** and looks again every 15 s.
 * **The modification check.** The app asks the root service for `sysupdate.sh audit`: every file of the installed set against
   `gbos/system.manifest` (changed, missing, and files added to the set's folders; `gbos.cfg` and logs never count; files over 64 MiB,
   i.e. `super.img`, by size unless you tap **Full check**). It also looks at the set's commit: `-dirty` means it was built from changed
@@ -223,6 +231,7 @@ set <sha256 of the manifest>
 name gbos86-update-000202611201230-<first 12 of set>
 commit <40 hex>
 google_build 16693588
+google_version CL3B.260622.276.R5                (optional: lapis/BUILD's VERSION; the app shows "Googlebook OS R5")
 created 2026-11-20T12:30:00Z
 base <set id>                                   one per published set the delta covers
 url https://github.com/OWNER/NAME/releases/download/sysupdate-202611201230/
@@ -236,6 +245,9 @@ note <one line of what changed>                 (up to 20)
 end <number of lines before this one>
 rsa3072-sha256 <signature of everything above>
 ```
+
+`google_version` is new (2026-11-24): an app older than that refuses a feed that has it ("unknown line"), so a laptop with an older
+app gets that update through `update.inbox` or the stick once; the update brings the new app.
 
 The app refuses a feed with a wrong signature, an unknown or malformed line, or a non-https address (Google's only on `dl.google.com`).
 A replayed old feed can only hide a newer update; it cannot make the laptop take an older set (the boot check refuses a lower `seq`).
@@ -282,12 +294,16 @@ Any refusal leaves everything as it was and boots the current system.
   newest step first. Each undo step only acts if its forward step happened, so undoing twice is harmless. The bundle is rejected
   ("copy it again"). While an update is pending, `early_patch.sh` runs `update/engine.sh`, the code that wrote the journal, rather than
   the new set's `sysupdate.sh`. If the engine stops with an unexpected error during a switch, the hook runs it once more to undo.
-* **Did it work?** While trying, `hook.sh` adds a service that, a minute after `sys.boot_completed`, writes the set id to
-  `update/boot-ok`. The next start commits when `boot-ok` holds the set id, or when a tried start's `kmsg.log` has
+* **Did it work? (one restart)** While trying, `hook.sh` adds a service that, a minute after `sys.boot_completed`, writes the set id to
+  `update/boot-ok` and **commits right away** (through `/dev/gbos-rw/stick`), then tells the app. So an update takes one restart: the
+  user restarts once and the app says the system is up to date. A tried start that never reaches that point writes nothing, so the
+  next start counts a failed try and rolls back after `SYSUPDATE_ATTEMPTS`, as before. If the commit is cut short, the next start
+  finishes it: stage0 commits when `phase=committing`, when `boot-ok` holds the set id, or when a tried start's `kmsg.log` has
   `init: processing action (sys.boot_completed=1)` (not read when this start found the volume not cleanly unmounted). **Commit**
-  deletes `update.prev`, the kernel copy and the journal. After a commit there is no rollback.
+  deletes `update.prev`, the kernel copy and the journal. After a commit there is no rollback. The trade-off (as with Android's own
+  A/B updates): a set that starts but breaks later in the session stays installed; the stick's menu 1 restores a working system.
 * **Cleaning up the laptop's storage:** when the app stages a bundle, the root service records its folder in
-  `/data/misc/gbos86/staged-source` (root only). After the next starts commit that set, the app's cleanup job (after unlock, no
+  `/data/misc/gbos86/staged-source` (root only). After that set is committed, the app's cleanup job (after unlock, no
   network needed) deletes its own `files/updates/` and asks the root service (`cleanup`) to delete the recorded folder, for example the
   `gbos86-update-...` folder copied to Downloads. The root service deletes it only when the installed `system.manifest` is that set,
   no update is waiting or being tried, the folder is a `gbos86-update-*` folder under the recorded base, and its manifest is unchanged.
