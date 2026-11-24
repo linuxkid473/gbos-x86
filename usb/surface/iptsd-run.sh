@@ -2,8 +2,9 @@
 # iptsd-run.sh N: IPTS touch input on Surfaces. Started by the gbos_iptsd service of hook.sh.
 #   Surface Laptop 7 (Intel): the touchpad is an IPTS HID device (045E:0C9F, behind the quickspi bus). The kernel's hid-multitouch
 #     gets a plain pointer from it, but no multitouch, palm rejection or physical click.
-#   Surface Pro 5 (2017): the touchscreen and pen are an IPTS device (1B96:001F) of the ipts driver (kernel/surface/apply.sh). Without
-#     iptsd the screen does not react to touch at all.
+#   Surface Pro 5 (2017): the touchscreen and pen are an IPTS device of the ipts driver (kernel/surface/apply.sh). Without iptsd the
+#     screen does not react to touch at all. This driver registers it as 045E:001F (hidraw HID_ID=0000:0000045E:0000001F, seen on an
+#     SP5 on 2026-11-24); iptsd's own preset still names the older N-trig id 1B96:001F, which is kept as a second entry.
 # iptsd (static build of a fork, surface/iptsd) reads the raw frames from the hidraw node and creates multitouch (and pen) uinput
 # devices. Each known device has its own iptsd config in surface/ (DEVICES below). Log: logs/boot-N/iptsd.txt.
 # Exits at once without surface/iptsd on the stick, and after WAIT seconds (default 120) when no such hidraw node ever appears (every
@@ -19,7 +20,8 @@ STEP=${GBOS_SLEEP:-3}
 L=$G/logs/boot-$N
 LOG=$L/iptsd.txt
 # vendor:product as in the uevent's HID_ID, iptsd-check-device --type, iptsd config file in surface/
-DEVICES="0000045E:00000C9F,touchpad,iptsd.conf 00001B96:0000001F,touchscreen,iptsd-surface-pro-5.conf"
+DEVICES="0000045E:00000C9F,touchpad,iptsd.conf 0000045E:0000001F,touchscreen,iptsd-surface-pro-5.conf
+         00001B96:0000001F,touchscreen,iptsd-surface-pro-5.conf"
 [ -x $S/iptsd ] && [ -x $S/iptsd-check-device ] || exit 0
 if [ -f $S/Vendor_045e_Product_0c9f.idc ] && [ ! -f /data/system/devices/idc/Vendor_045e_Product_0c9f.idc ]; then
   mkdir -p /data/system/devices/idc 2>/dev/null

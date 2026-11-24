@@ -41,10 +41,10 @@ grep -q 'iptsd exited rc=0' $G/logs/boot-1/iptsd.txt && ok "exit status of iptsd
 grep -q -- '--type touchpad /dev/hidraw1' $G/checked 2>/dev/null && ok "SL7 touchpad checked as --type touchpad" || bad "SL7 check args: $(cat $G/checked 2>&1)"
 grep -q 'config .*/surface/iptsd.conf$' $G/ran 2>/dev/null && ok "SL7 touchpad runs with iptsd.conf" || bad "SL7 config: $(cat $G/ran 2>&1)"
 
-# 1b. Surface Pro 5: IPTS touchscreen 1B96:001F (bus 0x44 = MEI, lower-case hex as some kernels print it)
+# 1b. Surface Pro 5: IPTS touchscreen 045E:001F
 S=$W/sys1b; G=$W/g1b
 mkdev $S hidraw0 0003:0000045E:000007E8 "Microsoft Surface Type Cover"
-mkdev $S hidraw2 0044:00001b96:0000001f "IPTS 1B96:001F"
+mkdev $S hidraw2 0000:0000045E:0000001F "IPTS 045E:001F"   # as the ipts driver registers it on a real SP5 (2026-11-24 log)
 mkstick $G 0
 run $G $S GBOS_ONCE=1; rc=$?
 [ $rc = 0 ] && grep -q 'iptsd on /dev/hidraw2 ' $G/ran 2>/dev/null && ok "SP5 touchscreen: iptsd started on /dev/hidraw2 (not on the Type Cover)" \
@@ -52,6 +52,10 @@ run $G $S GBOS_ONCE=1; rc=$?
 grep -q -- '--type touchscreen /dev/hidraw2' $G/checked 2>/dev/null && ok "SP5 checked as --type touchscreen" || bad "SP5 check args: $(cat $G/checked 2>&1)"
 grep -q 'config .*/surface/iptsd-surface-pro-5.conf$' $G/ran 2>/dev/null && ok "SP5 runs with iptsd-surface-pro-5.conf" || bad "SP5 config: $(cat $G/ran 2>&1)"
 [ -f $ROOT/usb/surface/iptsd-surface-pro-5.conf ] && ok "usb/surface/iptsd-surface-pro-5.conf exists" || bad "SP5 config file missing"
+# the older N-trig id of iptsd's preset (lower-case hex as some kernels print it) still matches
+S=$W/sys1d; G=$W/g1d; mkdev $S hidraw0 0044:00001b96:0000001f "IPTS 1B96:001F"; mkstick $G 0
+run $G $S GBOS_ONCE=1
+grep -q 'config .*/surface/iptsd-surface-pro-5.conf$' $G/ran 2>/dev/null && ok "1B96:001F also gets the SP5 config" || bad "1B96: $(cat $G/ran 2>&1)"
 # a product id that only starts like 001F must not match
 S=$W/sys1c; G=$W/g1c; mkdev $S hidraw0 0044:00001B96:0000001F0 "not IPTS"; mkstick $G 0
 run $G $S GBOS_WAIT=0; rc=$?
