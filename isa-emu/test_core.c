@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
-/* Known-answer tests for isa_emu_core.c. Build: gcc -O2 -o test_core test_core.c isa_emu_core.c */
+/* Known-answer tests for isa_emu_core.c. Build: gcc -O2 -o test_core test_core.c isa_emu_core.c
+ * (add -madx on a CPU with ADX to also check ADCX/ADOX against the real instructions) */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -247,10 +248,92 @@ static void test_clmul_ifma(void)
 	}
 }
 
+/* ---- ADX ---- */
+#if defined(__x86_64__) && defined(__ADX__)
+/* Native oracle (only when built with -madx on a CPU that has ADX): r = d + s + carry, returns the new carry. */
+static int native_adx(int ox, int wide, u64 *d, u64 s, int cin)
+{
+	unsigned char c;
+	u64 r = *d;
+	u32 r32 = (u32)r;
+
+	if (!ox && wide)
+		__asm__("bt $0,%q2; adcx %3,%0; setc %1" : "+r"(r), "=q"(c) : "r"((u64)cin), "r"(s) : "cc");
+	else if (!ox)
+		__asm__("bt $0,%q2; adcx %3,%0; setc %1" : "+r"(r32), "=q"(c) : "r"((u64)cin), "r"((u32)s) : "cc");
+	else if (wide)	/* OF = cin: (cin<<63)-1+1 overflows iff cin */
+		__asm__("mov %2,%%r11; shl $63,%%r11; dec %%r11; add $1,%%r11; adox %3,%0; seto %1"
+			: "+r"(r), "=q"(c) : "r"((u64)cin), "r"(s) : "cc", "r11");
+	else
+		__asm__("mov %2,%%r11; shl $63,%%r11; dec %%r11; add $1,%%r11; adox %3,%0; seto %1"
+			: "+r"(r32), "=q"(c) : "r"((u64)cin), "r"((u32)s) : "cc", "r11");
+	*d = wide ? r : r32;
+	return c;
+}
+#endif
+
+static void test_adx(void)
+{
+	static const struct { u64 d, s; int cin, wide; u64 r; int cout; } kat[] = {
+		{ 0, 0, 0, 1, 0, 0 },
+		{ 0, 0, 1, 1, 1, 0 },
+		{ ~0ULL, 1, 0, 1, 0, 1 },
+		{ ~0ULL, 0, 1, 1, 0, 1 },
+		{ ~0ULL, ~0ULL, 1, 1, ~0ULL, 1 },
+		{ 0x8000000000000000ULL, 0x8000000000000000ULL, 0, 1, 0, 1 },
+		{ 0x7fffffffffffffffULL, 1, 0, 1, 0x8000000000000000ULL, 0 },	/* signed overflow, no carry */
+		{ 0xffffffffULL, 1, 0, 0, 0, 1 },				/* 32-bit carry out of bit 31 */
+		{ 0xdeadbeefffffffffULL, 0, 1, 0, 0, 1 },			/* 32-bit: upper half ignored and cleared */
+		{ 0x12345678ffffffffULL, 0xabcdef0000000001ULL, 0, 0, 0, 1 },
+		{ 0x1111111122222222ULL, 0x3333333344444444ULL, 1, 0, 0x66666667ULL, 0 },
+	};
+	unsigned int i;
+	int c;
+
+	for (i = 0; i < sizeof(kat) / sizeof(kat[0]); i++) {
+		u64 r = emu_adx(kat[i].d, kat[i].s, kat[i].cin, kat[i].wide, &c);
+		CHECK(r == kat[i].r && c == kat[i].cout, "adx kat %u: got %llx/%d", i, (unsigned long long)r, c);
+	}
+	for (i = 0; i < 200000; i++) {
+		u64 d = rnd(), s = rnd(), r, e;
+		int cin = rnd() & 1, wide = i & 1, ce;
+		unsigned __int128 sum;
+
+		if (i & 2)		/* bias towards carry edges */
+			d |= wide ? 0xfffffffffff00000ULL : 0xfff00000ULL;
+		r = emu_adx(d, s, cin, wide, &c);
+		if (wide) {
+			sum = (unsigned __int128)d + s + cin;
+			e = (u64)sum; ce = (int)(sum >> 64);
+		} else {
+			u64 t = (u64)(u32)d + (u32)s + cin;
+			e = (u32)t; ce = (int)(t >> 32);
+		}
+		CHECK(r == e && c == ce, "adx rnd %u wide=%d", i, wide);
+#if defined(__x86_64__) && defined(__ADX__)
+		{
+			u64 n = d;
+			int nc = native_adx(i & 4, wide, &n, s, cin);
+			CHECK(n == r && nc == c, "adx vs native %s wide=%d", (i & 4) ? "adox" : "adcx", wide);
+		}
+#endif
+	}
+	/* carry chain: 256-bit add 2^256-1 + 1 = 0 with carry out, as bn code chains it */
+	{
+		u64 a[4] = { ~0ULL, ~0ULL, ~0ULL, ~0ULL }, b[4] = { 1, 0, 0, 0 };
+		int k;
+
+		c = 0;
+		for (k = 0; k < 4; k++)
+			a[k] = emu_adx(a[k], b[k], c, 1, &c);
+		CHECK(!a[0] && !a[1] && !a[2] && !a[3] && c == 1, "adx 256-bit carry chain");
+	}
+}
+
 int main(void)
 {
 	isa_emu_core_init();
-	test_gfni(); test_vnni(); test_sha256(); test_sha1(); test_vaes(); test_clmul_ifma();
+	test_gfni(); test_vnni(); test_sha256(); test_sha1(); test_vaes(); test_clmul_ifma(); test_adx();
 	printf("%d checks, %d failures\n", checks, fails);
 	return fails != 0;
 }

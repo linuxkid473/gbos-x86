@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  * Software implementations of GFNI, AVX-VNNI, SHA-NI, VAES, VPCLMULQDQ and
- * AVX-IFMA, following the pseudocode in the Intel SDM. See isa_emu_core.h.
+ * AVX-IFMA (plus ADX), following the pseudocode in the Intel SDM. See isa_emu_core.h.
  */
 #include "isa_emu_core.h"
 
@@ -390,4 +390,21 @@ void emu_sha256msg2(u8 *dst, const u8 *src)
 	u32 w19 = ld32(dst, 3) + sig1(w17);
 
 	st32(dst, 3, w19); st32(dst, 2, w18); st32(dst, 1, w17); st32(dst, 0, w16);
+}
+
+/* ---- ADX ----------------------------------------------------------------- */
+
+u64 emu_adx(u64 dst, u64 src, int carry_in, int wide, int *carry_out)
+{
+	u64 s, r;
+
+	if (!wide) {
+		s = (u64)(u32)dst + (u32)src + !!carry_in;
+		*carry_out = s >> 32;
+		return (u32)s;
+	}
+	s = dst + src;
+	r = s + !!carry_in;
+	*carry_out = (s < dst) | (r < s);
+	return r;
 }

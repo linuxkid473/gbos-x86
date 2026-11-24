@@ -90,8 +90,25 @@ gbos_coldplug_pass() {
     | xargs modprobe -a -q 2>/dev/null
 }
 
+# r8169 needs its PHY driver (realtek.ko, always built with it) loaded before it probes. It asks for it with
+# MODULE_SOFTDEP("pre: realtek"), which busybox modprobe ignores, and phylib's request_module() for the PHY id does nothing
+# here (as for iwlmvm above). Without it: "no dedicated PHY driver found for PHY ID 0x001cc800, maybe realtek.ko needs to be
+# added to initramfs?", probe error -49, no Ethernet (issue 61: Dell OptiPlex 3020, RTL8111/8168). Before the first coldplug pass.
+gbos_preload_phy() {
+  for d in /sys/bus/pci/devices/*; do
+    [ "$(cat $d/vendor 2>/dev/null)" = 0x10ec ] || continue
+    case "$(cat $d/class 2>/dev/null)" in
+      0x0200*) grep -q '^realtek ' /proc/modules && return 0
+               modprobe -q realtek && log "hwdetect: loaded realtek (PHY driver for r8169, Realtek Ethernet ${d##*/})" \
+                 || log "hwdetect: modprobe realtek FAILED (r8169 will find no PHY driver)"
+               return 0 ;;
+    esac
+  done
+}
+
 gbos_coldplug() {
   [ -f /lib/modules/$(uname -r)/modules.alias ] || { log "hwdetect: no modules.alias, skipping coldplug"; return 1; }
+  gbos_preload_phy
   # Not loaded by alias: ACPI video (brightness keys), battery already built in.
   p=1; before=$(wc -l < /proc/modules)
   while [ $p -le 4 ]; do

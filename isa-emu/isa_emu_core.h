@@ -59,4 +59,11 @@ void emu_sha256rnds2(u8 *dst, const u8 *src, const u8 *xmm0);
 void emu_sha256msg1(u8 *dst, const u8 *src);
 void emu_sha256msg2(u8 *dst, const u8 *src);
 
+/*
+ * ADX (ADCX/ADOX, Broadwell and newer; Haswell lacks it): dst + src + carry_in, at 64 bits when `wide`
+ * (REX.W), else at 32 bits with the result zero-extended. *carry_out gets the carry out of the top bit,
+ * which the caller stores in CF (ADCX) or OF (ADOX); no other flag changes.
+ */
+u64 emu_adx(u64 dst, u64 src, int carry_in, int wide, int *carry_out);
+
 #endif
