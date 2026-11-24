@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- gbOS86 display device config for the Dell Latitude 7320 Detachable's built-in panel (eDP, display port 0).
+     hook.sh copies it to /vendor/etc/displayconfig/display_port_0.xml (only with the Latitude 7320 sensor HAL,
+     whose "als" light sensor feeds it). Google ships display_port_1..10.xml and per-panel display_id_*.xml for
+     its own hardware but no port 0, so without this file the panel uses config.xml values (boot-13 display.txt:
+     DisplayDeviceConfig{mLoadedFrom=<config.xml>}). AOSP's DisplayDeviceConfig falls back to config.xml for
+     what a file leaves out, so this file only adds auto-brightness. There is no screenBrightnessMap: brightness
+     stays in backlight units (0..1, linear, as now), and the curve below is in those units.
+     Auto-brightness also needs config_automatic_brightness_available=true (usb/display/gbos-latitude7320-brightness.apk).
+
+     Curve (lux -> backlight fraction): about 0.09 * lux^0.27 from 2 to 8000 lux, 0.04 in the dark.
+     - Typical indoor light (250-300 lux) lands at 0.40-0.43, next to the framework's default brightness
+       (102/255 = 0.40), so turning adaptive brightness on indoors changes little.
+     - Full backlight at 8000 lux (overcast daylight, shade): the panel has no high-brightness mode.
+     - 0.04 in darkness, like Google's own desktop curve (10/255); 0.11 at 2 lux, 0.17 at 10 lux (dim room).
+     - Google's desktop curve (FrameworkDesktopOverlay, applies without this file) gives 0.27 at 300 lux.
+     Android learns from the user's slider changes while adaptive brightness is on, so this is the starting point. -->
+<displayConfiguration>
+    <autoBrightness enabled="true">
+        <brighteningLightDebounceMillis>4000</brighteningLightDebounceMillis>
+        <darkeningLightDebounceMillis>8000</darkeningLightDebounceMillis>
+        <brighteningLightDebounceIdleMillis>4000</brighteningLightDebounceIdleMillis>
+        <darkeningLightDebounceIdleMillis>8000</darkeningLightDebounceIdleMillis>
+        <luxToBrightnessMapping>
+            <mode>default</mode>
+            <setting>normal</setting>
+            <map>
+                <point><first>0</first><second>0.04</second></point>
+                <point><first>2</first><second>0.11</second></point>
+                <point><first>10</first><second>0.17</second></point>
+                <point><first>40</first><second>0.24</second></point>
+                <point><first>100</first><second>0.31</second></point>
+                <point><first>250</first><second>0.40</second></point>
+                <point><first>500</first><second>0.48</second></point>
+                <point><first>1000</first><second>0.58</second></point>
+                <point><first>2000</first><second>0.69</second></point>
+                <point><first>4000</first><second>0.83</second></point>
+                <point><first>8000</first><second>1.0</second></point>
+            </map>
+        </luxToBrightnessMapping>
+    </autoBrightness>
+    <lightSensor>
+        <type>android.sensor.light</type>
+        <name>als</name>
+    </lightSensor>
+</displayConfiguration>

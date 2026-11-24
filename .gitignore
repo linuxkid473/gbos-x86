@@ -36,6 +36,9 @@
 /usb/stage0.cpio
 /gatekeeper/libs/
 /gatekeeper/soft_gk
+/fingerprint/libs/
+/fingerprint/gbos_fp
+/fingerprint/goodix_test
 *.o
 __pycache__/
 
@@ -73,3 +76,14 @@ __pycache__/
 # (the kernel only accepts a manager APK with the official signing certificate)
 /usb/ksu/manager.apk
 /usb/ksu/ksud
+# Camera calibration extracted from proprietary Windows tuning files (tools/extract_aiqb_ccm.py): stick only
+/usb/camera/
+*.aiqb
+ov5678_ccm.txt
+ov8856_ccm.txt
+ov8856_lsc.txt
+ov5678_lsc.txt
+# The gbOS86 Updater app, built by updater-app/build.sh (a test-key build must never be committed: Android only updates an app
+# signed with the same key). Whether release builds are committed is the maintainer's call.
+/usb/gbos86-updater.apk
+/usb/gbos86-updater.apk.idsig

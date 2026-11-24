@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- gbOS86 Updater: finds gbOS86 system updates on the project's GitHub releases (a signed feed), downloads them, and asks the root
+     service started by init (hook.sh, sysupdate.sh request) to copy them to GBOSSYS. It never installs anything itself: the next boot
+     checks every file against the signature first. See docs/system-update.md.
+     Permissions: INTERNET (the feed, the update, and, for an update that brings a new Google build, Google's image), ACCESS_NETWORK_STATE (the
+     check waits for a network), POST_NOTIFICATIONS ("update available"), RECEIVE_BOOT_COMPLETED (the check after a start),
+     FOREGROUND_SERVICE(_DATA_SYNC) (a download continues with the window closed). -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="org.gbos86.updater">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <application
+        android:label="gbOS86 Updater"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:allowBackup="false"
+        android:usesCleartextTraffic="false"
+        android:theme="@android:style/Theme.DeviceDefault.DayNight">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:label="gbOS86 Updater">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <activity
+            android:name=".SettingsActivity"
+            android:exported="false"
+            android:label="gbOS86 Updater settings" />
+        <service
+            android:name=".UpdateService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+        <service
+            android:name=".CheckJob"
+            android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
+        <!-- exported: Android's BOOT_COMPLETED, and BOOT_CHECK from the gbOS86 boot service (root). Any app sending BOOT_CHECK can at
+             most cause one more update check. -->
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="org.gbos86.updater.BOOT_CHECK" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

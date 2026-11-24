@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- gbos: legacy HDA card on the Latitude 5300 (snd_hda_intel + ALC3254), replacing sof-soundwire.
-     dras matches <soundcard> against the ALSA card id (/proc/asound/cardN/id), not the long name. -->
+<!-- gbos: select the generated device profile by ALSA card id (/proc/asound/cardN/id),
+     not by the card's long name. -->
 <AudioConfiguration>
   <soundcard>PCH</soundcard>
   <audio-config-dir>gbos-hda-pch</audio-config-dir>

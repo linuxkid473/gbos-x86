@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Static overlay of the framework (target "android") for the Dell Latitude 7320 Detachable, built by
+     tools/build_brightness_overlay.sh into usb/display/gbos-latitude7320-brightness.apk.
+     framework-res defaults config_automatic_brightness_available to false and Google's Lapis vendor overlay
+     (framework-res__lapis__auto_generated_rro_vendor.apk, priority 0) sets it to false again, so
+     DisplayDeviceConfig.isAutoBrightnessAvailable() is false, DisplayPowerController opens no light sensor and
+     Settings hides "Adaptive brightness". This overlay (vendor partition, priority 101) sets only that flag.
+     The lux curve is not overlaid here: Google's product overlay FrameworkDesktopOverlay sets the
+     config_autoBrightness* arrays and product overlays rank above vendor ones. The curve comes from
+     usb/display/latitude7320_display_port_0.xml instead (Google's desktop curve applies without it). -->
+<resources>
+    <bool name="config_automatic_brightness_available">true</bool>
+</resources>

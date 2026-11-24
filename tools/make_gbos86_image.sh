@@ -14,6 +14,9 @@
 #
 # Usage:
 #   sh tools/make_gbos86_image.sh [--type standard|looper] [--data-size N_GB] [--auto] [OUT_DIR]
+#   GBOS_DEBUG_LOGS=1 enables full logcat and verbose startup diagnostics in the image.
+#   GBOS_CFG_SET="CAMERA_LIBCAMERA=both DEBUG_LOGS=1" sets gbos.cfg keys in this image only (applied last).
+#   GBOS_USB_SOURCE=/path/to/usb uses a separately staged USB payload tree.
 set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 OUT="$ROOT/dist"
@@ -44,15 +47,23 @@ case "$BUILD_TYPE" in
   *) BUILD_TYPE="standard";;
 esac
 
-U=$ROOT/usb
+U=${GBOS_USB_SOURCE:-$ROOT/usb}
 P=$ROOT/lapis/parts
+(
+  CAMERA_CONFIG=$(mktemp)
+  trap 'rm -f "$CAMERA_CONFIG"' EXIT HUP INT TERM
+  KREL=$(grep -a -m1 -o '[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*-gbos-whl+\{0,1\} (' "$U/out/BOOTX64.EFI" 2>/dev/null | sed 's/ ($//')
+  python3 "$ROOT/tools/extract_ikconfig.py" "$U/out/BOOTX64.EFI" > "$CAMERA_CONFIG" ||
+    { echo "camera payload: cannot read the kernel config; rebuild with kernel/build_kernel.sh" >&2; exit 1; }
+  sh "$ROOT/tools/check_camera_payload.sh" "$CAMERA_CONFIG" "$KREL" "$U"
+)
 if [ "$BUILD_TYPE" = "looper" ]; then
   NAME="gbOS86-looper-$(date +%Y%m%d)"
 else
   NAME="gbOS86-$(date +%Y%m%d)"
 fi
 STAGE="$OUT/$NAME.stage"
-mkdir -p "$OUT"; rm -rf "$STAGE"; mkdir -p "$STAGE/efi/EFI/BOOT" "$STAGE/gbos/gbos"
+mkdir -p "$OUT"; rm -rf "$STAGE"; mkdir -p "$STAGE/efi/EFI/BOOT" "$STAGE/gbos/EFI/BOOT" "$STAGE/gbos/gbos"
 
 # 1. System: super.img from Google's partitions or pre-built build/super.img
 if [ -f "$ROOT/build/super.img" ] && [ -f "$ROOT/build/super.layout" ]; then
@@ -76,14 +87,23 @@ fi
 # 2. Everything else stage0/hook/install expect on the stick
 echo "== assembling files ($BUILD_TYPE mode)"
 cp "$U/out/BOOTX64.EFI" "$STAGE/efi/EFI/BOOT/BOOTX64.EFI"
+cp "$U/out/BOOTX64.EFI" "$STAGE/gbos/EFI/BOOT/BOOTX64.EFI"
 G="$STAGE/gbos/gbos"
-for f in hook.sh aidiag.sh native_zygote.sh early_patch.sh hwdetect.sh install.sh apex_patch.sh gbos.cfg crossystem bootdisk.img libkm_compat.so system_ext_manifest.xml soft_gk Add-gbOS-to-Windows-BootMenu.bat; do
+for f in hook.sh stick_fat.sh aidiag.sh native_zygote.sh early_patch.sh sensor_vendor_overlay.sh sensor_trial_diag.sh tablet_mode.sh hwdetect.sh sensordiag.sh mask_vendor_modules.sh install.sh apex_patch.sh gbos.cfg crossystem bootdisk.img libkm_compat.so system_ext_manifest.xml soft_gk gbos_fp sysupdate.sh sysupdate.pub gbos86-updater.apk Add-gbOS-to-Windows-BootMenu.bat; do
   [ -f "$U/$f" ] && cp "$U/$f" "$G/$f"
 done
+if [ -n "${GBOS_SENSOR_PAYLOAD:-}" ]; then
+  sh "$ROOT/sensors/trogdor/image_payload.sh" stage "$GBOS_SENSOR_PAYLOAD" "$G"
+fi
 [ -f "$U/Add-gbOS-to-Windows-BootMenu.bat" ] && cp "$U/Add-gbOS-to-Windows-BootMenu.bat" "$STAGE/gbos/Add-gbOS-to-Windows-BootMenu.bat"
-for d in firmware patched audio installer kmod modules surface ksu; do cp -R "$U/$d" "$G/$d"; done
+for d in firmware patched audio installer kmod modules surface ksu thermal display; do cp -R "$U/$d" "$G/$d"; done
 # Stage0 screen reader (Speakup + espeakup, usb/a11y/, filled by tools/fetch_a11y_tools.sh): only used when booting the stick.
 [ -d "$U/a11y/bin" ] && cp -R "$U/a11y" "$G/a11y"
+# Camera calibration (colour matrices and lens shading extracted from the Windows tuning files with
+# tools/extract_aiqb_ccm.py): proprietary, so never in git. Put it in usb/camera/ (gitignored) to include it;
+# without it both cameras work, with generic colour.
+if [ -d "$U/camera" ]; then cp -R "$U/camera" "$G/camera"; echo "   camera calibration: included ($(ls "$U/camera" | wc -l | tr -d ' ') files)"
+else echo "   camera calibration: not included (no usb/camera/; generic camera colour)"; fi
 # Ensure both '+' and non-'+' versions exist on the FAT32 image filesystem
 for _m in "$G/modules/lib/modules/"*-gbos-whl+; do
   if [ -d "$_m" ]; then
@@ -111,6 +131,54 @@ else
   fi
 fi
 
+gbos_enable_image_debug_logs() {
+  _debug_config=$1
+  [ "${GBOS_DEBUG_LOGS:-0}" = 1 ] || return 0
+  if grep -q '^DEBUG_LOGS=' "$_debug_config"; then
+    sed -i.bak -e 's/^DEBUG_LOGS=.*/DEBUG_LOGS=1/' "$_debug_config"
+    rm -f "$_debug_config.bak"
+  else
+    printf '\nDEBUG_LOGS=1\n' >> "$_debug_config"
+  fi
+  grep -q '^DEBUG_LOGS=1$' "$_debug_config" || { echo "failed to enable DEBUG_LOGS in $_debug_config"; exit 1; }
+}
+# Full logcat and verbose diagnostics are opt-in for a specific image; keep the source config unchanged.
+gbos_enable_image_debug_logs "$G/gbos.cfg"
+
+# Build a deliberately opt-in Latitude 7320 camera/fingerprint diagnostic image without changing usb/gbos.cfg.
+if [ "${GBOS_IPU6_CAMERA_BRIDGE:-0}" = 1 ]; then
+  for payload in \
+      "$G/installer/bin/ipu6-camera-bridge.sh" \
+      "$G/installer/bin/ipu6-loopback" \
+      "$G/kmod/v4l2loopback.ko" \
+      "$G/surface/fake_uvc_desc.bin" \
+      "$G/surface/latitude_fake_uvc_desc.bin" \
+      "$G/surface/latitude_rear_fake_uvc_desc.bin"; do
+    [ -s "$payload" ] || { echo "missing IPU6 bridge test payload: $payload" >&2; exit 1; }
+  done
+  for setting in CAMERA_BRIDGE FINGERPRINT; do
+    case "$setting" in
+      CAMERA_BRIDGE) value=1 ;;
+      FINGERPRINT) value=1 ;;
+    esac
+    if grep -q "^${setting}=" "$G/gbos.cfg"; then
+      sed -i.bak "s/^${setting}=.*/${setting}=${value}/" "$G/gbos.cfg"
+      rm -f "$G/gbos.cfg.bak"
+    else
+      printf '\n%s=%s\n' "$setting" "$value" >> "$G/gbos.cfg"
+    fi
+    grep -q "^${setting}=${value}$" "$G/gbos.cfg" ||
+      { echo "failed to set ${setting}=${value} for bridge test image" >&2; exit 1; }
+  done
+fi
+
+# Add sensor sampling only to an explicitly requested test image; leave usb/gbos.cfg unchanged.
+if [ "${GBOS_SENSOR_CONTINUOUS_PROBE:-0}" = 1 ]; then
+  sh "$ROOT/sensors/trogdor/image_payload.sh" enable-continuous-probe "$G/gbos.cfg"
+elif [ "${GBOS_SENSOR_MOTION_PROBE:-0}" = 1 ]; then
+  sh "$ROOT/sensors/trogdor/image_payload.sh" enable-motion-probe "$G/gbos.cfg"
+fi
+
 # Apply hardware auto-tailoring if enabled
 if [ "$AUTO_TAILOR" = 1 ]; then
   if [ -f "$ROOT/tools/detect_hardware.sh" ]; then
@@ -120,6 +188,27 @@ if [ "$AUTO_TAILOR" = 1 ]; then
     apply_hardware_config "$G/gbos.cfg"
   fi
 fi
+
+# GBOS_CFG_SET="KEY=value KEY2=value2": settings for this image only, applied last (usb/gbos.cfg is unchanged).
+# Keys are upper-case gbos.cfg names; values may not contain spaces or shell/sed specials.
+gbos_image_cfg_set() {
+  _cfg=$1; shift
+  for _kv in "$@"; do
+    _k=${_kv%%=*}; _v=${_kv#*=}
+    case "$_kv" in *=*) ;; *) echo "GBOS_CFG_SET: '$_kv' is not KEY=value" >&2; exit 1;; esac
+    case "$_k" in ''|*[!A-Z0-9_]*) echo "GBOS_CFG_SET: bad key '$_k'" >&2; exit 1;; esac
+    case "$_v" in *[!A-Za-z0-9._,:+-]*) echo "GBOS_CFG_SET: bad value for $_k: '$_v'" >&2; exit 1;; esac
+    if grep -q "^${_k}=" "$_cfg"; then
+      sed -i.bak "s/^${_k}=.*/${_k}=${_v}/" "$_cfg" && rm -f "$_cfg.bak"
+    else
+      printf '\n# Set for this image (GBOS_CFG_SET)\n%s=%s\n' "$_k" "$_v" >> "$_cfg"
+    fi
+    grep -qx "${_k}=${_v}" "$_cfg" || { echo "GBOS_CFG_SET: failed to set ${_k}=${_v}" >&2; exit 1; }
+    echo "   gbos.cfg: ${_k}=${_v} (GBOS_CFG_SET)"
+  done
+}
+# shellcheck disable=SC2086
+[ -z "${GBOS_CFG_SET:-}" ] || gbos_image_cfg_set "$G/gbos.cfg" $GBOS_CFG_SET
 
 cp "$ROOT/kernel/out/busybox" "$STAGE/gbos/busybox"
 

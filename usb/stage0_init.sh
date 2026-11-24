@@ -16,6 +16,15 @@ shell() {
   setsid cttyhack sh </dev/tty1 >/dev/tty1 2>&1
 }
 fail() { log "FATAL: $*"; shell "failure"; }
+# The stage0 screen reader needs a sound card the kernel brings up by itself: a legacy HDA controller (PCI class 0x0403).
+# SOF/SoundWire-only laptops (class 0x0401, e.g. Latitude 7320) never get one this early; there the copy to RAM (~2 s) and
+# the card wait (~3 s) only delayed every boot before ending in "no sound card".
+has_hda_controller() {
+  for _p in ${GBOS_SYSFS_ROOT:-/sys}/bus/pci/devices/*/class; do
+    case "$(cat "$_p" 2>/dev/null)" in 0x0403*) return 0;; esac
+  done
+  return 1
+}
 
 log "=== gbOS86 boot, kernel $(uname -r) ==="
 mdev -s
@@ -35,14 +44,32 @@ modprobe -q rtsx_pci_sdmmc 2>/dev/null && log "rtsx_pci_sdmmc loaded (Realtek SD
 # gbos/install.sh). The stick wins when present, unless the NVMe install exists and the stick's
 # gbos.cfg doesn't ask for it (MODE=install or BOOT_FROM=stick). NVMe shows up long before USB,
 # so give the stick a few seconds after GBOSSYS appears.
+# Once GBOSSYS is there, stop as soon as USB has settled instead of a fixed 6 s: no new USB device for STICK_SETTLE_S (2 s) and
+# every usb-storage interface has its disk. A fixed 6 s cost every NVMe boot (and every persistent-stick boot, whose own
+# volume is GBOSSYS) ~5.7 s waiting for a stick that never comes. Still at most 6 s.
+usb_settled() {
+  # prints the number of USB devices; returns 1 while a usb-storage/uas interface has no SCSI disk yet
+  _r=${GBOS_SYSFS_ROOT:-/sys}
+  ls "$_r/bus/usb/devices" 2>/dev/null | wc -l
+  for _i in "$_r"/bus/usb/drivers/usb-storage/*:* "$_r"/bus/usb/drivers/uas/*:*; do
+    [ -e "$_i" ] || continue
+    ls -d "$_i"/host*/target*/*/block/* >/dev/null 2>&1 || return 1
+  done
+  return 0
+}
 log "waiting for LABEL=GBOS (USB) or LABEL=GBOSSYS (NVMe) ..."
-STICK=; SYS=; n=0
+STICK=; SYS=; n=0; usbn=; still=0
 for i in $(seq 1 60); do
   mdev -s
   STICK=$(findfs LABEL=GBOS 2>/dev/null)
   SYS=$(findfs LABEL=GBOSSYS 2>/dev/null)
   [ -n "$STICK" ] && break
-  [ -n "$SYS" ] && { n=$((n+1)); [ $n -ge 6 ] && break; }
+  if [ -n "$SYS" ]; then
+    n=$((n+1)); [ $n -ge 6 ] && break
+    _u=$(usb_settled) && _ok=1 || _ok=0
+    if [ "$_u" = "$usbn" ]; then still=$((still+1)); else still=0; usbn=$_u; fi
+    [ $_ok = 1 ] && [ $still -ge ${STICK_SETTLE_S:-2} ] && { log "USB settled ($usbn devices, no GBOS stick) after $n s with GBOSSYS"; break; }
+  fi
   sleep 1
 done
 [ -n "$STICK$SYS" ] || fail "no GBOS (USB) or GBOSSYS (NVMe) volume after 60s (block devices: $(ls /sys/class/block | tr '\n' ' '))"
@@ -77,7 +104,9 @@ if [ -n "$STICK" ]; then
     grep -q '^BOOT_FROM=stick' /gbos/gbos/gbos.cfg 2>/dev/null && CFGMODE=live
     # Screen reader (Speakup + espeakup, gbos/a11y/ on the stick, see usb/a11y/start.sh): copy it to RAM so the stick can be unmounted,
     # and give the menu longer (60 s) when it speaks. gbos.cfg: A11Y=0 off, A11Y_MENU_TIMEOUT=seconds.
-    if [ -f /gbos/gbos/a11y/start.sh ] && ! grep -q '^A11Y=0' /gbos/gbos/gbos.cfg 2>/dev/null; then
+    if [ -f /gbos/gbos/a11y/start.sh ] && ! grep -q '^A11Y=0' /gbos/gbos/gbos.cfg 2>/dev/null && ! has_hda_controller; then
+      log "a11y: no HDA sound controller (SOF/SoundWire audio only), no early speech; skipping the screen reader"
+    elif [ -f /gbos/gbos/a11y/start.sh ] && ! grep -q '^A11Y=0' /gbos/gbos/gbos.cfg 2>/dev/null; then
       mkdir -p /a11y && cp -a /gbos/gbos/a11y/. /a11y/ 2>/dev/null
       MENU_T=$(sed -n 's/^A11Y_MENU_TIMEOUT=\([0-9][0-9]*\)$/\1/p' /gbos/gbos/gbos.cfg 2>/dev/null | tail -1); MENU_T=${MENU_T:-60}
     fi
@@ -101,7 +130,9 @@ fi
 log "found gbos volume on $FROM at $DEV (stick=${STICK:-none} nvme=${SYS:-none})"
 mount -t vfat -o rw,flush,umask=000 $DEV /gbos || fail "mount $DEV failed"
 G=/gbos/gbos
-cp /bin/busybox /gbos/busybox 2>/dev/null
+# Only when it differs: the volume is mounted with flush, and rewriting this 2 MB file on every boot cost ~5 s on a USB stick
+# (boot-5 2026-11-22: 9.6 s mount -> 14.7 s first log line).
+cmp -s /bin/busybox /gbos/busybox 2>/dev/null || { cp /bin/busybox /gbos/busybox 2>/dev/null && log "busybox copied to the volume (it changed)"; }
 
 # Boot-numbered log directory on the stick
 N=1; while [ -e $G/logs/boot-$N ]; do N=$((N+1)); done
@@ -121,6 +152,11 @@ SHELL_AT=none; LOAD_I915=auto; LOAD_WIFI=0; EXTRA_SLEEP=0; MODE=boot
 [ "$FROM" = stick ] && [ -f $G/gbos.cfg ] && grep -q '^MODE=live' $G/gbos.cfg 2>/dev/null && sed -i 's/^MODE=live/MODE=ask/' $G/gbos.cfg 2>/dev/null || true
 case "$MODE" in install) ;; *) MODE=boot;; esac
 [ $FROM = nvme ] && MODE=boot
+# System updates (docs/system-update.md): early_patch.sh, sourced by gbos.cfg above, normally did this already (GBOS_SYSUPDATE_RAN).
+# Fallback for a gbos.cfg without that line: the same function from early_patch.sh, before hwdetect and super.img.
+if [ $FROM = nvme ] && [ -z "$GBOS_SYSUPDATE_RAN" ] && [ -f $G/early_patch.sh ] && sh -n $G/early_patch.sh 2>/dev/null; then
+  . $G/early_patch.sh
+fi
 
 # Hardware inventory
 {

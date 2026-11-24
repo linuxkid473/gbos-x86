@@ -48,12 +48,105 @@ gbos_load_opmodes() {
   done
 }
 
+# IPU6 creates its ISYS capture pipeline on the auxiliary bus after the PCI core probes.
+# Explicitly request it once the core is loaded, rather than relying on auxiliary-bus
+# modalias coldplug ordering in the Android init environment.
+gbos_load_ipu6_isys() {
+  PROC_MODULES=${GBOS_PROC_MODULES:-/proc/modules}
+  grep -q '^intel_ipu6 ' "$PROC_MODULES" 2>/dev/null || return 0
+  grep -q '^intel_ipu6_isys ' "$PROC_MODULES" 2>/dev/null && return 0
+  if modprobe -q intel_ipu6_isys; then
+    log "hwdetect: loaded intel_ipu6_isys (IPU6 ISYS capture pipeline)"
+  else
+    log "hwdetect: modprobe intel_ipu6_isys FAILED (IPU6 ISYS capture pipeline)"
+  fi
+}
+
+# BusyBox modprobe ignores modules.softdep. Register the PMIC child drivers before
+# INT3472 probes so its MFD cells are handled in clock, regulator, GPIO order.
+gbos_load_tps68470_children() {
+  [ "${GBOS_TPS_REQ:-0}" = 1 ] && return 0
+  sys=${GBOS_SYSFS_ROOT:-/sys}
+  [ "$(cat "$sys/class/dmi/id/sys_vendor" 2>/dev/null)" = "Dell Inc." ] || return 0
+  [ "$(cat "$sys/class/dmi/id/product_name" 2>/dev/null)" = "Latitude 7320 Detachable" ] || return 0
+  for m in clk-tps68470 tps68470-regulator gpio-tps68470; do
+    if modprobe -q "$m"; then
+      log "hwdetect: requested $m (INT3472 PMIC child)"
+    else
+      log "hwdetect: modprobe $m FAILED (INT3472 PMIC child)"
+      return 1
+    fi
+  done
+  GBOS_TPS_REQ=1
+  return 0
+}
+
+# Some SoundWire codec drivers are not autoloaded from their device modalias. Load them before coldplug
+# probes the HDA/SOF controller; otherwise the machine driver can parse its topology before codec DAIs exist.
+gbos_load_soundwire_codecs() {
+  [ -z "$GBOS_SDW_REQ" ] || return 0
+  GBOS_SDW_REQ=1
+  if modprobe -a -q snd-soc-rt1320-sdw snd-soc-rt721-sdca snd-soc-rt711-sdca snd-soc-rt1316-sdw snd-soc-rt715-sdca 2>/dev/null; then
+    log "hwdetect: SoundWire codec modules requested ($1)"
+  else
+    log "hwdetect: SoundWire codec module request failed ($1)"
+  fi
+}
+
+# Latitude 7320 Detachable: intel_hid (INTC1051; there is no INT33D6 for intel_vbtn) is the only SW_TABLET_MODE source.
+# In auto mode it creates its switch only for chassis types 31/32 and only after the first 0xCC/0xCD notify, which
+# boots 8-10 (2026-11-18) never logged ("switch event received"), so Android never reached tablet state.
+# enable_sw_tablet_mode=2 reads VGBS at probe, so Android sees the initial state too. The parameter is read-only (0444):
+# it must be in modprobe.d before coldplug loads intel_hid. TABLET_SWITCH=0 (gbos.cfg) keeps the kernel's auto mode,
+# TABLET_SWITCH=1 selects at-first-event; MODOPTS="intel_hid.enable_sw_tablet_mode=N" wins over both.
+# Prints the modprobe.d line (if any).
+gbos_tablet_switch_opts() {
+  sys=${GBOS_SYSFS_ROOT:-/sys}
+  [ "$(cat "$sys/class/dmi/id/sys_vendor" 2>/dev/null)" = "Dell Inc." ] || return 0
+  [ "$(cat "$sys/class/dmi/id/product_name" 2>/dev/null)" = "Latitude 7320 Detachable" ] || return 0
+  case " $MODOPTS " in
+    *" intel_hid.enable_sw_tablet_mode="*)
+      log "hwdetect: intel_hid tablet switch from MODOPTS" >&2
+      return 0 ;;
+  esac
+  case "${TABLET_SWITCH:-2}" in
+    0) log "hwdetect: TABLET_SWITCH=0: intel_hid tablet switch left in auto mode" >&2; return 0 ;;
+    1|2) ;;
+    *) log "hwdetect: TABLET_SWITCH=$TABLET_SWITCH unknown, using 2" >&2; TABLET_SWITCH=2 ;;
+  esac
+  echo "options intel_hid enable_sw_tablet_mode=${TABLET_SWITCH:-2}"
+  log "hwdetect: intel_hid enable_sw_tablet_mode=${TABLET_SWITCH:-2} (Latitude 7320 Detachable, chassis_type $(cat "$sys/class/dmi/id/chassis_type" 2>/dev/null))" >&2
+}
+
+# Latitude 7320 Detachable: the BIOS enables SoundWire link 2 and declares an RT1308 amp there that is not fitted (Windows
+# enumerates only RT711 link 0, RT1316 link 1, RT714 link 3; the mono topology does not use link 2). Started empty, link 2 logs
+# "Bus clash for control word" x11 and, 3 s later, "Clock stop failed -110" before the driver powers it down anyway.
+# sdw_link_skip_mask (gbOS soundwire_intel parameter, kernel/isa_emu_patch/sdw_link_skip.py) leaves it off from the start; the
+# link stays in the link mask, so the same machine driver and topology are selected. A soundwire-intel.ko without the parameter
+# ignores it ("unknown parameter"). MODOPTS="soundwire_intel.sdw_link_skip_mask=0" restores the upstream behaviour.
+# Prints the modprobe.d line (if any).
+gbos_sdw_link_opts() {
+  sys=${GBOS_SYSFS_ROOT:-/sys}
+  [ "$(cat "$sys/class/dmi/id/sys_vendor" 2>/dev/null)" = "Dell Inc." ] || return 0
+  [ "$(cat "$sys/class/dmi/id/product_name" 2>/dev/null)" = "Latitude 7320 Detachable" ] || return 0
+  case " $MODOPTS " in
+    *" soundwire_intel.sdw_link_skip_mask="*|*" soundwire-intel.sdw_link_skip_mask="*)
+      log "hwdetect: SoundWire link skip mask from MODOPTS" >&2
+      return 0 ;;
+  esac
+  echo "options soundwire_intel sdw_link_skip_mask=4"
+  log "hwdetect: soundwire_intel sdw_link_skip_mask=4 (Latitude 7320 Detachable: link 2 has no codec)" >&2
+}
+
 # MODOPTS="module.param=value ..." (gbos.cfg): configure module parameters generically via /etc/modprobe.d/
 # and /etc/modprobe.conf so that when modalias coldplug loads a driver for a detected device, the parameters
 # are applied naturally without hardcoding drivers or loading modules for hardware not present.
 gbos_modopts() {
   mkdir -p /etc/modprobe.d 2>/dev/null
   : > /etc/modprobe.d/gbos.conf
+  # Before MODOPTS, so a MODOPTS option for the same module comes later and wins.
+  gbos_tablet_switch_opts >> /etc/modprobe.d/gbos.conf
+  gbos_sdw_link_opts >> /etc/modprobe.d/gbos.conf
 
   # Backward compatibility: map legacy XE_PARAMS to options xe ...
   if [ -n "$XE_PARAMS" ]; then
@@ -86,8 +179,22 @@ gbos_modopts() {
 
 # One coldplug pass: all modaliases, de-duplicated, to a single modprobe (it reads modules.alias once).
 gbos_coldplug_pass() {
+  gbos_load_tps68470_children || return 1
   find /sys/devices -name modalias 2>/dev/null | xargs cat 2>/dev/null | sort -u \
     | xargs modprobe -a -q 2>/dev/null
+  gbos_load_ipu6_isys
+}
+
+# After a pass that loaded drivers: wait until their new devices stop appearing (the modalias count is unchanged for two 0.2 s
+# polls), at most 1 s. Was a fixed 1 s per pass (~3 s of the Latitude 7320's 4 passes); a device that shows up later is still
+# caught by the next pass and by gbos_wait_devices.
+gbos_settle_devices() {
+  _sd_last=$(find ${GBOS_SYSFS_DEVICES:-/sys/devices} -name modalias 2>/dev/null | wc -l); _sd_same=0; _sd_t=0
+  while [ $_sd_t -lt ${GBOS_SETTLE_POLLS:-5} ]; do
+    sleep ${GBOS_SETTLE_STEP:-0.2}; _sd_t=$((_sd_t+1))
+    _sd_n=$(find ${GBOS_SYSFS_DEVICES:-/sys/devices} -name modalias 2>/dev/null | wc -l)
+    if [ "$_sd_n" = "$_sd_last" ]; then _sd_same=$((_sd_same+1)); [ $_sd_same -ge 2 ] && return 0; else _sd_same=0; _sd_last=$_sd_n; fi
+  done
 }
 
 # r8169 needs its PHY driver (realtek.ko, always built with it) loaded before it probes. It asks for it with
@@ -107,14 +214,17 @@ gbos_preload_phy() {
 }
 
 gbos_coldplug() {
-  [ -f /lib/modules/$(uname -r)/modules.alias ] || { log "hwdetect: no modules.alias, skipping coldplug"; return 1; }
+  [ -f ${GBOS_MODALIAS:-/lib/modules/$(uname -r)/modules.alias} ] || { log "hwdetect: no modules.alias, skipping coldplug"; return 1; }
   gbos_preload_phy
   # Not loaded by alias: ACPI video (brightness keys), battery already built in.
-  p=1; before=$(wc -l < /proc/modules)
+  p=1; before=$(wc -l < ${GBOS_PROC_MODULES:-/proc/modules})
   while [ $p -le 4 ]; do
-    gbos_coldplug_pass
-    sleep 1; gbos_load_opmodes; mdev -s 2>/dev/null
-    now=$(wc -l < /proc/modules)
+    gbos_coldplug_pass || return 1
+    # The 1 s settle is only for devices created by drivers this pass loaded. A pass that loaded nothing new has
+    # nothing to wait for: the hook's second coldplug spent its whole 1.1 s here ("122 (was 122)", Latitude 7320).
+    if [ "$(wc -l < ${GBOS_PROC_MODULES:-/proc/modules})" -ne $before ]; then gbos_settle_devices; fi
+    gbos_load_opmodes; mdev -s 2>/dev/null
+    now=$(wc -l < ${GBOS_PROC_MODULES:-/proc/modules})
     log "hwdetect: coldplug pass $p: $now modules loaded (was $before)"
     [ $now -eq $before ] && break
     before=$now; p=$((p+1))
@@ -134,19 +244,247 @@ gbos_wait_devices() {
     # Peripherals created by the drivers loaded above (SoundWire codecs, Surface Aggregator children) appear after the first
     # coldplug: another pass every 2 s while waiting.
     [ $((i % 2)) -eq 1 ] && gbos_coldplug_pass
-    # SoundWire codecs were not autoloaded by the coldplug here (root cause not found, modalias present on the Surface Laptop 7;
-    # on the Latitude 7320 (Tiger Lake) the codec sysfs entries exist but have an empty modalias): ask for them by name once the
-    # SoundWire machine driver is in. Surface Laptop 7: RT1320 amp + RT721 jack codec. Latitude 7320: RT711 (SDCA) jack codec,
-    # RT1316 amp, RT714 (rt715-sdca driver) on the topology sof-tgl-rt711-l0-rt1316-l1-mono-rt714-l3. Harmless without the chips.
-    # Once per boot (the module names are only asked for when the machine driver is loaded).
-    if grep -q '^snd_soc_sof_sdw ' /proc/modules && [ -z "$GBOS_SDW_REQ" ]; then
-      GBOS_SDW_REQ=1
-      modprobe -a -q snd-soc-rt1320-sdw snd-soc-rt721-sdca snd-soc-rt711-sdca snd-soc-rt1316-sdw snd-soc-rt715-sdca 2>/dev/null \
-        && log "hwdetect: SoundWire codec modules requested (rt1320, rt721, rt711-sdca, rt1316, rt715-sdca)"
-    fi
     sleep 1; i=$((i+1))
   done
   log "hwdetect: devices after ${i}s: wifi=$(ls /sys/class/net 2>/dev/null | grep '^wl' | tr '\n' ' ') bt=$(ls /sys/class/bluetooth 2>/dev/null | tr '\n' ' ') sound=$(cat /proc/asound/cards 2>/dev/null | grep '\[' | tr -s ' ' | tr '\n' ';') backlight=$(ls /sys/class/backlight 2>/dev/null | tr '\n' ' ')"
+}
+
+# Thermal zones and cooling devices, so a device thermal config can be written from real data.
+# Android's Pixel thermal HAL looks sensors up by zone type; Google's Lapis profile expects TSR0-TSR4,
+# while e.g. the Latitude 7320's ACPI participants are TCPU, TSKN, TMEM, CHRG, AMBF, NGFF (Windows DTT).
+gbos_report_thermal() {
+  sys=${GBOS_SYSFS_ROOT:-/sys}
+  echo "== thermal zones (zone type temp_mC policy; trips: type temp_mC)"
+  for z in "$sys"/class/thermal/thermal_zone*; do
+    [ -d "$z" ] || continue
+    echo "${z##*/} $(cat "$z/type" 2>/dev/null) $(cat "$z/temp" 2>/dev/null || echo ?) $(cat "$z/policy" 2>/dev/null)"
+    for t in "$z"/trip_point_*_type; do
+      [ -f "$t" ] || continue
+      n=${t%_type}
+      echo "  ${n##*/}: $(cat "$t" 2>/dev/null) $(cat "${n}_temp" 2>/dev/null)"
+    done
+  done
+  echo "== RAPL power limits before Android (zone constraint name power_uW window_us)"
+  for z in "$sys"/class/powercap/intel-rapl*; do
+    [ -d "$z" ] || continue
+    for n in "$z"/constraint_*_name; do
+      [ -f "$n" ] || continue
+      c=${n%_name}
+      echo "${z##*/} $(cat "$z/name" 2>/dev/null) ${c##*/}: $(cat "$n" 2>/dev/null) $(cat "${c}_power_limit_uw" 2>/dev/null) $(cat "${c}_time_window_us" 2>/dev/null)"
+    done
+  done
+  echo "== cooling devices (device type cur/max)"
+  for c in "$sys"/class/thermal/cooling_device*; do
+    [ -d "$c" ] || continue
+    echo "${c##*/} $(cat "$c/type" 2>/dev/null) $(cat "$c/cur_state" 2>/dev/null)/$(cat "$c/max_state" 2>/dev/null)"
+  done
+}
+
+gbos_report_camera_bus_devices() {
+  sys=${GBOS_SYSFS_ROOT:-/sys}
+  echo "== camera platform devices"
+  for d in "$sys"/bus/platform/devices/INT3472* "$sys"/bus/platform/devices/INT3482* "$sys"/bus/platform/devices/tps68470-*; do
+    [ -e "$d" ] && echo "${d##*/} modalias=$(cat "$d/modalias" 2>/dev/null) driver=$(readlink "$d/driver" 2>/dev/null | sed 's#.*/##')"
+  done
+  echo "== i2c devices"
+  for d in "$sys"/bus/i2c/devices/[0-9]* "$sys"/bus/i2c/devices/i2c-*; do
+    [ -e "$d" ] && echo "${d##*/} name=$(cat "$d/name" 2>/dev/null) modalias=$(cat "$d/modalias" 2>/dev/null) driver=$(readlink "$d/driver" 2>/dev/null | sed 's#.*/##')"
+  done
+  echo "== media devices"
+  for m in "$sys"/bus/media/devices/media*; do
+    [ -e "$m" ] && echo "${m##*/} model=$(cat "$m/model" 2>/dev/null) path=$(readlink -f "$m" 2>/dev/null)"
+  done
+  return 0
+}
+
+gbos_report_camera_media_graph() {
+  sys=${GBOS_SYSFS_ROOT:-/sys}
+  vendor=$(cat "$sys/class/dmi/id/sys_vendor" 2>/dev/null)
+  product=$(cat "$sys/class/dmi/id/product_name" 2>/dev/null)
+  if [ "$vendor" != "Dell Inc." ] || [ "$product" != "Latitude 7320 Detachable" ]; then
+    echo "== media topology capture (not Latitude 7320 Detachable; skipped)"
+    return 0
+  fi
+  helper=${GBOS_CAMERA_MEDIA_GRAPH_BIN:-/postinstall/gbos/installer/bin/camera-media-graph}
+  node=${GBOS_CAMERA_MEDIA_NODE:-/dev/media0}
+  echo "== read-only media topology $node"
+  if [ ! -x "$helper" ]; then
+    echo "ERROR: media topology helper is missing or not executable: $helper"
+    return 1
+  fi
+  if [ ! -e "$node" ]; then
+    echo "ERROR: media device is missing: $node"
+    return 1
+  fi
+  if "$helper" "$node"; then
+    return 0
+  else
+    rc=$?
+    echo "ERROR: media topology helper failed with status $rc"
+    return "$rc"
+  fi
+}
+
+gbos_report_camera_acpi_state() {
+  sys=$1
+  id=$2
+  d="$sys/bus/acpi/devices/$id"
+  echo "== ACPI device power state $id"
+  if [ ! -e "$d" ]; then
+    echo "(ACPI device unavailable)"
+    return 0
+  fi
+  for f in path status modalias power_state power/runtime_status power/control power/wakeup; do
+    [ -r "$d/$f" ] || continue
+    case "$f" in
+      power/runtime_status) key=runtime_status ;;
+      power/control) key=power_control ;;
+      power/wakeup) key=power_wakeup ;;
+      *) key=$f ;;
+    esac
+    echo "acpi_$key=$(cat "$d/$f" 2>/dev/null)"
+  done
+  if [ -L "$d/physical_node" ]; then
+    echo "acpi_physical_node=$(readlink "$d/physical_node")"
+  fi
+  acpi_supplier_found=0
+  for link in "$d"/supplier:*; do
+    [ -L "$link" ] || continue
+    acpi_supplier_found=1
+    echo "acpi_${link##*/}=$(readlink "$link")"
+  done
+  [ "$acpi_supplier_found" = 1 ] || echo "acpi_supplier_links=(none)"
+  return 0
+}
+
+gbos_report_camera_probe_state() {
+  sys=${GBOS_SYSFS_ROOT:-/sys}
+  echo "== camera probe state"
+  found=0
+  for d in "$sys"/bus/i2c/devices/i2c-OVTI5678:* "$sys"/bus/i2c/devices/i2c-OVTI8856:*; do
+    [ -e "$d" ] || continue
+    found=1
+    echo "${d##*/} driver=$(readlink "$d/driver" 2>/dev/null | sed 's#.*/##')"
+    for f in modalias uevent power/runtime_status power/control; do
+      if [ -r "$d/$f" ]; then
+        echo "-- $f"
+        cat "$d/$f"
+      fi
+    done
+    if [ -r "$d/driver_override" ]; then
+      echo "driver_override=$(cat "$d/driver_override")"
+    fi
+    for f in status modalias; do
+      if [ -r "$d/firmware_node/$f" ]; then
+        echo "firmware_node_$f=$(cat "$d/firmware_node/$f")"
+      fi
+    done
+    if [ -L "$d/firmware_node/driver" ]; then
+      echo "firmware_node_driver=$(readlink "$d/firmware_node/driver" | sed 's#.*/##')"
+    fi
+    for f in firmware_node physical_node; do
+      for link in "$d"/$f; do
+        [ -L "$link" ] && echo "${link##*/}=$(readlink "$link")"
+      done
+    done
+    supplier_found=0
+    for link in "$d"/supplier:*; do
+      [ -L "$link" ] || continue
+      supplier_found=1
+      echo "${link##*/}=$(readlink "$link")"
+    done
+    [ "$supplier_found" = 1 ] || echo "supplier_links=(none)"
+    case "${d##*/}" in
+      i2c-OVTI8856:*)
+        device_path=$(readlink -f "$d" 2>/dev/null)
+        if [ -n "$device_path" ]; then
+          echo "i2c_sysfs_path=$device_path"
+          echo "i2c_parent_path=${device_path%/*}"
+        fi
+        gbos_report_camera_acpi_state "$sys" "${d##*/i2c-}"
+        ;;
+    esac
+  done
+  [ "$found" = 1 ] || echo "(no matching sensor I2C devices)"
+  if [ -r "$sys/bus/i2c/drivers_autoprobe" ]; then
+    echo "i2c drivers_autoprobe=$(cat "$sys/bus/i2c/drivers_autoprobe")"
+  fi
+  for d in "$sys"/bus/i2c/drivers/ov5675 "$sys"/bus/i2c/drivers/ov8856; do
+    [ -d "$d" ] && echo "registered i2c driver=${d##*/}"
+  done
+  deferred="${GBOS_CAMERA_DEBUGFS:-$sys/kernel/debug}/devices_deferred"
+  if [ -r "$deferred" ]; then
+    echo "== camera-related deferred probes"
+    if grep -iE 'OVTI5678|OVTI8856|INT3472|tps68470|ipu6' "$deferred"; then
+      :
+    else
+      case $? in
+        1) echo "(none reported)" ;;
+        *) echo "ERROR: could not read deferred probes" ;;
+      esac
+    fi
+  else
+    echo "== deferred probes unavailable ($deferred)"
+  fi
+  return 0
+}
+
+gbos_report_camera_debug() (
+  sys=${GBOS_SYSFS_ROOT:-/sys}
+  if [ -r "$sys/kernel/debug/devices_deferred" ]; then
+    gbos_report_camera_probe_state
+    return
+  fi
+  tmp=$(mktemp -d "${GBOS_CAMERA_TMPDIR:-/dev}/gbos-camera-debug.XXXXXX") || {
+    echo "ERROR: could not create temporary debugfs mount point"
+    gbos_report_camera_probe_state
+    return 1
+  }
+  mounted=0
+  cleanup_camera_debug() {
+    if [ "$mounted" = 1 ]; then
+      umount "$tmp" || { echo "ERROR: could not unmount temporary camera debugfs at $tmp"; return 1; }
+      mounted=0
+    fi
+    rmdir "$tmp" || { echo "ERROR: could not remove temporary camera debugfs directory $tmp"; return 1; }
+  }
+  trap 'cleanup_camera_debug' EXIT
+  trap 'exit 1' HUP INT TERM
+  if mount -t debugfs -o ro,nosuid,nodev,noexec debugfs "$tmp"; then
+    mounted=1
+    GBOS_CAMERA_DEBUGFS=$tmp gbos_report_camera_probe_state
+  else
+    echo "ERROR: could not mount temporary read-only debugfs"
+    gbos_report_camera_probe_state
+    exit 1
+  fi
+  cleanup_camera_debug || exit 1
+  trap - EXIT
+)
+
+# Input devices and switches (tablet mode: which device reports SW_LID / SW_TABLET_MODE, the serio port atkbd is on,
+# and what intel_hid resolved its tablet-switch mode to).
+gbos_report_input() {
+  sys=${GBOS_SYSFS_ROOT:-/sys}
+  echo "== tablet switch: chassis_type=$(cat "$sys/class/dmi/id/chassis_type" 2>/dev/null)" \
+       "intel_hid enable_sw_tablet_mode=$(cat "$sys/module/intel_hid/parameters/enable_sw_tablet_mode" 2>/dev/null || echo '(intel_hid not loaded)')" \
+       "intel_vbtn=$(grep -q '^intel_vbtn ' "${GBOS_PROC_MODULES:-/proc/modules}" 2>/dev/null && echo loaded || echo 'not loaded')"
+  echo "modprobe.d: $(grep -h intel_hid /etc/modprobe.d/*.conf 2>/dev/null | tr '\n' ';')"
+  echo "ACPI: $(ls "$sys/bus/acpi/devices" 2>/dev/null | grep -E '^(INTC1051|INTC1070|INTC1078|INT33D6|INT33D5|PNP0C0D|PNP0C60)' | tr '\n' ' ')"
+  echo "== input capabilities (input name: ev sw)"
+  for i in "$sys"/class/input/input*; do
+    [ -e "$i/name" ] || continue
+    echo "${i##*/} $(cat "$i/name" 2>/dev/null): ev=$(cat "$i/capabilities/ev" 2>/dev/null) sw=$(cat "$i/capabilities/sw" 2>/dev/null)"
+  done
+  echo "== serio ports (port description driver bind_mode)"
+  for p in "$sys"/bus/serio/devices/serio*; do
+    [ -e "$p" ] || continue
+    echo "${p##*/} $(cat "$p/description" 2>/dev/null) driver=$(readlink "$p/driver" 2>/dev/null | sed 's#.*/##') bind_mode=$(cat "$p/bind_mode" 2>/dev/null)"
+  done
+  echo "== intel_hid / intel_vbtn dmesg"
+  dmesg 2>/dev/null | grep -iE 'intel[-_]hid|intel[-_]vbtn|INTC10[57][018]|INT33D6|switch event|5 button|platform supports|Intel HID' | tail -n 20
+  echo "== /proc/bus/input/devices"
+  cat "${GBOS_INPUT_DEVICES:-/proc/bus/input/devices}" 2>&1
 }
 
 gbos_hw_report() {
@@ -155,18 +493,35 @@ gbos_hw_report() {
     echo "== kernel"; uname -a
     echo "== cpu"; grep -m1 'model name' /proc/cpuinfo; for f in avx avx2 fma bmi2 sha_ni gfni avx_vnni avx512f; do grep -m1 -qw $f /proc/cpuinfo && echo "$f yes" || echo "$f NO"; done
     echo "== dmi"; for f in sys_vendor product_name product_version bios_version board_name; do echo "$f=$(cat /sys/class/dmi/id/$f 2>/dev/null)"; done
-    echo "== pci devices without a driver (slot class vendor:device)"
+    echo "== pci devices without a driver (slot class vendor:device modalias)"
     for d in /sys/bus/pci/devices/*; do
-      [ -e $d/driver ] || echo "${d##*/} $(cat $d/class) $(cat $d/vendor):$(cat $d/device)"
+      [ -e "$d/driver" ] || echo "${d##*/} $(cat "$d/class") $(cat "$d/vendor"):$(cat "$d/device") modalias=$(cat "$d/modalias" 2>/dev/null)"
     done
     echo "== usb devices (vid:pid product)"
     for d in /sys/bus/usb/devices/[0-9]*-[0-9.]*; do
       [ -f $d/idVendor ] && echo "$(cat $d/idVendor):$(cat $d/idProduct) $(cat $d/product 2>/dev/null) drv=$(for i in $d:*; do readlink $i/driver 2>/dev/null; done | sed 's#.*/##' | sort -u | tr '\n' ',')"
     done
     echo "== input"; grep -E '^(N: Name|H: Handlers)' /proc/bus/input/devices
+    echo "== iio devices"
+    for d in /sys/bus/iio/devices/iio:device*; do
+      [ -e "$d" ] || continue
+      echo "${d##*/} name=$(cat "$d/name" 2>/dev/null) device=$(readlink -f "$d/device" 2>/dev/null) driver=$(readlink "$d/device/driver" 2>/dev/null | sed 's#.*/##')"
+      for a in "$d"/in_accel_*_raw "$d"/in_accel_*_scale; do [ -e "$a" ] && echo "  ${a##*/}"; done
+    done
+    echo "== HID sensor platform devices"
+    for d in /sys/bus/platform/devices/HID-SENSOR-*; do
+      [ -e "$d" ] && echo "${d##*/} modalias=$(cat "$d/modalias" 2>/dev/null) driver=$(readlink "$d/driver" 2>/dev/null | sed 's#.*/##')"
+    done
+    gbos_report_camera_bus_devices
+    gbos_report_camera_probe_state
+    echo "== video devices (cameras)"
+    for v in /sys/class/video4linux/*; do
+      [ -e "$v" ] && echo "${v##*/} $(cat "$v/name" 2>/dev/null) driver=$(readlink "$v/device/driver" 2>/dev/null | sed 's#.*/##')"
+    done
     echo "== net";   ls /sys/class/net
     echo "== bluetooth"; ls /sys/class/bluetooth 2>&1
     echo "== backlight"; for b in /sys/class/backlight/*; do [ -e $b ] && echo "$b max=$(cat $b/max_brightness) cur=$(cat $b/brightness)"; done
+    gbos_report_thermal
     # DRM cards and the driver bound to each, then the driver's own dmesg (amdgpu: ip blocks, firmware, ring tests, "[drm] Display Core").
     echo "== gpu (drm card: driver)"; for c in /sys/class/drm/card[0-9]*; do case ${c##*/} in card*-*) continue;; esac; [ -e $c ] && echo "${c##*/}: $(readlink $c/device/driver 2>/dev/null | sed 's#.*/##') $(cat $c/device/vendor $c/device/device 2>/dev/null | tr '\n' ' ')"; done
     echo "== gpu dmesg"; dmesg | grep -iE 'amdgpu|\[drm|drm:|i915|simpledrm|xe 0000|\*ERROR\*' | head -n 100
@@ -182,7 +537,8 @@ gbos_hw_report() {
     echo "== sound speaker nodes"
     for c in /proc/asound/card*/codec#*; do [ -f "$c" ] && { echo "--- $c"; awk '/^Node 0x(02|03|14|17|21) /{print; p=1; next} /^Node /{p=0} p' "$c" | head -n 80; }; done
     echo "== sound dmesg"; dmesg | grep -iE 'sof|snd_|hdaudio|hda_|hdac|dmic|tplg|topology|skl_hda|dspcfg|audio|tas2[0-9]+|TAS2XXX' | head -n 80
-    echo "== soundwire"; for d in /sys/bus/soundwire/devices/*; do [ -e $d ] && echo "${d##*/} modalias=$(cat $d/modalias 2>/dev/null) driver=$(readlink $d/driver 2>/dev/null | sed 's#.*/##')"; done
+    echo "== soundwire"; for d in /sys/bus/soundwire/devices/*; do [ -e $d ] && echo "${d##*/} modalias=$(cat $d/modalias 2>/dev/null) driver=$(readlink $d/driver 2>/dev/null | sed 's#.*/##') status=$(cat $d/status 2>/dev/null)"; done
+    echo "soundwire_intel sdw_link_skip_mask=$(cat /sys/module/soundwire_intel/parameters/sdw_link_skip_mask 2>/dev/null || echo '(no parameter)')"
     echo "== soundwire dmesg"; dmesg | grep -iE 'sdw|soundwire|rt1320|rt721|sdca|asoc|tplg' | grep -v find_sdca_function | tail -n 60
     echo "== rfkill"; for r in /sys/class/rfkill/*; do [ -e $r ] && echo "$(cat $r/name) $(cat $r/type) soft=$(cat $r/soft) hard=$(cat $r/hard)"; done
     echo "== missing firmware"; dmesg | grep -iE 'firmware.*(failed|not found|-2\))|Direct firmware load.*failed|failed to load.*(ucode|\.bin|\.sfi)' | sort -u
@@ -191,12 +547,12 @@ gbos_hw_report() {
     for c in /sys/class/drm/card*-*; do
       [ -e $c/status ] && { echo "${c##*/} status=$(cat $c/status) enabled=$(cat $c/enabled 2>/dev/null)"; head -6 $c/modes 2>/dev/null | sed 's/^/    /'; }
     done
-    echo "== video devices (cameras)"; for v in /sys/class/video4linux/*; do [ -e $v ] && echo "${v##*/} $(cat $v/name)"; done
     for m in xe i915; do
       [ -d /sys/module/$m/parameters ] && { echo "== $m parameters"; for p in /sys/module/$m/parameters/*; do echo "${p##*/}=$(cat $p 2>/dev/null)"; done; }
     done
-    echo "== driver messages (wifi, graphics, camera, audio, bluetooth; first 250)"
-    dmesg | grep -iE 'iwlwifi|iwlmvm|iwlmld|\bxe [0-9a-f:.]+|\[drm|ipu[0-9]|intel-ipu|ivsc|sof-audio|snd_sof|sof-firmware|soundwire|cs42l43|Bluetooth: hci|btintel|No config found|unsupported' | head -250
+    echo "== driver messages (wifi, graphics, camera, sensors, audio, bluetooth; first 250)"
+    dmesg | grep -iE 'iwlwifi|iwlmvm|iwlmld|\bxe [0-9a-f:.]+|\[drm|ipu[0-9]|intel-ipu|ivsc|camera|hid[_-]sensor|intel_ish|ishtp|iio|sof-audio|snd_sof|sof-firmware|soundwire|cs42l43|Bluetooth: hci|btintel|No config found|unsupported' | head -250
+    gbos_report_input
     echo "== lsmod"; lsmod
   } > $L/hwdetect.txt 2>&1
   log "hwdetect: report written (hwdetect.txt)"
@@ -206,7 +562,10 @@ gbos_hw_report() {
 gbos_hwdetect() {
   [ -f $G/gbos.cfg ] && [ "$HWDETECT" = 0 ] && { log "hwdetect: disabled (HWDETECT=0)"; return 0; }
   [ -d $G/firmware ] && echo -n $G/firmware > $GBOS_FWPATH
-  gbos_modules_mount && gbos_modopts && gbos_coldplug && gbos_wait_devices ${1:-15}
+  if gbos_modules_mount && gbos_modopts; then
+    gbos_load_soundwire_codecs "before coldplug"
+    gbos_coldplug && gbos_wait_devices ${1:-15}
+  fi
   # The brightness keys/backlight need acpi_video when the panel has no native backlight.
   [ -d /sys/class/backlight ] && [ -z "$(ls /sys/class/backlight 2>/dev/null)" ] && modprobe -q video 2>/dev/null
   gbos_hw_report

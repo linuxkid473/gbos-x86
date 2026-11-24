@@ -195,14 +195,18 @@ mkdir -p "$MNT_SYS/EFI/BOOT" "$MNT_SYS/gbos/logs"
 [ -f "$U/out/BOOTX64.EFI" ] && cp "$U/out/BOOTX64.EFI" "$MNT_SYS/EFI/BOOT/BOOTX64.EFI"
 [ -f "$ROOT/kernel/out/busybox" ] && cp "$ROOT/kernel/out/busybox" "$MNT_SYS/busybox"
 
-for f in hook.sh optimize.sh aidiag.sh native_zygote.sh early_patch.sh hwdetect.sh install.sh apex_patch.sh gbos.cfg \
-         crossystem bootdisk.img libkm_compat.so system_ext_manifest.xml soft_gk; do
+# The same files and folders usb/install.sh copies to an internal disk (tools/test_build_lists.sh keeps them in step).
+for f in hook.sh stick_fat.sh aidiag.sh native_zygote.sh early_patch.sh sensor_vendor_overlay.sh sensor_trial_diag.sh \
+         tablet_mode.sh hwdetect.sh sensordiag.sh mask_vendor_modules.sh install.sh apex_patch.sh gbos.cfg \
+         crossystem bootdisk.img libkm_compat.so system_ext_manifest.xml soft_gk gbos_fp sysupdate.sh sysupdate.pub gbos86-updater.apk; do
   [ -f "$U/$f" ] && cp "$U/$f" "$MNT_SYS/gbos/$f"
 done
 
-for d in firmware patched audio installer kmod modules surface ksu; do
+for d in firmware patched audio installer kmod modules surface ksu sensors camera thermal display; do
   [ -d "$U/$d" ] && { mkdir -p "$MNT_SYS/gbos/$d"; cp -R "$U/$d/." "$MNT_SYS/gbos/$d/"; }
 done
+# Latitude 7320 sensor sub-HAL built by build.sh (GBOS_SENSOR_PAYLOAD), as tools/make_gbos86_image.sh stages it.
+if [ -n "${GBOS_SENSOR_PAYLOAD:-}" ]; then sh "$ROOT/sensors/trogdor/image_payload.sh" stage "$GBOS_SENSOR_PAYLOAD" "$MNT_SYS/gbos"; fi
 # Ensure both '+' and non-'+' versions exist on the FAT32 filesystem
 for _m in "$MNT_SYS/gbos/modules/lib/modules/"*-gbos-whl+; do
   if [ -d "$_m" ]; then
@@ -235,6 +239,11 @@ cp "$SUPER/super.img" "$MNT_SYS/gbos/super.img" && cp "$SUPER/super.layout" "$MN
 
 # Ensure MODE=boot in gbos.cfg
 sed -i 's/^MODE=.*/MODE=boot/' "$MNT_SYS/gbos/gbos.cfg" 2>/dev/null || true
+# Latitude 7320 cameras: build.sh passes GBOS_IPU6_CAMERA_BRIDGE=1 by default (usb/gbos.cfg keeps CAMERA_BRIDGE=0).
+if [ "${GBOS_IPU6_CAMERA_BRIDGE:-0}" = 1 ]; then
+  if grep -q '^CAMERA_BRIDGE=' "$MNT_SYS/gbos/gbos.cfg"; then sed -i 's/^CAMERA_BRIDGE=.*/CAMERA_BRIDGE=1/' "$MNT_SYS/gbos/gbos.cfg"
+  else printf '\nCAMERA_BRIDGE=1\n' >> "$MNT_SYS/gbos/gbos.cfg"; fi
+fi
 
 # Apply hardware auto-tailoring if enabled
 if [ "$AUTO_TAILOR" = 1 ]; then

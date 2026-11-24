@@ -266,6 +266,45 @@ print('PYOK' if not bad else 'PYBAD'); sys.exit(1 if bad else 0)
 EOF
 if [ $? = 0 ]; then ok "sdw: Speaker pcm 2, Headphone pcm 0, jack mic pcm 1, no Deepbuffer PCM, jack names"; else bad "sdw mapping: $(cat $W/sdw.py.out)"; fi
 
+# ---- 5c. Dell Latitude 7320 Detachable: dedicated Speaker PCM 2 vs jack playback PCM 0 -------------------------------
+D=$(mk latitude7320)
+cat > $D/cards <<'EOF'
+ 0 [sofsoundwire   ]: sof-soundwire - sof-soundwire
+                      DellInc-Latitude7320Detachable-0TNW0H
+EOF
+cat > $D/pcm <<'EOF'
+00-00: Jack Out (*) :  : playback 1
+00-01: Jack In (*) :  : capture 1
+00-02: Speaker (*) :  : playback 1
+00-05: HDMI1 (*) :  : playback 1
+00-06: HDMI2 (*) :  : playback 1
+00-07: HDMI3 (*) :  : playback 1
+00-31: Deepbuffer Jack Out (*) :  : playback 1
+00-35: Deepbuffer Speaker (*) :  : playback 1
+EOF
+cat > $D/input <<'EOF'
+EOF
+gen latitude7320 gbos-gen sofsoundwire sof-soundwire >/dev/null
+C=$W/out-latitude7320/gbos-gen/audio_config.xml
+wellformed "$C"
+python3 - "$C" > "$W/latitude7320.py.out" 2>&1 <<'EOF'
+import sys, xml.etree.ElementTree as E
+h = E.parse(sys.argv[1]).getroot().find('HiFi')
+got = {name: h.findtext(f'{name}/PlaybackPCM')
+       for name in ('Speaker', 'Headphone', 'HDMI1', 'HDMI2', 'HDMI3')}
+want = {'Speaker': 'hw:sofsoundwire,2', 'Headphone': 'hw:sofsoundwire,0',
+        'HDMI1': 'hw:sofsoundwire,5', 'HDMI2': 'hw:sofsoundwire,6',
+        'HDMI3': 'hw:sofsoundwire,7'}
+if got != want:
+    print(f'FAIL got {got}, want {want}')
+    sys.exit(1)
+print('PYOK')
+EOF
+if [ $? = 0 ]; then ok "7320: Speaker PCM 2 and headphone/jack PCM 0"; else bad "7320 PCM mapping: $(cat "$W/latitude7320.py.out")"; fi
+nochk "7320: generated template comment does not misidentify Latitude 5300" "$C" "Latitude 5300"
+chk "7320: PCM diagnostic distinguishes speaker and jack playback" "$W/msg-latitude7320" "speaker-playback=2 headphone-playback=0"
+nochk "7320: generated default profile comment does not misidentify Latitude 5300" "$W/out-latitude7320/audio_default.xml" "Latitude 5300"
+
 # ---- 5c. Meteor Lake SOF-HDA (Lenovo ThinkBook Plus G5 Hybrid 21N9, Core Ultra 7 155H; TAS2781 I2C amps behind the Realtek codec; HDMI
 #          codec at address 2). NOT a real /proc/asound capture: the card does not exist yet (probe fails on the missing topology).
 #          Card id/name are what skl_hda_dsp_generic registers (same as the ENVY); the PCM list is the one in
@@ -306,6 +345,7 @@ nochk "mtl: no leftover PCH" "$C" "PCH"
 H=$ROOT/usb/hook.sh
 chk "hook: PCH uses the shipped config"   "$H" 'ASRC=$G/audio/gbos-hda-pch; ADEF=$G/audio/audio_default.xml'
 chk "hook: generation only for non-PCH"   "$H" 'if [ -n "$CID" ] && [ "$CID" != PCH ]; then'
+chk "hook: no-card path leaves vendor audio configuration untouched" "$H" 'hook: no ALSA card; leaving vendor audio configuration untouched'
 chk "hook: calls the generator"           "$H" 'sh $G/audio/gen_config.sh'
 chk "hook: clears stale sound nodes after HDA re-probe" "$H" 'rm -f /dev/snd/*'
 chk "hook: rebuilds sound nodes from sysfs after HDA re-probe" "$H" 'for _snd in /sys/class/sound/*; do'
@@ -313,9 +353,78 @@ chk "hook: creates sound nodes with sysfs device numbers" "$H" 'mknod -m 0660 "/
 nochk "hook: no temporary early audio diagnostic service" "$H" 'gbos_audiodiag_early'
 nochk "hook: no temporary early audio diagnostic trigger" "$H" 'start gbos_audiodiag_early'
 chk "hook: Surface mixer_paths only on the Surface (DMI), not on every sofsoundwire card" "$H" "grep -qi 'Surface Laptop.*7th Edition' /sys/class/dmi/id/product_name"
+chk "hook: Latitude 7320 mixer path requires matching card, model, and board" "$H" "grep -qi '0TNW0H' /sys/class/dmi/id/board_name"
+chk "hook: Latitude 7320 mixer path is installed only for its SoundWire card" "$H" 'cp $G/audio/mixer_paths_latitude_7320.xml /tmp/gbos-audio/$AC/mixer_paths.xml'
+chk "hook: Latitude 7320 audio config is installed with its mixer path" "$H" 'cp $G/audio/audio_config_latitude_7320.xml /tmp/gbos-audio/$AC/audio_config.xml'
 chk "hook: generated config is copied into the tmpfs" "$H" 'cp -r $ASRC/. $A/$AC/'
 nochk "hook: no bind mount of the initramfs /tmp config" "$H" 'mount --bind $ASRC $A/$AC'
 sh -n "$H" && sh -n "$GEN" && ok "sh -n hook.sh gen_config.sh" || bad "syntax"
+
+# ---- 6a. Dell Latitude 7320 Detachable: RT1316 DAC and RT711/RT714 capture routes ---------------------------------
+M7320=$ROOT/usb/audio/mixer_paths_latitude_7320.xml
+AC7320=$ROOT/usb/audio/audio_config_latitude_7320.xml
+wellformed "$M7320" "$AC7320"
+python3 - "$M7320" > "$W/latitude7320-mixer.py.out" 2>&1 <<'EOF'
+import sys, xml.etree.ElementTree as E
+r = E.parse(sys.argv[1]).getroot()
+speaker = r.find("./path[@name='Speaker']")
+controls = {c.get('name'): c.get('value') for c in speaker.findall('ctl')}
+want = {'rt1316-1 RX Channel Select': 'L,R', 'rt1316-1 DAC Switch': '1 1'}
+if controls != want:
+    print(f'FAIL controls {controls}, want {want}')
+    sys.exit(1)
+for path, name in (('Mic', 'rt711 FU0F Capture Switch'),
+                   ('InternalMic', 'rt714 FU02 Capture Switch')):
+    entries = r.findall(f"./path[@name='{path}']/ctl")
+    if [(c.get('name'), c.get('value')) for c in entries] != [(name, '1')]:
+        print(f'FAIL {path} controls {[(c.get("name"), c.get("value")) for c in entries]}')
+        sys.exit(1)
+print('PYOK')
+EOF
+if [ $? = 0 ]; then ok "7320 mixer: speaker DAC and RT711/RT714 capture switches are route-scoped"; else bad "7320 mixer path: $(cat "$W/latitude7320-mixer.py.out")"; fi
+python3 - "$AC7320" > "$W/latitude7320-config.py.out" 2>&1 <<'EOF'
+import sys, xml.etree.ElementTree as E
+h = E.parse(sys.argv[1]).getroot().find('HiFi')
+got = {(name, field): h.findtext(f'{name}/{field}')
+       for name, field in (('Speaker', 'PlaybackPCM'), ('Headphone', 'PlaybackPCM'),
+                           ('Mic', 'CapturePCM'), ('Mic', 'CaptureMixerElem'),
+                           ('Mic', 'JackDev'), ('InternalMic', 'CapturePCM'))}
+want = {('Speaker', 'PlaybackPCM'): 'hw:sofsoundwire,2',
+        ('Headphone', 'PlaybackPCM'): 'hw:sofsoundwire,0',
+        ('Mic', 'CapturePCM'): 'hw:sofsoundwire,1',
+        ('Mic', 'CaptureMixerElem'): 'rt711 FU0F',
+        ('Mic', 'JackDev'): 'sof-soundwire Headset Jack',
+        ('InternalMic', 'CapturePCM'): 'hw:sofsoundwire,4'}
+if got != want:
+    print(f'FAIL got {got}, want {want}')
+    sys.exit(1)
+print('PYOK')
+EOF
+if [ $? = 0 ]; then ok "7320 config: InternalMic PCM 4, headset Mic PCM 1 / RT711"; else bad "7320 config: $(cat "$W/latitude7320-config.py.out")"; fi
+
+# ---- 6b. mixer diagnostics: use bundled amixer when optional tinymix is absent --------------------------------------------
+M=$ROOT/usb/audio/mixdiag.sh
+sh -n "$M" && ok "sh -n audio/mixdiag.sh" || bad "mixdiag syntax"
+D=$W/mixdiag
+mkdir -p "$D/a11y/lib" "$D/a11y/bin" "$D/a11y/share/alsa" "$D/logs/boot-test"
+cat > "$D/a11y/lib/ld-musl-x86_64.so.1" <<'EOF'
+#!/bin/sh
+[ "$1" = "--library-path" ] || exit 1
+shift 2
+exec "$@"
+EOF
+cat > "$D/a11y/bin/amixer" <<'EOF'
+#!/bin/sh
+printf 'fake amixer: %s (config=%s, config_dir=%s)\n' "$*" "$ALSA_CONFIG_PATH" "$ALSA_CONFIG_DIR"
+EOF
+chmod +x "$D/a11y/lib/ld-musl-x86_64.so.1" "$D/a11y/bin/amixer"
+GBOS_AUDIO_DIAG_ROOT=$D sh "$M" test
+grep -q '(using bundled amixer)' "$D/logs/boot-test/mixer.txt" \
+  && grep -q 'fake amixer: -D hw:0 contents' "$D/logs/boot-test/mixer.txt" \
+  && grep -q "$D/a11y/share/alsa/alsa.conf" "$D/logs/boot-test/mixer.txt" \
+  && grep -q "config_dir=$D/a11y/share/alsa" "$D/logs/boot-test/mixer.txt" \
+  && ok "mixdiag: bundled amixer uses explicit card and bundled ALSA config" \
+  || bad "mixdiag: bundled amixer fallback did not run"
 
 # ---- 7. card selection: skip the GPU's HDMI audio, whatever it is called ----------------------------------------------------
 sed -n '/^# --- audio card selection/,/^# --- end audio card selection ---/p' "$H" > $W/cardsel.sh

@@ -1,0 +1,117 @@
+#version 450
+// Colour grid: one 4x4 mosaic window per point to linear R, G, B and the window's green
+// (rgb_linear_at in kernel/ipu6-loopback.c).
+layout(local_size_x = 16, local_size_y = 16) in;
+#include "common.glsl"
+
+float chroma_keep_for(float rho, float hf)
+{
+	float keep = 1.0;
+	float d = rho - P.wb_nir_ratio - P.nir_free;
+	if (d > 0.0)
+		keep = 1.0 / (1.0 + d / P.nir_half);
+	if (hf > P.hf_start) {
+		float t = min((hf - P.hf_start) / (P.hf_full - P.hf_start), 1.0);
+		keep = min(keep, 1.0 - (1.0 - P.hf_min) * t);
+	}
+	return keep;
+}
+
+void main()
+{
+	int ox = int(gl_GlobalInvocationID.x), oy = int(gl_GlobalInvocationID.y);
+	if (ox >= P.col_w || oy >= P.col_h)
+		return;
+	int sx = P.crop_x + int((uint(ox) * uint(P.crop_w)) / uint(P.col_w));
+	int sy = P.crop_y + int((uint(oy) * uint(P.crop_h)) / uint(P.col_h));
+	int x0 = sx > 0 ? sx - 1 : 0, y0 = sy > 0 ? sy - 1 : 0;
+	x0 = min(x0, P.width - 4);
+	y0 = min(y0, P.height - 4);
+
+	uint sum[4] = uint[4](0u, 0u, 0u, 0u);
+	uint peak = 0u, gmin = 0xffffffffu, gmax = 0u;
+	for (int y = y0; y < y0 + 4; y++)
+		for (int x = x0; x < x0 + 4; x++) {
+			int c = P.cfa[(y & 3) * 4 + (x & 3)];
+			uint v = lut_raw[raw_code(x, y)];
+			sum[c] += v;
+			peak = max(peak, v);
+			if (c == 1) {
+				gmin = min(gmin, v);
+				gmax = max(gmax, v);
+			}
+		}
+	int idx = oy * P.col_w + ox, plane = P.col_w * P.col_h;
+	green[idx] = P.cfa_count[1] != 0 ? sum[1] / uint(P.cfa_count[1]) : 0u;
+
+	uint shade[4] = uint[4](4096u, 4096u, 4096u, 4096u);
+	if (P.lsc_active != 0) {
+		shade[0] = lsc[idx];
+		shade[1] = lsc[plane + idx];
+		shade[2] = lsc[2 * plane + idx];
+		shade[3] = shade[1];
+	}
+	int mean[4];
+	for (int c = 0; c < 4; c++) {
+		uint n = uint(P.cfa_count[c]);
+		uint v = sum[c] * shade[c];
+		if (n == 0u)
+			mean[c] = 0;
+		else if ((n & (n - 1u)) != 0u)
+			mean[c] = int((v / n + 2048u) >> 12);
+		else
+			mean[c] = int((v + (n << 11)) >> uint(12 + findLSB(n)));
+	}
+	int ir = mean[3];
+	int nir = 0;
+	if (P.cfa_count[3] != 0)
+		nir = max((ir * (4096 + P.ir_visible_q12) - mean[1] * P.ir_visible_q12 + 2048) >> 12, 0);
+	int lin3[3];
+	for (int c = 0; c < 3; c++) {
+		lin3[c] = P.cfa_count[c] != 0 ? mean[c] - ir + ((nir * P.nir_keep[c] + 2048) >> 12) : 0;
+		lin3[c] = max(lin3[c], 0);
+	}
+	float keep = 1.0;
+	if (P.chroma_guard != 0 && P.cfa_count[3] != 0) {
+		int g16 = max(max(lin3[0], max(lin3[1], lin3[2])), 16);	// the strongest colour (chroma_guard_strongest)
+		if ((gmax - gmin) * 4u > gmax + gmin + 64u ||
+		    float(nir) > (P.wb_nir_ratio + P.nir_free) * float(g16)) {
+			float rho = float(nir) / float(g16);
+			float hf = float(gmax - gmin) / (float(gmax + gmin) + 64.0);
+			keep = chroma_keep_for(rho, hf);
+		}
+	}
+	ivec3 rgb;
+	rgb.x = int((uint(lin3[0]) * uint(P.gain0) + 2048u) / 4096u);
+	rgb.y = lin3[1];
+	rgb.z = int((uint(lin3[2]) * uint(P.gain2) + 2048u) / 4096u);
+	if (P.ccm_active != 0) {
+		ivec3 i = rgb;
+		for (int row = 0; row < 3; row++) {
+			int v = (P.ccm[row * 3] * i.x + P.ccm[row * 3 + 1] * i.y + P.ccm[row * 3 + 2] * i.z + 2048) >> 12;
+			rgb[row] = max(v, 0);
+		}
+	} else {
+		int luma = (871 * rgb.x + 2929 * rgb.y + 296 * rgb.z + 2048) >> 12;
+		for (int c = 0; c < 3; c++)
+			rgb[c] = max(luma + (((rgb[c] - luma) * P.saturation_q12 + 2048) >> 12), 0);
+	}
+	if (keep < 1.0) {
+		float y = 0.2126 * float(rgb.x) + 0.7152 * float(rgb.y) + 0.0722 * float(rgb.z);
+		for (int c = 0; c < 3; c++) {
+			float v = y + keep * (float(rgb[c]) - y);
+			rgb[c] = v < 0.0 ? 0 : int(v + 0.5);
+		}
+	}
+	soft_clip(rgb);
+	if (peak > uint(P.highlight_start)) {
+		int t = P.highlight_full > P.highlight_start ?
+			int(((peak - uint(P.highlight_start)) * 4096u) / uint(P.highlight_full - P.highlight_start)) : 4096;
+		t = min(t, 4096);
+		for (int c = 0; c < 3; c++)
+			rgb[c] = (rgb[c] * (4096 - t) + LINEAR_MAX * t + 2048) >> 12;
+	}
+	lin[idx] = rgb.x;
+	lin[plane + idx] = rgb.y;
+	lin[2 * plane + idx] = rgb.z;
+}

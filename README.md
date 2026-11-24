@@ -45,7 +45,7 @@ Boot the laptop from the stick (**F12** at the logo, Secure Boot off).
 
 `./build.sh --dry-run` shows what it would download (Google's 7.7 GB image, ~1 MB busybox, 14 MB of kernel modules and 70 MB of firmware
 from this repo's [release](https://github.com/linuxkid473/gbos-x86/releases)). It streams only the six partitions it needs out of
-Google's zip, so the 19 GB disk image inside is never unpacked. Allow 30 to 60 minutes, mostly the download. Twenty-one machines have been
+Google's zip, so the 19 GB disk image inside is never unpacked. Allow 30 to 60 minutes, mostly the download. Thirty-six machines have been
 tried (see [Tested laptops](#tested-laptops)); if you try another, please post its `gbos/logs/boot-N/hwdetect.txt` in an issue.
 Fedora/RHEL with SELinux enforcing: the scripts add `:z` to the docker bind mounts of this repo's own folders automatically; don't disable SELinux.
 
@@ -72,7 +72,10 @@ Fedora/RHEL with SELinux enforcing: the scripts add `:z` to the docker bind moun
 | Linux Terminal (AVF) | Secretkeeper hang fixed; VM boot not yet confirmed |
 | Auth-bound keystore keys | `soft_gk`'s auth tokens aren't trusted by the software KeyMint |
 | Google's on-device AI (Magic Pointer, AICore) | Google's servers refuse it without hardware key attestation, which no non-Google laptop can provide |
-| OS updates | Built-in OTA can't work; moving to a new Google build is semi-automated: `tools/port_build.sh`, see [`porting.md`](porting.md) |
+| OS updates | Built-in OTA can't work; moving to a new Google build is semi-automated: `tools/port_build.sh`, see [`porting.md`](porting.md). An installed system can take a signed update bundle without the stick: the gbOS86 Updater app finds published updates on GitHub, notifies, downloads and stages them (or copy one from Windows / a root shell); stage0 checks and switches it in at the next start, and rolls it back if it does not start. The app also warns when the installed system has modifications: [`docs/system-update.md`](docs/system-update.md). Not yet tried on hardware |
+| Fingerprint reader (Latitude 7320 Detachable, Goodix `27c6:6384`) | Works on hardware (2026-11-17): the userspace AIDL HAL registers, one finger enrolled and unlocked the lock screen. Enabled by default for this exact USB ID (`FINGERPRINT=0` disables it); CrosFP is unchanged on other devices. The HAL runs from the stick's VFAT under permissive SELinux, so enforcing-mode USB access is still unverified. See [`HANDOFF.md`](HANDOFF.md) |
+| Auto-rotation (Latitude 7320 Detachable) | Experimental, DMI-scoped Sensors 2.1 sub-HAL and display-policy trial. Confirmed working by the user on the 2026-11-15 Live boot; logs show accelerometer enumeration and sensor-driven transitions through all four display rotations. The axis mapping has been validated for that test, but the physical full-scale range remains unknown and the HAL's ±2 g range is provisional. `SENSOR_HAL=0` disables both changes. Tablet mode (on-screen keyboard with the cover detached, intel_hid tablet switch) and a rotation policy that survives Google's LaptopController resets are added but hardware-unverified (`usb/tablet_mode.sh`, `TABLET_*` in `gbos.cfg`). See [`sensors/trogdor/`](sensors/trogdor/). |
+| Intel IPU6 cameras | Experimental Latitude 7320-only UVC loopback bridge is available in an opt-in test image (`GBOS_IPU6_CAMERA_BRIDGE=1`). The Latitude's V4L2 frame-size enumeration and initial format are limited to its producer mode, 1280×960 YUYV since 2026-11-20 (640×480 before). An Android-native build (`installer/bin/vulkan/ipu6-loopback`, `tools/build_ipu6_loopback_gpu.sh`, needs the Android NDK) does the per-pixel work on the GPU with Vulkan compute; the launcher uses it when `--probe-gpu` succeeds (`CAMERA_GPU=0` in gbos.cfg keeps the CPU build). The bridge keeps the sensor streaming until reboot because IPU6 stream-stop/close timed out in prior tests. A second bridge instance exposes the rear OV8856 on `/dev/video65` as the back camera (`CAMERA_REAR=0` turns it off, `CAMERA_REAR_ROTATION=180` turns its picture); it is not yet hardware-verified. See [`docs/latitude-7320-camera-test.md`](docs/latitude-7320-camera-test.md) for the image and instructions. |
 | Other laptops | Fourteen of thirty-six tried machines work fully, fourteen partly, six have a fix pending, two do not; see [Tested laptops](#tested-laptops). The CPU-emulation kernel should help any pre-2021 Intel CPU |
 
 ## How it works
@@ -89,6 +92,13 @@ UEFI firmware
          ├─ mounts /data, /metadata (ext4 partitions if present, else tmpfs)
          └─ switch_root → /system/bin/init selinux_setup   (Google's Android init, unmodified)
 ```
+
+Boot diagnostics are quiet by default: `hook.sh` skips the non-Google GSC startup wait and the
+duplicate `/data` fstab wait after stage0 has mounted it. `DEBUG_LOGS=1` in `gbos/gbos.cfg`
+enables rotating full logcat, KMS debug, and delayed audio/display/AI reports; `KVM_TRACE=1`
+separately enables the high-volume Trusty VM trace. Kernel logs, crash-buffer logs, and focused
+camera/sensor diagnostics remain enabled by default. A diagnostic image can opt into full logs
+without changing the source config with `GBOS_DEBUG_LOGS=1 sh tools/make_gbos86_image.sh <output-directory>`.
 
 **The core problem:** lapis binaries use CPU instructions this CPU lacks: GFNI, AVX-VNNI, SHA-NI,
 256-bit VAES/VPCLMULQDQ, AVX-IFMA. Two layers deal with that:
@@ -123,7 +133,7 @@ UEFI firmware
 | Setting a password hangs Settings | Trusty Gatekeeper never answers | `gatekeeper/soft_gk.c` software Gatekeeper |
 | keystore2 aborts / KeyMint hangs | Trusty/StrongBox KeyMint need the GSC | patched `libkm_compat.so` (software KeyMint), StrongBox APEX hidden |
 | Linux Terminal never starts its VM | Trusty Secretkeeper never answers | hide Secretkeeper's VINTF declaration |
-| Logs truncated, stick corrupted | vold `fsck_msdos`'d the stick while mounted | remove vold's `voldmanaged=usb` fstab rule |
+| Logs truncated, stick corrupted | vold `fsck_msdos`'d the GBOS stick while stage0 had it mounted | hide only the GBOS disk from Android coldplug; retain vold's USB rule when no GBOS stick is present or that exclusion succeeds |
 | No sound | Google uses SOF; our kernel has legacy HDA | `usb/audio/` config for the `dras` audio HAL (card id `PCH`) |
 | White veil, lifted blacks (even video) | drm_hwcomposer loads its xe `LOG_GAMMA_LUT` curve into i915's linear `GAMMA_LUT` every frame | `kernel/isa_emu_patch/i915_ignore_gamma.sh` (kernel #29) |
 | Everything too big | `ro.sf.lcd_density=260` for Google's panel | `RESOLUTION` in `gbos.cfg` (default 2400x1350, stock density); `DENSITY` optional |
@@ -219,6 +229,7 @@ The kernel (#31) builds drivers for most Intel-era laptops as **modules**, and b
 | Bluetooth | `btusb` with Intel/Realtek/MediaTek/Qualcomm/Broadcom, Intel PCIe BT |
 | Sound | Legacy HDA with every common codec, **or** SOF (Intel DSP, DMIC, SoundWire); the kernel picks per machine (`snd_intel_dspcfg`). The audio HAL config is generated for the card that appears (`hook.sh`) |
 | Touchpad / keyboard | Intel LPSS I2C-HID, ISH, PS/2 (Synaptics, ALPS, Elan, ...), Synaptics RMI4 |
+| Motion sensors / auto-rotate | HID-over-ISH accel/gyro IIO drivers expose live `accel_3d`/`gyro_3d` values, but the vendor Desktop-IIO Sensors HAL binary has no matching device identifiers and reports no sensors. Its `hals.conf` selects only that HAL; there is no sensor XML override or HAL source/build tree here. A compatible Sensors 2.1 sub-HAL and validated Latitude axis/mount calibration are still required; renaming IIO devices or guessing a matrix is unsafe |
 | Hotkeys, fans, rfkill | Dell, HP, ThinkPad, IdeaPad, Asus, Acer, Samsung, MSI, Sony, Fujitsu, LG, Intel HID/VBTN |
 | Other | SD card readers (Realtek, SDHCI), USB webcams (UVC), Ethernet (r8169, e1000e, igc, USB r8152 and friends) |
 
@@ -284,8 +295,13 @@ driver inside Google's userspace under QEMU.
 |---|---|
 | `usb/stage0_init.sh` | stage0: volume detection, logging, partition mounts, switch_root |
 | `usb/hook.sh` | Android workarounds, run by stage0 before switch_root; writes `gbos.rc` (init services) |
+| `usb/stick_fat.sh` | Sourced by `hook.sh`/`install.sh`: FAT health check at boot (`fat-check.txt`), read-only remount of the gbos volume at shutdown |
 | `usb/early_patch.sh` | Sourced from `gbos.cfg`; binds the patched libz/libcrypto before stage0's first `dmctl` |
 | `usb/install.sh` | NVMe/eMMC/SATA installer and updater (`MODE=install`) |
+| `usb/sysupdate.sh`, `usb/sysupdate.pub` | system updates without the stick: signed bundles, checked and switched in by stage0 (from `early_patch.sh`), rollback; the public key (placeholder until the project's is committed). [`docs/system-update.md`](docs/system-update.md) |
+| `updater-app/` | the gbOS86 Updater app (plain Java, `updater-app/build.sh`): checks the signed feed on GitHub, downloads updates (experimental: a new Google build straight from Google), stages them through a root init service, and checks the system for modifications |
+| `tools/release.sh` | the maintainer's release command: every check (git, Google build, key, tests, Googlebook OS feed lines), then publish |
+| `tools/publish_system_update.sh`, `tools/super_parts.py` | publish a signed update on GitHub releases for the app; prove `super.img` can be rebuilt from Google's download |
 | `usb/apex_patch.sh` | binds the patched libcrypto over the APEX copies (run from init.rc) |
 | `usb/gbos.cfg` | user settings: `MODE` (ask/live/install/boot), `DENSITY`, `RESOLUTION`, `LOAD_I915`, ... |
 | `tools/make_gbos86_image.sh` | builds the flashable gbOS86 USB image into `dist/` |
@@ -389,7 +405,9 @@ During installation, live progress bars indicate system image and driver/firmwar
 ### Debugging workflow
 The system writes logs to its own `GBOSSYS` (or `GBOS`) partition. To read them, boot the stick, choose
 menu **2**, then **3 (Only save its logs)** (or 1 to update too), and read `gbos/logs/boot-N/nvme-logs/` on the stick from a computer. Each boot dir has
-`kmsg.log`, `stage0-dmesg.txt`, rotated `logcat.txt*`, `crash.txt`, `hw.txt`, `audio.txt`, and `pstore-prev/`.
+`kmsg.log`, `stage0-dmesg.txt`, rotated `logcat.txt*`, `crash.txt`, `hw.txt`, `audio.txt`, `fat-check.txt` (was the previous shutdown clean,
+how the previous boot's shutdown step ended, a read-only `fsck.fat -n` when it was not clean, see `usb/stick_fat.sh`), `fat-shutdown.txt`
+(the shutdown watcher: armed at boot; failures, with what was still writing, appended at shutdown), and `pstore-prev/`.
 FAT has no journal: always shut down from Android's power menu, not the physical power button.
 
 ### Play Store closes a second or two after opening

@@ -1,0 +1,62 @@
+#version 450
+// Output pixel pairs (output_rows): brightness from the colour grid with green-site detail,
+// temporal luma filter, U/V from the grid, YUYV with --rotate 180 applied on the way out.
+layout(local_size_x = 16, local_size_y = 16) in;
+#include "common.glsl"
+
+int luma_at(int ox, int oy, int cy0, int cy1, int sy)
+{
+	int cx0 = ox >> 1, cx1 = (ox & 1) != 0 && cx0 + 1 < P.col_w ? cx0 + 1 : cx0;
+	int w = P.col_w;
+	int y = (yuv[cy0 * w + cx0] + yuv[cy0 * w + cx1] + yuv[cy1 * w + cx0] + yuv[cy1 * w + cx1] + 2) >> 2;
+	if (P.detail_q12 > 0) {
+		int sx = P.crop_x + int((uint(ox) * uint(P.crop_w)) / uint(P.out_w));
+		sx = min(sx, P.width - 2);
+		uint gw = (green[cy0 * w + cx0] + green[cy0 * w + cx1] + green[cy1 * w + cx0] +
+			   green[cy1 * w + cx1] + 2u) >> 2;
+		uint g = 0u;
+		for (int dy = 0; dy < 2; dy++)
+			for (int dx = 0; dx < 2; dx++)
+				if (P.cfa[((sy + dy) & 3) * 4 + ((sx + dx) & 3)] == 1)
+					g += lut_raw[raw_code(sx + dx, sy + dy)];
+		uint i = gw != 0u ? (g * 128u) / gw : 256u;
+		y = int((uint(y) * lut_detail[min(i, 1024u)] + 2048u) >> 12);
+	}
+	uint at = uint(oy * P.out_w + ox);
+	if (P.tnr_have_previous != 0) {
+		int prev = int(tnr[at]);
+		int d = y - prev;
+		if (d >= -P.tnr_threshold && d <= P.tnr_threshold)
+			y = prev + (d >= 0 ? (d + 1) / 3 : -((-d + 1) / 3));
+	}
+	y = clamp(y, 0, 255);
+	tnr[at] = uint(y);
+	return y;
+}
+
+int chroma(int base, int cy0, int cy1, int cx, int cxn)
+{
+	int w = P.col_w;
+	int s = 3 * (yuv[base + cy0 * w + cx] + yuv[base + cy1 * w + cx]) +
+		yuv[base + cy0 * w + cxn] + yuv[base + cy1 * w + cxn];
+	return clamp(128 + (s >= 0 ? (s + 4) >> 3 : -((-s + 4) >> 3)), 0, 255);
+}
+
+void main()
+{
+	int pair = int(gl_GlobalInvocationID.x), oy = int(gl_GlobalInvocationID.y);
+	if (pair >= P.out_w / 2 || oy >= P.out_h)
+		return;
+	int ox = pair * 2;
+	int sy = P.crop_y + int((uint(oy) * uint(P.crop_h)) / uint(P.out_h));
+	sy = min(sy, P.height - 2);
+	int cy0 = oy >> 1, cy1 = (oy & 1) != 0 && cy0 + 1 < P.col_h ? cy0 + 1 : cy0;
+	int y0 = luma_at(ox, oy, cy0, cy1, sy), y1 = luma_at(ox + 1, oy, cy0, cy1, sy);
+	int cx = ox >> 1, cxn = cx + 1 < P.col_w ? cx + 1 : cx;
+	int plane = P.col_w * P.col_h;
+	int u = chroma(plane, cy0, cy1, cx, cxn), v = chroma(2 * plane, cy0, cy1, cx, cxn);
+	int row = P.rotate180 != 0 ? P.out_h - 1 - oy : oy;
+	int at = P.rotate180 != 0 ? P.out_w - 2 - ox : ox;
+	int first = P.rotate180 != 0 ? y1 : y0, second = P.rotate180 != 0 ? y0 : y1;
+	outw[(row * P.out_w + at) >> 1] = uint(first) | (uint(u) << 8) | (uint(second) << 16) | (uint(v) << 24);
+}
