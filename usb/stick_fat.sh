@@ -439,15 +439,36 @@ gbos_fat_shutdown() { # KMSG_SECONDS DEV MP LOGDIR CLEAR [COPIER_SUBSHELL COPIER
   # then the remount has nothing to do, and nothing was written to the volume since that error but files that were already open.
   _sx=; [ "$(gbos_fat_sb_state "$3" "$GBOS_FAT_RT/proc")" = ro ] && _sx="; $3 is ALREADY read-only (a FAT error earlier this boot?)"
   echo "<5>gbos-fat: shutdown: init reached its unmount step at $1 s; stopping the kmsg copier, remounting $3 read-only$([ "$5" = 1 ] && echo ' and clearing the dirty flag' || echo ', leaving the dirty flag as it is')$_sx (end of this log)" >&4
+  [ -n "${GBOS_FAT_SYNC_PID:-}" ] && kill -KILL "$GBOS_FAT_SYNC_PID" 2>/dev/null   # KILL: it inherits the watcher's ignored TERM
   $GBOS_FAT_BB sleep 0.05
   gbos_fat_stop_copier "$6" "$7"
   gbos_fat_finish "$2" "$3" "$4/fat-shutdown.txt" "$GBOS_FAT_RT/proc" "$GBOS_FAT_RT/sys" "$GBOS_FAT_RT/blk" "$GBOS_FAT_RT" "$5"
 }
 
+# Every SECONDS s, syncfs(2) the volume: the directory entries and FAT sectors of files written since the last sync. Without it they
+# stayed in RAM for the whole session (the "flush" option writes a file's data at close, not its directory entry or FAT chain), so a
+# forced power-off cost every logcat file rotated during the boot, not only the open one: boot 6 left logcat.txt.01-.05 at 0 bytes, and
+# chkdsk deleted all six of boot 11's (HANDOFF.md 2026-11-24). A background child of stage0 like the watcher, so it outlives switch_root
+# (busybox at /gbos/busybox, the mount point is still /gbos). gbos.cfg FAT_SYNC_S=seconds, 0 = off.
+gbos_fat_syncer() { # MP SECONDS
+  while $GBOS_FAT_BB sleep "$2"; do
+    $GBOS_FAT_BB sync -f "$1" || return 1
+  done
+}
+
+gbos_fat_sync_interval() { # prints the interval in seconds, nothing when off or not a number
+  case "${FAT_SYNC_S:-30}" in ''|*[!0-9]*) return 0;; esac
+  [ "${FAT_SYNC_S:-30}" -gt 0 ] && echo "${FAT_SYNC_S:-30}"
+  return 0
+}
+
 gbos_fat_start_shutdown_watch() { # DEV MP LOGDIR
   _wr=$3/fat-shutdown.txt
+  _ws=$(gbos_fat_sync_interval)
   if [ "${FAT_SHUTDOWN_RO:-1}" = 0 ]; then
-    echo "not armed: FAT_SHUTDOWN_RO=0" > "$_wr" 2>/dev/null; log "hook: fat: no read-only remount at shutdown (FAT_SHUTDOWN_RO=0)"; return 0
+    echo "not armed: FAT_SHUTDOWN_RO=0" > "$_wr" 2>/dev/null; log "hook: fat: no read-only remount at shutdown (FAT_SHUTDOWN_RO=0)"
+    if [ -n "$_ws" ]; then ( gbos_fat_syncer "$2" "$_ws" ) & log "hook: fat: syncing $2 every $_ws s (pid $!)"; fi
+    return 0
   fi
   if [ -n "$GBOS_FAT_BB" ] && [ ! -x "$GBOS_FAT_BB" ]; then
     echo "not armed: $GBOS_FAT_BB missing" > "$_wr" 2>/dev/null; log "hook: fat: $GBOS_FAT_BB missing, no read-only remount at shutdown"; return 1
@@ -463,8 +484,10 @@ gbos_fat_start_shutdown_watch() { # DEV MP LOGDIR
   ( trap '' TERM HUP   # init's last step is sysrq "terminate all tasks": SIGTERM to everything, possibly before the remount is done
     exec 3<"${GBOS_KMSG:-/dev/kmsg}" 4>"${GBOS_KMSG_OUT:-/dev/kmsg}" 2>"${GBOS_FAT_ERR:-/dev/null}"
     GBOS_FAT_NULL=$_wn
+    GBOS_FAT_SYNC_PID=
+    if [ -n "$_ws" ]; then gbos_fat_syncer "$2" "$_ws" & GBOS_FAT_SYNC_PID=$!; fi
     gbos_fat_watch "$1" "$2" "$3" "${GBOS_FAT_CLEAR:-0}" $_wc ) &
-  log "hook: fat: shutdown watcher pid $! (kmsg copier: ${_wc:-not found}; clear the flag at shutdown: ${GBOS_FAT_CLEAR:-0}${_wm:+; missing in $GBOS_FAT_RT: $_wm}); remounts $2 read-only at init's unmount step"
+  log "hook: fat: shutdown watcher pid $! (kmsg copier: ${_wc:-not found}; clear the flag at shutdown: ${GBOS_FAT_CLEAR:-0}${_wm:+; missing in $GBOS_FAT_RT: $_wm}); remounts $2 read-only at init's unmount step; syncs $2 every ${_ws:-(off)} s"
 }
 
 gbos_fat_release() { # DEV MP LOGDIR: before poweroff -f / reboot -f in stage0 (install.sh); nothing can write to MP afterwards

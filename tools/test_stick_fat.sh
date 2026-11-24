@@ -16,6 +16,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 ok() { echo "ok - $*"; }
 LOADER="$U/installer/lib/ld-musl-x86_64.so.1 --library-path $U/installer/lib"
 BB=${BUSYBOX:-}
+export FAT_SYNC_S=0   # no periodic syncer except in its own cases below
 
 # --- syntax
 for f in stick_fat.sh hook.sh install.sh stage0_init.sh apex_patch.sh; do sh -n "$U/$f" || fail "sh -n usb/$f"; done
@@ -289,7 +290,8 @@ case $a in
                                 sed -i 's/ - vfat \([^ ]*\) rw,/ - vfat \1 ro,/' "$FAKE_MI";;
                     remount,rw) sed -i 's/ - vfat \([^ ]*\) ro,/ - vfat \1 rw,/' "$FAKE_MI";; esac;;
   losetup) echo "losetup $*" >> "$FAKE_MOUNTS"; rm -rf "$FAKE_SYS/block/${2##*/}/loop";;
-  mknod|sync) ;;
+  mknod) ;;
+  sync) echo "sync $*" >> "${FAKE_SYNCS:-/dev/null}";;
   *) exec ${REAL_BB:+"$REAL_BB"} "$a" "$@";;
 esac
 EOF
@@ -368,6 +370,24 @@ grep -q "^detached read-write loop6 ($MP/gbos/bootdisk.img)$" "$LD/fat-shutdown.
 [ "$(tr -d '\n' < "$RT/proc/sysrq-trigger")" = su ] || fail "sysrq-trigger: $(cat "$RT/proc/sysrq-trigger")"
 [ "$(gbos_fat_byte "$TMP/blk" 65)" = 1 ] || fail "cleared the flag of a volume that is still writable"
 ok "watcher: EBUSY retried, writers and loops written to fat-shutdown.txt, then sysrq s+u"
+# periodic syncfs of the volume during the session (FAT_SYNC_S), stopped at init's unmount step
+for v in abc 0 -5 1x; do [ -z "$(FAT_SYNC_S=$v gbos_fat_sync_interval)" ] || fail "FAT_SYNC_S='$v' must be off"; done
+[ "$(FAT_SYNC_S=30 gbos_fat_sync_interval)" = 30 ] && [ "$(FAT_SYNC_S= gbos_fat_sync_interval)" = 30 ] && [ "$( (unset FAT_SYNC_S; gbos_fat_sync_interval) )" = 30 ] || fail "FAT_SYNC_S default/30"
+export FAKE_SYNCS=$TMP/syncs; rm -f "$FAKE_SYNCS"; FAT_SYNC_S=1
+watch_case 0 1
+FAT_SYNC_S=0
+grep -q "syncs $MP every 1 s" "$LOG" || { cat "$LOG"; fail "syncer not in the watcher's start line"; }
+_n=$(grep -c "^sync -f $MP\$" "$FAKE_SYNCS" 2>/dev/null || :)
+[ "${_n:-0}" -ge 2 ] || fail "syncer: ${_n:-0} syncs of $MP in ~2 s: $(cat "$FAKE_SYNCS" 2>/dev/null)"
+sleep 2.5; [ "$(grep -c . "$FAKE_SYNCS")" = "$_n" ] || fail "syncer still running after the shutdown step: $(grep -c . "$FAKE_SYNCS") > $_n"
+[ "$(wc -l < "$LD/fat-shutdown.txt")" = 1 ] || fail "syncer wrote to fat-shutdown.txt: $(cat "$LD/fat-shutdown.txt")"
+# FAT_SHUTDOWN_RO=0: no watcher, the syncer still runs
+rm -f "$FAKE_SYNCS"; rm -rf "$LD"; mkdir -p "$LD"; : > "$LOG"
+GBOS_FAT_BB=$TMP/fakebb FAT_SHUTDOWN_RO=0 FAT_SYNC_S=1; gbos_fat_start_shutdown_watch /dev/sda2 "$MP" "$LD"; GBOS_FAT_BB=; FAT_SHUTDOWN_RO=1; FAT_SYNC_S=0
+SP=$(sed -n 's/.*syncing .* every 1 s (pid \([0-9]*\)).*/\1/p' "$LOG"); [ -n "$SP" ] || { cat "$LOG"; fail "FAT_SHUTDOWN_RO=0: no syncer"; }
+PIDS="$PIDS $SP"; waitfor 'grep -q "^sync -f $MP\$" "$FAKE_SYNCS" 2>/dev/null' || fail "FAT_SHUTDOWN_RO=0: syncer never synced"
+kill -KILL "$SP" 2>/dev/null || :; unset FAKE_SYNCS
+ok "syncer: syncfs of the volume every FAT_SYNC_S s, stopped at the unmount step, off for 0/garbage, also without the watcher"
 # the emergency remount working (a kworker makes it read-only a little later), and FAT_SHUTDOWN_SYSRQ=0
 rm -f "$FAKE_MOUNT_FAIL" "$FAKE_MOUNTS"; mkrt; : > "$FAKE_MOUNT_FAIL"; rm -rf "$LD"; mkdir -p "$LD"
 ( while ! grep -q u "$RT/proc/sysrq-trigger"; do sleep 0.05; done; sleep 0.2; sed -i 's/ - vfat \([^ ]*\) rw,/ - vfat \1 ro,/' "$FAKE_MI" ) &
