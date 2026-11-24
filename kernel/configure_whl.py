@@ -111,6 +111,11 @@ _m('PINCTRL_INTEL_PLATFORM', 'SURFACE_AGGREGATOR', 'SURFACE_AGGREGATOR_REGISTRY'
    'BATTERY_SURFACE', 'CHARGER_SURFACE', 'SURFACE_PLATFORM_PROFILE', 'SENSORS_SURFACE_FAN', 'IWLMLD',
    'SND_SOC_RT1320_SDW', 'SND_SOC_RT721_SDCA_SDW')
 GENERIC['SERIAL_8250_RUNTIME_UARTS'] = '4'
+# Microsoft Surface Pro 5 (2017, Kaby Lake) and the other gen5/6 Surfaces, as in linux-surface's configs/surface-6.18.config:
+# SURFACE_ACPI_NOTIFY: battery/AC events come from the Surface Aggregator through ACPI (SAN), else no battery status;
+# SURFACE_GPE: lid wake (Pro 5 is in surface_gpe.c's DMI table); SOC_BUTTON_ARRAY + SURFACE_PRO3_BUTTON: power/volume buttons;
+# HID_IPTS: touchscreen + pen (drivers/hid/ipts, added by kernel/surface/apply.sh; iptsd in usb/surface reads it).
+_m('SURFACE_ACPI_NOTIFY', 'SURFACE_GPE', 'INPUT_SOC_BUTTON_ARRAY', 'SURFACE_PRO3_BUTTON', 'HID_IPTS')
 # Intel Volume Management Device: with VMD on (many 11th gen+ laptops, no BIOS switch) the NVMe sits behind a VMD domain and is invisible
 # to the installer until this root-port driver is in the kernel (HP 14s-dq2509TU, Core i3-1115G4, 8086:9a0b).
 _y('VMD')

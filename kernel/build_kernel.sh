@@ -76,6 +76,7 @@ python3 \$P/sdw_sl7.py /build/src > /dev/null
 python3 \$P/sdw_link_skip.py /build/src > /dev/null
 python3 /host/kernel/isa_emu_patch/camera_7320.py /build/src
 P=/host/kernel/kernelsu sh /host/kernel/kernelsu/apply.sh | tail -2
+P=/host/kernel/surface sh /host/kernel/surface/apply.sh
 
 # 2. the config
 cp /cfg/base.config /build/out/.config
