@@ -11,6 +11,7 @@ trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 sed -n '/^gbos_configure_boot_debug() {/,/^}/p' "$HOOK" > "$TMP/functions.sh"
 sed -n '/^gbos_configure_kvm_trace() {/,/^}/p' "$HOOK" >> "$TMP/functions.sh"
 sed -n '/^gbos_hide_boot_usb_from_vold() {/,/^}/p' "$HOOK" >> "$TMP/functions.sh"
+sed -n '/^gbos_vold_boot_disk() {/,/^}/p' "$HOOK" >> "$TMP/functions.sh"
 sed -n '/^gbos_stage0_fstab_overlay() {/,/^}/p' "$HOOK" >> "$TMP/functions.sh"
 . "$TMP/functions.sh"
 
@@ -105,8 +106,28 @@ if grep -q 'voldmanaged=usb' "$TMP/actual"; then
   echo "FAIL: retained the generic vold rule after boot-disk masking failed" >&2
   exit 1
 fi
+# which disk is hidden: the GBOS stick; else the mounted volume when it is on USB (persistent GBOSSYS stick); else none (NVMe)
+NVME_PART_SYS=$TMP/sys/devices/pci0000:00/0000:00:06.0/nvme/nvme0/nvme0n1/nvme0n1p2
+command mkdir -p "$NVME_PART_SYS"
+readlink() {
+  [ "$1" = -f ] || return 1
+  case $2 in
+    /sys/class/block/sda2) printf '%s\n' "$BOOT_PART_SYS";;
+    /sys/class/block/sdb1) printf '%s\n' "$EXTERNAL_PART_SYS";;
+    /sys/class/block/nvme0n1p2) printf '%s\n' "$NVME_PART_SYS";;
+    *) return 1;;
+  esac
+}
+[ "$(gbos_vold_boot_disk /dev/sdb1 /dev/sda2)" = /dev/sdb1 ] || { echo "FAIL: GBOS stick not preferred" >&2; exit 1; }
+[ "$(gbos_vold_boot_disk '' /dev/sda2)" = /dev/sda2 ] || { echo "FAIL: GBOSSYS volume on USB not hidden from vold" >&2; exit 1; }
+[ -z "$(gbos_vold_boot_disk '' /dev/nvme0n1p2)" ] || { echo "FAIL: an NVMe volume chosen for the vold USB mask" >&2; exit 1; }
+[ -z "$(gbos_vold_boot_disk '' /dev/unknown)" ] && [ -z "$(gbos_vold_boot_disk '' '')" ] || { echo "FAIL: unresolved/empty DEV" >&2; exit 1; }
+rm -f "$TMP/masked-device"; VOLD_USB_OK=0
+if gbos_hide_boot_usb_from_vold "$(gbos_vold_boot_disk '' /dev/sda2)"; then VOLD_USB_OK=1; fi
+[ "$VOLD_USB_OK" = 1 ] && [ "$(cat "$TMP/masked-device")" = "${BOOT_PART_SYS%/*}" ] || { echo "FAIL: persistent stick not masked" >&2; exit 1; }
 awk 'BEGIN { exit !(length("gbos-data-mounted-by-stage0") > 16) }'
-grep -q 'gbos_hide_boot_usb_from_vold "${STICK:-}"' "$HOOK"
+grep -q 'VOLD_BOOT_DISK=$(gbos_vold_boot_disk "${STICK:-}" "${DEV:-}")' "$HOOK"
+grep -q 'gbos_hide_boot_usb_from_vold "$VOLD_BOOT_DISK"' "$HOOK"
 grep -q 'gscutil.rc' "$HOOK"
 grep -q '^DEBUG_LOGS=0$' "$CFG"
 grep -q '^KVM_TRACE=0$' "$CFG"

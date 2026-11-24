@@ -1463,6 +1463,18 @@ gbos_hide_boot_usb_from_vold() {
   log "hook: cannot hide GBOS stick block device from vold; keeping vold USB rule disabled"
   return 1
 }
+# The disk vold must not see: the GBOS stick, or else the mounted volume itself when it is on USB. The persistent stick is
+# labelled GBOSSYS like an NVMe install, so STICK is empty there and, before this, vold kept its USB rule for it: after unlock
+# it found public:8,2 and its fsck_msdos rewrote the FAT under the mounted volume. Chains of files written that boot became
+# "free" clusters, reused by later files (boot-13: every logcat file "cluster chain length is 0", kmsg.log ending in another
+# file's data; HANDOFF.md 2026-11-24). An internal (non-USB) volume prints nothing: vold's USB rule never matches it.
+gbos_vold_boot_disk() { # STICK DEV
+  if [ -n "${1:-}" ]; then echo "$1"; return 0; fi
+  [ -n "${2:-}" ] || return 0
+  gv_sys=$(readlink -f "/sys/class/block/${2##*/}" 2>/dev/null) || return 0
+  case $gv_sys in */usb*) echo "$2";; esac
+  return 0
+}
 gbos_stage0_fstab_overlay() {
   if [ "${2:-0}" = 1 ]; then
     sed -e 's#^/dev/block/by-name/userdata[[:space:]][[:space:]]*#LABEL=gbos-data-mounted-by-stage0 #' "$1"
@@ -1474,7 +1486,8 @@ gbos_stage0_fstab_overlay() {
 }
 F=/new/vendor/etc/fstab.android-desktop
 VOLD_USB_OK=0
-if gbos_hide_boot_usb_from_vold "${STICK:-}"; then VOLD_USB_OK=1; fi
+VOLD_BOOT_DISK=$(gbos_vold_boot_disk "${STICK:-}" "${DEV:-}")
+if gbos_hide_boot_usb_from_vold "$VOLD_BOOT_DISK"; then VOLD_USB_OK=1; fi
 FSTAB_OVERLAY_OK=0
 if gbos_stage0_fstab_overlay "$F" "$VOLD_USB_OK" > /tmp/fstab.android-desktop; then
   if grep -q '^LABEL=gbos-data-mounted-by-stage0 /data ' /tmp/fstab.android-desktop; then
@@ -1485,8 +1498,8 @@ if gbos_stage0_fstab_overlay "$F" "$VOLD_USB_OK" > /tmp/fstab.android-desktop; t
   if mount --bind /tmp/fstab.android-desktop "$F"; then
     FSTAB_OVERLAY_OK=1
     if [ "$VOLD_USB_OK" = 1 ] && grep -q 'voldmanaged=usb' /tmp/fstab.android-desktop; then
-      if [ -n "${STICK:-}" ]; then
-        log "hook: GBOS stick excluded; vold USB rule retained for external storage"
+      if [ -n "$VOLD_BOOT_DISK" ]; then
+        log "hook: boot disk $VOLD_BOOT_DISK excluded from vold; vold USB rule retained for external storage"
       else
         log "hook: no GBOS USB stick to exclude; vold USB rule retained"
       fi
