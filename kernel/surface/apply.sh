@@ -20,11 +20,12 @@ P=${P:-/host/kernel/surface}
 SRC=${SRC:-/build/src}
 cd "$SRC"
 
+# git apply, not patch: the gbos-kbuild image (kernel/docker/Dockerfile) has git but no patch(1). It works on a plain tree (no .git).
 apply_once() { # patch file, a file that exists once it is applied
-  if [ -e "$2" ] && patch -p1 -R --dry-run -s -f < "$1" >/dev/null 2>&1; then
+  if [ -e "$2" ] && git apply -p1 -R --check "$1" >/dev/null 2>&1; then
     echo "surface: already applied $(basename "$1")"
   else
-    patch -p1 -N -s < "$1"
+    git apply -p1 "$1"
     echo "surface: applied $(basename "$1")"
   fi
 }
