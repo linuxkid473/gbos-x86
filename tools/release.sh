@@ -19,7 +19,9 @@
 #   2. The Google build: lapis/BUILD (BUILD_ID, VERSION, URL) and usb/patched/MANIFEST's "# build" line name the same build, so the
 #      patches were made for it (tools/port_build.sh --write). The stick tree's super.img is that build (dump.erofs, gbos-erofs image).
 #   3. The key: usb/sysupdate.pub is a real key (not the placeholder) and, with a key, the private key's own public half.
-#   4. Tests: sh -n on the boot scripts, tools/test_system_update.sh and tools/test_updater_core.sh.
+#   3b. The app: the tree's gbos86-updater.apk checks REPO's feed (not a lab or fork build) and was built from this commit's
+#      updater-app/ (its build stamp, tools/apk_stamp.py).
+#   4. Tests: sh -n on the boot scripts, tools/test_system_update.sh, tools/test_updater_core.sh and tools/test_release_app_check.sh.
 #   5. Googlebook OS check (what the app's Googlebook OS card relies on before it offers "Download Rn and install"):
 #      for a Google build NEWER than the published one, Google's recovery.zip must still be served and tools/super_parts.py must
 #      prove super.img from Google's partitions (lapis/parts), so the feed carries google_zip/google_part/google_super.
@@ -267,13 +269,30 @@ if [ -n "$KEY" ]; then
   ok "the private key matches usb/sysupdate.pub"
 else ok "usb/sysupdate.pub holds a key (no --key given to compare)"; fi
 
+# ------------------------------------------------------------------------------------------------ 3b. Updater app
+# The release ships the tree's gbos86-updater.apk to every laptop. It must check this repository's feed (a lab or fork build
+# would move laptops to another feed) and be built from this commit's updater-app/ (the app laptops get is the app in $BRANCH).
+say "3b. Updater app"
+_build="REPO=$REPO APK_OUT=${TREE:-<stick folder>}/gbos86-updater.apk updater-app/build.sh"
+if [ -n "$TREE" ]; then
+  _apk=$TREE/gbos86-updater.apk
+  [ -f "$_apk" ] || die "$_apk is missing: build it ($_build)"
+  _st=$(python3 -I tools/apk_stamp.py "$_apk") || die "$_apk has no build stamp (an older build): rebuild it ($_build)"
+  _ar=$(echo "$_st" | sed -n 's/.*repo=\([^ ]*\).*/\1/p'); _at=$(echo "$_st" | sed -n 's/.*tree=\([^ ]*\).*/\1/p')
+  _ac=$(echo "$_st" | sed -n 's/.*commit=\([^ ]*\).*/\1/p')
+  [ "$_ar" = "$REPO" ] || die "$_apk checks github.com/$_ar for updates, not $REPO (a lab or fork build): rebuild it ($_build)"
+  _wt=$(git rev-parse "HEAD:updater-app")
+  [ "$_at" = "$_wt" ] || die "$_apk was built from other updater-app sources (tree $_at, commit $_ac), not $BRANCH's ($_wt): rebuild it ($_build)"
+  ok "gbos86-updater.apk checks github.com/$REPO and was built from $BRANCH's updater-app (tree ${_wt%"${_wt#????????}"}, commit ${_ac%"${_ac#????????}"})"
+else echo "  (no --tree: the app is not checked; publish will do it)"; fi
+
 # ------------------------------------------------------------------------------------------------ 4. tests
 say "4. tests"
 if [ $SKIPT = 1 ]; then echo "  SKIPPED (--skip-tests)"
 else
   sh -n usb/hook.sh usb/install.sh usb/stage0_init.sh usb/apex_patch.sh usb/sysupdate.sh || die "shell syntax"
   ok "sh -n"
-  for t in system_update:SYSTEM_UPDATE_TEST_PASS updater_core:UPDATER_CORE_TEST_PASS; do
+  for t in system_update:SYSTEM_UPDATE_TEST_PASS updater_core:UPDATER_CORE_TEST_PASS release_app_check:RELEASE_APP_CHECK_TEST_PASS; do
     n=${t%%:*}; m=${t#*:}
     sh "tools/test_$n.sh" > "$T/$n.log" 2>&1 || true
     grep -q "$m" "$T/$n.log" || { tail -n 30 "$T/$n.log" >&2; die "tools/test_$n.sh did not print $m (log above)"; }

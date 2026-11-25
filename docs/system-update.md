@@ -163,7 +163,7 @@ asks for the stick.
 `updater-app/build.sh --test-key` signs with a throwaway key; a release build signs with `~/.config/gbos86/updater-app.p12`
 (made on the first build; back it up, and Android only updates the app with the same key). The result is `usb/gbos86-updater.apk`;
 on the stick it is in `install.sh`'s FILES, and `hook.sh` installs it with `pm` at boot when it changed. The APK is not committed.
-The app's default update source is this checkout's GitHub `origin` (or `REPO=OWNER/NAME updater-app/build.sh`); Settings can change it.
+The app's default update source is the project's main repository (`REPO` in `tools/release.conf`, where `tools/release.sh` publishes from `main`), whatever this clone's remotes are; a lab or fork build passes `REPO=OWNER/NAME updater-app/build.sh`. Settings can change it. Each APK carries a build stamp (repo, the git tree of `updater-app/`, `-dirty` for uncommitted changes, commit): `python3 -I tools/apk_stamp.py APK` prints it, and `tools/release.sh` refuses a tree whose APK points at another repository or was built from other `updater-app/` sources.
 
 ## The app
 
