@@ -115,5 +115,9 @@ sedi "$O/mixer_paths.xml" \
   -e '/name="Speaker Playback Switch"/{' -e p -e 's/name="Speaker Playback Switch"/name="Bass Speaker Playback Switch"/' -e '}' \
   -e '/name="Capture Switch"/{' -e p -e 's/name="Capture Switch"/name="Mic Capture Switch"/' -e p \
   -e 's/name="Mic Capture Switch"/name="Headset Mic Capture Switch"/' -e '}'
+# The 87s above are the usual Realtek maximum; volmax.sh replaces them with this codec's own maxima (ALC298: 127, issues 31/32).
+VMSG=
+if [ -n "$CARDNO" ] && [ -f "${0%/*}/volmax.sh" ]; then VMSG=$(sh "${0%/*}/volmax.sh" "$ASOUND/card$CARDNO" "$O/mixer_paths.xml") || true; fi
 
 echo "pcm map: card=${CARDNO:-?} playback-default=${APB:--} speaker-playback=${SPK:-${APB:--}} headphone-playback=${APB:--} analog-capture=${ACP:--} dmic=${DMIC:--} internal-mic=${IMIC:--} hdmi=${HDMI:--}; jacks: headphone='${HPJ:--}' mic='${MICJ:--}'"
+[ -z "$VMSG" ] || echo "$VMSG"

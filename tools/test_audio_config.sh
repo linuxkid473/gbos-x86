@@ -341,6 +341,69 @@ chk "mtl: HDMI3 jack" "$C" "<JackDev>sof-hda-dsp HDMI/DP,pcm=5</JackDev>"
 nochk "mtl: no deep-buffer PCM used" "$C" ",31<"
 nochk "mtl: no leftover PCH" "$C" "PCH"
 
+# ---- 5e. output volumes at the codec's own maxima (usb/audio/volmax.sh; issues 31/32) ------------------------------------------
+# Codec files as /proc/asound/cardN/codec#M prints them (hda_proc.c): each control under the node that owns it.
+codec() { # codec FILE NAME STEPS : a Realtek-style codec, Speaker/Headphone on DACs 0x02/0x03 with STEPS steps, Beep (0x1f) on a mixer
+  cat > "$1" <<EOF
+Codec: Realtek $2
+Address: 0
+Default Amp-Out caps: N/A
+Node 0x02 [Audio Output] wcaps 0x41d: Stereo Amp-Out
+  Control: name="Speaker Playback Volume", index=0, device=0
+    ControlAmp: chs=3, dir=Out, idx=0, ofs=0
+  Device: name="$2 Analog", type="Audio", device=0
+  Amp-Out caps: ofs=$3, nsteps=$3, stepsize=0x01, mute=0
+  Amp-Out vals:  [0x00 0x00]
+Node 0x03 [Audio Output] wcaps 0x41d: Stereo Amp-Out
+  Control: name="Headphone Playback Volume", index=0, device=0
+    ControlAmp: chs=3, dir=Out, idx=0, ofs=0
+  Amp-Out caps: ofs=$3, nsteps=$3, stepsize=0x01, mute=0
+Node 0x0b [Audio Mixer] wcaps 0x20010b: Stereo Amp-In
+  Control: name="Beep Playback Volume", index=0, device=0
+    ControlAmp: chs=3, dir=In, idx=4, ofs=0
+  Amp-In caps: ofs=0x17, nsteps=0x1f, stepsize=0x05, mute=1
+EOF
+}
+# Galaxy Book2 Pro 360 (ALC298, 0x7f steps) on SOF: the ENVY tree plus codec files
+cp -R $W/sof $W/gb; mkdir -p $W/gb/card0
+codec "$W/gb/card0/codec#0" ALC298 0x7f
+printf 'Codec: Intel Alderlake HDMI\nNode 0x03 [Audio Output] wcaps 0x6611: 8-Channels Digital\n' > "$W/gb/card0/codec#2"
+msg=$(gen gb gbos-gen sofhdadsp sof-hda-dsp); M=$W/out-gb/gbos-gen/mixer_paths.xml
+wellformed "$M"
+chk "volmax ALC298: Master 127"            "$M" '<ctl name="Master Playback Volume" value="127" />'
+chk "volmax ALC298: Speaker 127 127"       "$M" '<ctl name="Speaker Playback Volume" value="127 127" />'
+chk "volmax ALC298: Headphone 127 127"     "$M" '<ctl name="Headphone Playback Volume" value="127 127" />'
+nochk "volmax ALC298: no 87 left"          "$M" 'value="87'
+case "$msg" in *"volmax: volume maxima Beep=31 Headphone=127 Master=127 Speaker=127; set in mixer_paths.xml"*)
+  ok "volmax ALC298: logged, Beep (an input) does not lower Master";; *) bad "volmax ALC298 message: $msg";; esac
+# A codec with fewer steps than 87 (0x4a, the QEMU hda-duplex codec): 87 is out of range there
+cp -R $W/sof $W/low; mkdir -p $W/low/card0; codec "$W/low/card0/codec#0" ALCX 0x4a
+gen low gbos-gen sofhdadsp sof-hda-dsp >/dev/null; M=$W/out-low/gbos-gen/mixer_paths.xml
+chk "volmax 0x4a: Master 74"               "$M" '<ctl name="Master Playback Volume" value="74" />'
+chk "volmax 0x4a: Speaker 74 74"           "$M" '<ctl name="Speaker Playback Volume" value="74 74" />'
+# A control offset (ControlAmp ofs) lowers the maximum: hda_codec.c get_amp_max_value
+cp -R $W/sof $W/ofs; mkdir -p $W/ofs/card0; codec "$W/ofs/card0/codec#0" ALCO 0x57
+sed 's/^\(    ControlAmp: chs=3, dir=Out, idx=0, \)ofs=0$/\1ofs=7/' "$W/ofs/card0/codec#0" > "$W/ofs/c" && mv "$W/ofs/c" "$W/ofs/card0/codec#0"
+gen ofs gbos-gen sofhdadsp sof-hda-dsp >/dev/null
+chk "volmax ofs=7 on 0x57: Speaker 80 80"  "$W/out-ofs/gbos-gen/mixer_paths.xml" '<ctl name="Speaker Playback Volume" value="80 80" />'
+# The usual Realtek 0x57: unchanged, and so is a card without codec files (the ENVY tree above)
+cp -R $W/sof $W/r87; mkdir -p $W/r87/card0; codec "$W/r87/card0/codec#0" ALC255 0x57
+msg=$(gen r87 gbos-gen sofhdadsp sof-hda-dsp)
+cmp -s "$W/out-r87/gbos-gen/mixer_paths.xml" "$W/out-sof/gbos-gen/mixer_paths.xml" \
+  && ok "volmax 0x57: mixer_paths.xml identical to the one without codec files" || bad "volmax 0x57 changed mixer_paths.xml"
+case "$msg" in *"nothing to change"*) ok "volmax 0x57: logged as nothing to change";; *) bad "volmax 0x57 message: $msg";; esac
+chk "volmax: card without codec files keeps 87" "$W/out-sof/gbos-gen/mixer_paths.xml" '<ctl name="Speaker Playback Volume" value="87 87" />'
+# The PCH path in hook.sh: volmax.sh on a copy of the shipped template (Master only)
+mkdir -p $W/pchvm/card0 $W/pchcp; codec "$W/pchvm/card0/codec#0" ALC298 0x7f; cp "$TPL/mixer_paths.xml" $W/pchcp/
+sh "$ROOT/usb/audio/volmax.sh" $W/pchvm/card0 $W/pchcp/mixer_paths.xml >/dev/null && ok "volmax PCH copy: exit 0 when changed" || bad "volmax PCH copy: exit status"
+chk "volmax PCH copy: Master 127"          "$W/pchcp/mixer_paths.xml" '<ctl name="Master Playback Volume" value="127" />'
+[ "$(grep -c . $W/pchcp/mixer_paths.xml)" = "$(grep -c . $TPL/mixer_paths.xml)" ] && ok "volmax PCH copy: no lines added or lost" || bad "volmax PCH copy: line count"
+cp "$TPL/mixer_paths.xml" $W/pchcp/
+sh "$ROOT/usb/audio/volmax.sh" $W/nonexistent $W/pchcp/mixer_paths.xml >/dev/null && bad "volmax: exit 0 without codec files" || ok "volmax: exit 1 without codec files"
+cmp -s "$W/pchcp/mixer_paths.xml" "$TPL/mixer_paths.xml" && ok "volmax: file untouched without codec files" || bad "volmax: file changed without codec files"
+H=$ROOT/usb/hook.sh
+chk "hook: PCH path runs volmax.sh on a copy" "$H" 'VMSG=$(sh $G/audio/volmax.sh /proc/asound/card$CNO /tmp/gbos-audio/$AC/mixer_paths.xml) && ASRC=/tmp/gbos-audio/$AC'
+
 # ---- 6. hook.sh: card id PCH still takes the static files, and generation is guarded -------------------------------------
 H=$ROOT/usb/hook.sh
 chk "hook: PCH uses the shipped config"   "$H" 'ASRC=$G/audio/gbos-hda-pch; ADEF=$G/audio/audio_default.xml'
