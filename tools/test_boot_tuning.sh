@@ -20,7 +20,15 @@ gbos_configure_boot_debug
 [ -z "$GBOS_LOGCAT_START" ] && [ -z "$GBOS_DEBUG_DIAGNOSTIC_START" ] && [ -z "$GBOS_DRM_DEBUG_STOP" ]
 DEBUG_LOGS=1
 gbos_configure_boot_debug
-[ "$GBOS_LOGCAT_START" = '    start gbos_logcat' ]
+[ "$GBOS_LOGCAT_START" = '    start gbos_logcat
+    start gbos_logcat_boot' ]
+[ "$GBOS_LOGCAT_FILTER" = ' pixel-thermal:W keystore2:F' ]
+LOGCAT_FULL=1
+gbos_configure_boot_debug
+[ -z "$GBOS_LOGCAT_FILTER" ]
+unset LOGCAT_FULL
+grep -q '^service gbos_logcat_boot /system/bin/timeout 600 /system/bin/logcat .*-f /postinstall/gbos/logs/boot-\$N/logcat-boot.txt\$GBOS_LOGCAT_FILTER$' "$HOOK"
+grep -q '^service gbos_logcat /system/bin/logcat .*/logcat.txt\$GBOS_LOGCAT_FILTER$' "$HOOK"
 case "$GBOS_DEBUG_DIAGNOSTIC_START" in
   *'start gbos_audiodiag'*'start gbos_displaydiag'*'start gbos_aidiag'*) ;;
   *) echo "DEBUG_LOGS did not enable the expected diagnostics" >&2; exit 1;;

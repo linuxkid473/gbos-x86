@@ -274,6 +274,21 @@ check "stage refuses a .tar with links" "! SU stage '$T/evil.tar' --gbos '$G' >/
 check "cancel removes waiting bundles" "SU stage '$SB' --gbos '$G' >/dev/null 2>&1 && SU cancel '$G' >/dev/null && [ -z \"\$(ls '$G/update.inbox')\" ]"
 check "status reports the set and the key" "SU status '$G' | grep -q 'signing key: installed'"
 
+# --- stage writes big files in flushed chunks and records their hashes; the next start skips hashing them only if nothing changed
+mk_src "$T/s3" 16000001 v1; head -c 2621440 /dev/urandom > "$T/s3/usb/firmware/c.bin"
+B3=$(build v3 "$T/s3" "$T/t1" 220 --base "$B1/manifest") || bad "build v3"
+SB3() { rm -rf "$G/update.inbox"; (export SYSUPDATE_TEST_CHUNK_MB=1 SYSUPDATE_TEST_CHECKED_MIN=1048576; SU stage "$B3" --gbos "$G") >/dev/null 2>&1 || return 1
+  I3=$(ls -d "$G/update.inbox"/gbos86-update-*); SC3=$I3/staged.checked; F3=$I3/files/firmware/c.bin; }
+install_set "$B1"; SB3
+check "stage: a 2.5 MB file copied in 1 MB chunks is identical" "cmp -s '$B3/files/firmware/c.bin' \"\$F3\""
+check "stage: only the big file is recorded, with its size and last-MB hash" "[ \"\$(wc -l < \"\$SC3\")\" = 1 ] && grep -q ' 2621440 [0-9a-f]\{64\} files/firmware/c.bin\$' \"\$SC3\""
+check "stage: a bundle with staged.checked still verifies" "SU verify \"\$I3\" --pub '$PUB' >/dev/null 2>&1"
+check "boot after staging: the recorded file is not hashed again, the set installs" "[ \$(boot) = 0 ] && grep -q '1 big file(s) hashed when staged' '$T/boot.log' && [ \"\$(st seq)\" = 220 ] && cmp -s '$B3/files/firmware/c.bin' '$G/firmware/c.bin'"
+install_set "$B1"; SB3; printf 'Z' | dd of="$F3" bs=1 seek=2621439 conv=notrunc 2>/dev/null
+check "boot: a recorded file whose last MB changed is hashed, and refused" "[ \$(boot) = 0 ] && ! grep -q 'hashed when staged' '$T/boot.log' && [ ! -f '$G/update/state' ] && grep -q 'hash mismatch' '$G/update/status.txt'"
+install_set "$B1"; SB3; printf '#!/bin/sh\necho "[    9.6] FAT-fs (sdz2): Volume was not properly unmounted."\n' > "$T/fakedmesg"; chmod +x "$T/fakedmesg"
+check "boot on a volume mounted dirty: the record is not used, every file is hashed" "[ \$(dboot) = 0 ] && grep -q 'not using staged.checked' '$T/boot.log' && [ \"\$(st seq)\" = 220 ]"
+
 # ------------------------------------------------------------------------------------------------ menu 1 (install.sh)
 STK=$T/stick/gbos
 mkstick() { rm -rf "$T/stick"; mkdir -p "$STK"; cp -r "$1/files/." "$STK/"; rm -rf "$STK/EFI"; cp "$1/manifest" "$STK/system.manifest"; }

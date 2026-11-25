@@ -174,7 +174,7 @@ public class MainActivity extends Activity {
         intHeader.setGravity(Gravity.CENTER_VERTICAL);
         intHeader.addView(M3.titleMedium(this, "System Integrity"), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f));
 
-        integrityBadge = M3.badge(this, "Checking ...", M3.BADGE_NEUTRAL);
+        integrityBadge = M3.badge(this, "Not checked", M3.BADGE_NEUTRAL);
         intHeader.addView(integrityBadge);
         deviceCard.addView(intHeader);
 
@@ -405,21 +405,9 @@ public class MainActivity extends Activity {
                 Updater.Info i = Updater.info(this);
                 info = i;
                 ui.post(this::showLaptop);
-                Updater.Audit a = audit;
-                if (a == null || !a.set.equals(i.set) || System.currentTimeMillis() - a.time > 6 * 3600 * 1000L) {
-                    ui.post(() -> {
-                        integrityView.setText("Checking for modifications ...");
-                        integrityBadge.setText("Checking");
-                        integrityBadge.setBackground(M3.roundRect(M3Theme.surfaceContainerHighest(this), M3.dp(this, 12)));
-                        integrityBadge.setTextColor(M3Theme.onSurfaceVariant(this));
-                    });
-                    try {
-                        audit = Updater.audit(this, false);
-                    } catch (Exception e) {
-                        ui.post(() -> integrityView.setText("The modification check failed: " + e.getMessage()));
-                    }
-                    ui.post(this::showIntegrity);
-                } else ui.post(this::showIntegrity);
+                // The modification check reads every system file through root: on a USB stick that took seconds of disk time on each
+                // first open (boots 16-19, 2026-11-24). It runs when asked ("Check for changes") and before an update is copied.
+                ui.post(auditFresh(i) ? this::showIntegrity : this::showUnchecked);
                 try {
                     Feed f = Updater.fetchFeed(this, i);
                     Updater.Decision d = Updater.decide(this, i, audit, f);
@@ -529,6 +517,44 @@ public class MainActivity extends Activity {
         }
     }
 
+    private boolean auditFresh(Updater.Info i) {
+        Updater.Audit a = audit;
+        return a != null && i != null && a.set.equals(i.set) && System.currentTimeMillis() - a.time <= 6 * 3600 * 1000L;
+    }
+
+    private void showUnchecked() {
+        integrityView.setText("Not checked since the app started. \"Check for changes\" reads every system file; it also runs before an "
+                + "update is installed.");
+        integrityBadge.setText("Not checked");
+        integrityBadge.setBackground(M3.roundRect(M3Theme.surfaceContainerHighest(this), M3.dp(this, 12)));
+        integrityBadge.setTextColor(M3Theme.onSurfaceVariant(this));
+    }
+
+    /** Runs the modification check first when there is no recent one, then next (on the UI thread), so the install warning is real. */
+    private void afterAudit(Runnable next) {
+        if (auditFresh(info)) { next.run(); return; }
+        if (busy) return;
+        busy = true;
+        integrityBadge.setText("Checking");
+        integrityView.setText("Checking for modifications before the update ...");
+        progressView.setText("Checking this laptop's files before the update ...");
+        new Thread(() -> {
+            try {
+                audit = Updater.audit(this, false);
+            } catch (Exception e) {
+                audit = null;   // warning(null) says the files could not be checked, and asks before going on
+                ui.post(() -> integrityView.setText("The modification check failed: " + e.getMessage()));
+            } finally {
+                busy = false;
+            }
+            ui.post(() -> {
+                if (audit != null) showIntegrity();
+                progressView.setText("");
+                next.run();
+            });
+        }).start();
+    }
+
     private void runAudit(boolean deep) {
         if (busy) return;
         busy = true;
@@ -552,6 +578,10 @@ public class MainActivity extends Activity {
     private void confirmInstall() {
         final Updater.Decision d = decision;
         if (d == null || d.kind != Updater.Kind.AVAILABLE) return;
+        afterAudit(() -> confirmInstallChecked(d));
+    }
+
+    private void confirmInstallChecked(final Updater.Decision d) {
         final Updater.Audit a = audit;
         String w = Updater.warning(a);
         if (w != null) {
@@ -701,6 +731,11 @@ public class MainActivity extends Activity {
     }
 
     private void confirmStageFolder() {
+        if (relPath == null) return;
+        afterAudit(this::confirmStageFolderChecked);
+    }
+
+    private void confirmStageFolderChecked() {
         if (relPath == null) return;
         final List<String> codes = Updater.warningCodes(audit);
         String w = Updater.warning(audit);

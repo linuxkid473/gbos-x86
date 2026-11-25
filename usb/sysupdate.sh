@@ -31,6 +31,10 @@ SU_RW_DIR=${SU_RW_DIR:-/dev/gbos-rw}   # stage0's root-only writable view of it 
 SU_SMALL=1048576                 # files up to this size are backed up by copying, so they never go missing during the switch
 SU_MARGIN_KB=65536               # free space kept on GBOSSYS for logs when staging
 SU_KEEP_LOG_BOOTS=3              # --prune-logs never deletes the newest boots' logs
+SU_CHUNK_MB=32                   # stage writes big files in chunks of this size, each flushed before the next (see su_copy_checked)
+SU_CHECKED=staged.checked        # stage's record of the big files it hashed after copying them (see su_skip_checked)
+SU_CHECKED_MIN=$SU_SMALL         # ... files over this size
+if [ -n "$SU_TEST" ]; then SU_CHUNK_MB=${SYSUPDATE_TEST_CHUNK_MB:-$SU_CHUNK_MB}; SU_CHECKED_MIN=${SYSUPDATE_TEST_CHECKED_MIN:-$SU_CHECKED_MIN}; fi
 SU_TEST=${SYSUPDATE_TEST:-}      # tests only (stage0 runs this with env -i, so it is never set there)
 SU_KMSG=${SYSUPDATE_KMSG:-/dev/kmsg}
 SU_TTY=${SYSUPDATE_TTY:-/dev/tty1}
@@ -69,6 +73,8 @@ su_free_kb() { # DIR
 }
 su_kb() { echo $(( ($1 + 1023) / 1024 )); }
 su_dropcache() { sync; [ -n "$SU_TEST" ] || echo 3 > /proc/sys/vm/drop_caches 2>/dev/null; return 0; }
+su_dropclean() { [ -n "$SU_TEST" ] || echo 1 > /proc/sys/vm/drop_caches 2>/dev/null; return 0; }   # clean page cache only (no sync)
+su_tailsha() { tail -c 1048576 "$1" 2>/dev/null | sha256sum | cut -c1-64; }   # the last MB: cheap, and what a cut-short copy loses first
 su_crashpoint() { # tests: simulate a power cut after N journal steps
   [ -n "$SU_TEST" ] && [ -n "${SYSUPDATE_TEST_CRASH_AFTER:-}" ] || return 0
   SU_STEPS=$(( ${SU_STEPS:-0} + 1 ))
@@ -181,13 +187,13 @@ su_walk() {
   [ -d "$_b" ] || { SU_ERR="not a folder: $_b"; return 1; }
   _x=$(cd "$_b" && find . ! -type f ! -type d | head -n 3)
   [ -z "$_x" ] || { SU_ERR="the bundle has a link or special file: $_x"; return 1; }
-  _x=$( (cd "$_b" && find . -type d; echo ===; find . -type f) | awk -v O="$_o" '
+  _x=$( (cd "$_b" && find . -type d; echo ===; find . -type f) | awk -v O="$_o" -v SC="$SU_CHECKED" '
     BEGIN { while ((getline l < (O "/d")) > 0) okd["./files/" l] = 1; okd["."] = 1; okd["./files"] = 1; okd["./files/EFI"] = 1
             while ((getline l < (O "/f")) > 0) { split(l, a, " "); okf["./files/" a[3]] = a[3] } }
     $0 == "===" { files = 1; next }
     $0 !~ /^[A-Za-z0-9._+,@=~\/-]+$/ { print "name not allowed: " $0; exit }
     !files { if (!($0 in okd)) { print "folder not in the manifest: " $0; exit }; next }
-    $0 == "./manifest" || $0 == "./manifest.sig" { next }
+    $0 == "./manifest" || $0 == "./manifest.sig" || $0 == "./" SC { next }
     $0 == "./files/EFI/BOOTX64.EFI" { print "1" > (O "/kdelivered"); next }
     ($0 in okf) { print okf[$0] > (O "/delivered"); next }
     { print "file not in the manifest: " $0; exit }')
@@ -253,8 +259,27 @@ su_verify_bundle() {
   su_walk "$_vb" "$_vo/p" || return 1
   awk 'NR == FNR { d[$1] = 1; next } ($3 in d) { print $1 "  files/" $3 }' "$_vo/p/delivered" "$_vo/p/f" > "$_vo/chk.delivered"
   [ -f "$_vo/p/kdelivered" ] && echo "$(cut -d' ' -f1 "$_vo/p/k")  files/EFI/BOOTX64.EFI" >> "$_vo/chk.delivered"
+  [ "${SU_TRUST_STAGED:-0}" = 1 ] && su_skip_checked "$_vb" "$_vo/chk.delivered"
   su_hash_check "$_vb" "$_vo/chk.delivered" || return 1
   SU_ID=$(su_sha "$_vo/manifest")
+  return 0
+}
+# su_skip_checked BUNDLE LIST (stage0 only): drop from LIST ("sha  files/path" lines) the big files that `stage` hashed right after
+# copying them (BUNDLE/staged.checked: "sha size tailsha files/path") and that still have that size and last MB. Hashing R5's 3.7 GB
+# super.img again took 70 s of the start after staging (boot 19, 2026-11-24). Only after a clean unmount: a power cut can leave a
+# file damaged but the same size, and the full check is what catches it. The signed manifest still decides each file's hash: a line
+# only skips a file whose recorded hash is the manifest's. Whoever can write the record can also write the installed files directly,
+# so it opens nothing new.
+su_skip_checked() {
+  [ -f "$1/$SU_CHECKED" ] || return 0
+  if su_fat_mounted_dirty; then su_log "not using $SU_CHECKED (the volume was not cleanly unmounted): hashing every file"; return 0; fi
+  : > "$2.left"; _sk=0
+  while read -r _h _p; do
+    _sz=$(su_size "$1/$_p")
+    if [ -n "$_sz" ] && grep -qxF "$_h $_sz $(su_tailsha "$1/$_p") $_p" "$1/$SU_CHECKED"; then _sk=$((_sk + 1)); else echo "$_h  $_p" >> "$2.left"; fi
+  done < "$2"
+  mv -f "$2.left" "$2"
+  [ $_sk = 0 ] || su_log "$_sk big file(s) hashed when staged and unchanged since (size, last MB): not hashed again"
   return 0
 }
 cmd_verify() {
@@ -469,7 +494,7 @@ su_prepare_kernel() { # writes BOOTX64.NEW (checked) when the set's kernel diffe
 su_activate() { # the bundle is in $ST
   su_tty "checking the system update in update.staging (about a minute) ..."
   PUB=$G/sysupdate.pub
-  su_verify_bundle "$ST" "$PUB" "$W/v" || return 1
+  SU_TRUST_STAGED=1 su_verify_bundle "$ST" "$PUB" "$W/v" || return 1
   rm -rf "$U/p"; cp -r "$W/v/p" "$U/p"
   NEWID=$SU_ID
   _nseq=$(su_mval "$U/p" seq); _nb=$(su_mval "$U/p" google_build); _nfp=$(su_mval "$U/p" google_fingerprint)
@@ -662,7 +687,17 @@ su_copy_checked() {
   _fd=$(readlink "/proc/$$/fd/4" 2>/dev/null)
   if [ "$_fd" != "$_cs" ] || [ "$(stat -L -c %h "/proc/$$/fd/4" 2>/dev/null)" != 1 ]; then exec 4<&-; SU_ERR="file changed or has other links: $_cs"; return 1; fi
   mkdir -p "$(dirname "$_cd")"
-  cat <&4 > "$_cd.part"; _r=$?
+  # In chunks, each flushed (conv=fsync) before the next is read: one `cat` of R5's 3.7 GB super.img filled memory with dirty pages
+  # the stick could not take fast enough, and lmkd killed the launcher a minute into staging (boot 18, 2026-11-24). Every 8 chunks
+  # the clean page cache is dropped as well, so the copy (source and target) does not push apps' pages out.
+  : > "$_cd.part"; _r=$?; _cn=0
+  while [ $_r = 0 ]; do
+    _cb=$(su_size "$_cd.part")
+    dd bs=1048576 count=$SU_CHUNK_MB iflag=fullblock conv=fsync <&4 >> "$_cd.part" 2>/dev/null || { _r=1; break; }
+    _ca=$(su_size "$_cd.part")
+    [ "$((_ca - _cb))" -lt $((SU_CHUNK_MB * 1048576)) ] && break   # end of file
+    _cn=$((_cn + 1)); [ $((_cn % 8)) = 0 ] && su_dropclean
+  done
   exec 4<&-
   [ $_r = 0 ] && mv -f "$_cd.part" "$_cd" || { rm -f "$_cd.part"; SU_ERR="copy failed: $_cs"; return 1; }
 }
@@ -739,6 +774,10 @@ cmd_stage() {
     _i=$((_i + 1)); su_progress "copying $_i of $_tot: $_p"
     su_copy_checked "$_src/files/$_p" "$INBOX/$_name.part/files/$_p" || { rm -rf "$INBOX/$_name.part"; su_die "$SU_ERR"; }
     [ "$(su_sha "$INBOX/$_name.part/files/$_p")" = "$_h" ] || { rm -rf "$INBOX/$_name.part"; su_die "hash mismatch after copying $_p"; }
+    # big files: record the check, so the next start does not hash them again (su_skip_checked); drop the hash's read cache
+    if [ "$_s" -gt $SU_CHECKED_MIN ]; then
+      echo "$_h $_s $(su_tailsha "$INBOX/$_name.part/files/$_p") files/$_p" >> "$INBOX/$_name.part/$SU_CHECKED"; su_dropclean
+    fi
   done < "$W/copy"
   # folders the set declares (so the walk at boot finds only declared ones)
   if [ -n "$_k" ]; then
@@ -956,6 +995,10 @@ cmd_install_app() {
       [ $_new = 1 ] && pm grant "$SU_PKG" android.permission.POST_NOTIFICATIONS >> "$_log" 2>&1;;
     esac
   fi
+  # Exempt it from app standby and doze, every start (idempotent; the list lives in /data/system/deviceidle.xml). Installed by pm and
+  # never opened, it stayed in the NEVER standby bucket, so its jobs (the check after start, the cleanup) did not run on time
+  # (JobScheduler "still in NEVER bucket", "0 EJ quota" after each reinstall, boots 16-19, 2026-11-24).
+  cmd deviceidle whitelist +"$SU_PKG" >> "$_log" 2>&1 || echo "deviceidle whitelist +$SU_PKG failed" >> "$_log"
   # the app's update check at startup (its own BOOT_COMPLETED receiver does not run until the app was opened once). The app decides
   # (Settings: "Check when the laptop starts") and waits for the network itself.
   am broadcast -a org.gbos86.updater.BOOT_CHECK -n "$SU_PKG/.BootReceiver" -f 0x20 >> "$_log" 2>&1
