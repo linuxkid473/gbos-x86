@@ -530,6 +530,9 @@ gbos_hw_report() {
     # (no machine driver, DSP firmware or topology not found, codec probe errors).
     echo "== sound codecs"
     for c in /proc/asound/card*/codec#*; do [ -f "$c" ] && { echo "--- $c"; grep -E '^(Codec|Address|Vendor Id|Subsystem Id|Revision Id|Default PCM|Node 0x[0-9a-f]+ \[Pin Complex\]|  Pin Default)' "$c" | head -n 40; }; done
+    # "Pin Default" above is the BIOS value read from the codec; overrides from HDA_PINS and kernel quirks are only here.
+    echo "== HDA pin overrides (HDA_PINS=${HDA_PINS:-unset})"
+    for c in /sys/class/sound/hwC*D*; do [ -e $c/user_pin_configs ] && echo "${c##*/} user: $(tr '\n' ' ' < $c/user_pin_configs) driver: $(tr '\n' ' ' < $c/driver_pin_configs)"; done
     # PCM numbers + jack input devices are what usb/audio/gen_config.sh maps the audio HAL config from; the speaker/DAC nodes show
     # whether a codec fixup connected the second speaker pin (0x14) to the same DAC as 0x17.
     echo "== sound pcm"; cat /proc/asound/pcm 2>&1
