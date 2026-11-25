@@ -93,16 +93,30 @@ tools/verify_system_update.sh build/system-updates/gbos86-update-...   # the dev
 
 ## Releasing from main (maintainer): `tools/release.sh`
 
-One command wraps everything below with the checks first; nothing is uploaded until all pass:
+Only for the main repository (`REPO` in `tools/release.conf`): a clone whose `origin` is a fork or the lab repository is refused.
+Nothing is uploaded until every check passes.
 
 ```sh
-tools/release.sh check --tree /path/to/stick/gbos                     # checks only, no key needed
-tools/release.sh publish --key /media/offline-stick/gbos86-key/sysupdate-private.pem --tree /path/to/stick/gbos [--dry-run]
+tools/release.sh setup          # once per computer: where the signing key and the stick folder are (~/.config/gbos86/release.conf)
+tools/release.sh start 2026-11-20   # the starting point (tools/release.conf): commit and push it
+tools/release.sh                # the plan: what a release made today contains, which laptops get a small download
+tools/release.sh check          # every check, nothing signed or uploaded
+tools/release.sh publish        # the checks, then sign and upload (asks first); --dry-run makes the files only
 ```
 
-1. **git:** on `main` (`--branch`), no uncommitted changes in `usb/ lapis/ tools/ updater-app/`, `HEAD` = `origin/main`.
-2. **Google build:** `lapis/BUILD` and `usb/patched/MANIFEST` name the same build (else `tools/port_build.sh --write`); the tree's
-   `super.img` is that build (dump.erofs, when the `gbos-erofs` image exists).
+**The run day and the starting point.** An update is always `main` as it is on the day the script runs; its number is that day's
+date and time (UTC). The starting point only decides who gets the small download: laptops on any update published from it on get a
+**delta** (only the changed files), laptops on an older one or on none get the **full** bundle. The app picks by itself. `start` takes
+a date (the first update published that day or later), an update number, `last` (the newest only) or `all`. The delta grows with
+each update it covers, so move the start forward from time to time (`tools/release.sh start last`; the plan reminds you past 8).
+Example: start 2026-11-18, updates published on 11-18 and 11-22; a laptop that installed the 11-22 update gets Friday's release as a
+delta of what changed since 11-22.
+
+The checks, in order:
+0. **Tools:** git, curl, openssl, python3, a JDK, busybox (`tools/fetch_busybox.sh`), and `gh` logged in for an upload.
+1. **git:** on `main` (`BRANCH`), no uncommitted changes in `usb/ lapis/ tools/ updater-app/`, `HEAD` = `origin/main`.
+2. **Google build:** `lapis/BUILD` and `usb/patched/MANIFEST` name the same build (else `tools/port_build.sh --write`); the stick
+   folder's `super.img` is that build (dump.erofs, when the `gbos-erofs` image exists).
 3. **Key:** `usb/sysupdate.pub` is a real key, and the private key's public half.
 4. **Tests:** `sh -n`, `test_system_update.sh`, `test_updater_core.sh`.
 5. **Googlebook OS check** (what the app's Googlebook OS card needs before it offers "Download Rn and install"): reads the published
@@ -110,7 +124,8 @@ tools/release.sh publish --key /media/offline-stick/gbos86-key/sysupdate-private
    `lapis/parts` (which must be that build), so the feed gets its Google lines; otherwise it stops (`--allow-stick-only` publishes
    without them, laptops then use the stick). An older Google build than published is refused. `--check-google` also runs
    `tools/check_new_build.sh`.
-6. Runs `publish_system_update.sh` (it asks before uploading), then downloads the live feed and checks it is the one just signed.
+6. Runs `publish_system_update.sh --since <start>` (it asks before uploading), then downloads the live feed and checks it is the one
+   just signed.
 
 ## Publishing an update on GitHub (maintainer)
 

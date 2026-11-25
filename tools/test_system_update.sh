@@ -368,6 +368,14 @@ F2=$T/rel/400/gbos86-update.feed
 check "publish: the delta holds only what changed since the published set (super.img never)" "rm -rf '$T/un' && mkdir -p '$T/un' && tar -C '$T/un' -xf '$T/rel/400/'*-delta.tar && [ \"\$(cd '$T/un/'gbos86-update-*/files && find . -type f | sort | tr '\n' ' ')\" = './firmware/c.bin ./firmware/new/n.bin ./hook.sh ./super.layout ' ]"
 check "publish: the feed lists the base it covers" "grep -qx \"base \$(sha256sum '$T/rel/bases/300.manifest' | cut -c1-64)\" '$F2'"
 check "publish: Google's zip, each partition and super.img's hash are in the feed" "grep -qx 'google_zip https://dl.google.com/device/recovery/lapis-user/16000001/recovery.zip' '$F2' && [ \$(grep -c '^google_part ' '$F2') = 2 ] && grep -qx \"google_super \$(stat -c %s '$T/t3/super.img') \$(sha256sum '$T/t3/super.img' | cut -c1-64)\" '$F2' && feedverify '$F2'"
+# --since (tools/release.sh's starting point): the delta covers every published update from that seq on, not just the last --bases
+cp "$T/rel/400/"*.manifest "$T/rel/bases/400.manifest"; echo "# v5" >> "$T/s2/usb/hook.sh"
+PUBLISH --tree "$T/t3" --src "$T/s2/usb" --commit-id 5555555555555555555555555555555555555555 --seq 500 --bases 1 --since 300 > "$T/p5.log" 2>&1 || { cat "$T/p5.log"; bad "publish --since 300"; }
+check "publish --since 300: the delta covers 300 and 400 (--since wins over --bases 1)" "[ \$(grep -c '^base ' '$T/rel/500/gbos86-update.feed') = 2 ]"
+echo "# v6" >> "$T/s2/usb/hook.sh"
+PUBLISH --tree "$T/t3" --src "$T/s2/usb" --commit-id 6666666666666666666666666666666666666666 --seq 600 --since 400 > "$T/p6.log" 2>&1 || { cat "$T/p6.log"; bad "publish --since 400"; }
+check "publish --since 400: only 400 is covered" "[ \$(grep -c '^base ' '$T/rel/600/gbos86-update.feed') = 1 ] && grep -qx \"base \$(sha256sum '$T/rel/bases/400.manifest' | cut -c1-64)\" '$T/rel/600/gbos86-update.feed'"
+check "publish: refuses a malformed --since" "! PUBLISH --tree '$T/t3' --src '$T/s2/usb' --seq 700 --since 2026-11-20 >/dev/null 2>&1"
 echo tampered >> "$T/parts/vendor_a.img"
 check "super_parts.py refuses partitions that are not the ones in super.img" "! python3 -I '$ROOT/tools/super_parts.py' '$T/t3/super.img' '$T/t3/super.layout' --parts '$T/parts' >/dev/null 2>&1"
 
