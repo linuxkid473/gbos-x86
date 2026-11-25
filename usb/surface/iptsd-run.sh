@@ -37,7 +37,7 @@ match() {
 }
 echo "$(date +%T) iptsd-run started" >> $LOG
 ( sleep 25; echo "== input devices (25 s after start)"; cat /proc/bus/input/devices ) >> $LOG 2>&1 &
-seen=0; waited=0
+seen=0; waited=0; refused=
 while true; do
   dev=
   for d in $SYS/class/hidraw/hidraw*; do
@@ -46,11 +46,20 @@ while true; do
     type=${m%%,*}; conf=$S/${m#*,}
     cand=$DEVDIR/${d##*/}
     echo "$(date +%T) candidate $cand ($(grep HID_NAME $d/device/uevent), $type)" >> $LOG
-    if $S/iptsd-check-device --quiet --type $type $cand >> $LOG 2>&1; then dev=$cand; break; fi
+    # The check needs the config too: iptsd-check-device builds the same application as iptsd, and that throws InvalidScreenSize
+    # when neither the device's metadata report nor a config gives the screen size. The SP5's IPTS (EDS v1) has no metadata, so
+    # without IPTSD_CONFIG_FILE every check failed and iptsd never started (SP5 1807, 2026-11-25: 100 s of "candidate", then
+    # "giving up"). Its output (why it refused) is logged once per node.
+    if out=$(IPTSD_CONFIG_FILE=$conf $S/iptsd-check-device --type $type $cand 2>&1); then dev=$cand; break; fi
+    case " $refused " in *" $cand "*) ;; *) echo "$out" >> $LOG; refused="$refused $cand";; esac
   done
   if [ -z "$dev" ]; then
     [ $waited = 0 ] && echo "$(date +%T) waiting for an IPTS hidraw" >> $LOG
-    if [ $seen = 0 ] && [ $waited -ge $WAIT ]; then echo "$(date +%T) no IPTS device on this machine, giving up" >> $LOG; exit 0; fi
+    if [ $seen = 0 ] && [ $waited -ge $WAIT ]; then
+      if [ -n "$refused" ]; then echo "$(date +%T) giving up: iptsd-check-device refused$refused" >> $LOG
+      else echo "$(date +%T) no IPTS device on this machine, giving up" >> $LOG; fi
+      exit 0
+    fi
     [ -n "$GBOS_ONCE" ] && exit 1
     sleep $STEP; waited=$((waited + STEP)); continue
   fi

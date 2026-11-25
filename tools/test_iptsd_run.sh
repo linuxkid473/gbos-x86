@@ -20,7 +20,7 @@ mkdev() { # mkdev SYS NAME HID_ID HID_NAME
 }
 mkstick() { # mkstick DIR CHECK_RC : fake gbos dir with stub binaries
   mkdir -p "$1/surface" "$1/logs/boot-1"
-  printf '#!/bin/sh\necho "$*" >> "%s/checked"\nexit %s\n' "$1" "$2" > "$1/surface/iptsd-check-device"
+  printf '#!/bin/sh\necho "$* config=${IPTSD_CONFIG_FILE:-}" >> "%s/checked"\n[ %s = 0 ] || echo "[12:00:00.000] [error] apps: InvalidScreenSize"\nexit %s\n' "$1" "$2" "$2" > "$1/surface/iptsd-check-device"
   printf '#!/bin/sh\necho "iptsd on $1 config $IPTSD_CONFIG_FILE" > "%s/ran"\nexit 0\n' "$1" > "$1/surface/iptsd"
   chmod +x "$1/surface/iptsd" "$1/surface/iptsd-check-device"
 }
@@ -50,6 +50,9 @@ run $G $S GBOS_ONCE=1; rc=$?
 [ $rc = 0 ] && grep -q 'iptsd on /dev/hidraw2 ' $G/ran 2>/dev/null && ok "SP5 touchscreen: iptsd started on /dev/hidraw2 (not on the Type Cover)" \
   || bad "SP5: rc=$rc ran=$(cat $G/ran 2>&1)"
 grep -q -- '--type touchscreen /dev/hidraw2' $G/checked 2>/dev/null && ok "SP5 checked as --type touchscreen" || bad "SP5 check args: $(cat $G/checked 2>&1)"
+# SP5 1807 on 2026-11-25: its IPTS has no metadata report, so check-device needs the config for the screen size (InvalidScreenSize)
+grep -q -- '/dev/hidraw2 config=.*/surface/iptsd-surface-pro-5.conf$' $G/checked 2>/dev/null && ok "SP5 check runs with IPTSD_CONFIG_FILE (screen size)" \
+  || bad "SP5 check without config: $(cat $G/checked 2>&1)"
 grep -q 'config .*/surface/iptsd-surface-pro-5.conf$' $G/ran 2>/dev/null && ok "SP5 runs with iptsd-surface-pro-5.conf" || bad "SP5 config: $(cat $G/ran 2>&1)"
 [ -f $ROOT/usb/surface/iptsd-surface-pro-5.conf ] && ok "usb/surface/iptsd-surface-pro-5.conf exists" || bad "SP5 config file missing"
 # the older N-trig id of iptsd's preset (lower-case hex as some kernels print it) still matches
@@ -61,10 +64,16 @@ S=$W/sys1c; G=$W/g1c; mkdev $S hidraw0 0044:00001B96:0000001F0 "not IPTS"; mksti
 run $G $S GBOS_WAIT=0; rc=$?
 [ ! -e $G/ran ] && ok "HID_ID match is anchored (0000001F0 is not 0000001F)" || bad "loose HID_ID match: $(cat $G/ran 2>&1)"
 
-# 2. check-device rejects the node
-G=$W/g2; mkstick $G 1
+# 2. check-device rejects the node (the SP5 touchscreen of 1b)
+S=$W/sys1b; G=$W/g2; mkstick $G 1
 run $G $S GBOS_ONCE=1; rc=$?
 [ $rc = 1 ] && [ ! -e $G/ran ] && ok "rejected by iptsd-check-device: iptsd not started" || bad "rejected case: rc=$rc ran=$(cat $G/ran 2>&1)"
+grep -q 'InvalidScreenSize' $G/logs/boot-1/iptsd.txt && ok "the refusal's reason is logged" || bad "reason not logged: $(cat $G/logs/boot-1/iptsd.txt)"
+G=$W/g2b; mkstick $G 1
+run $G $S GBOS_WAIT=6 GBOS_SLEEP=3; rc=$?
+[ "$(grep -c InvalidScreenSize $G/logs/boot-1/iptsd.txt)" = 1 ] && ok "reason logged once, not on every retry" || bad "reason count: $(grep -c InvalidScreenSize $G/logs/boot-1/iptsd.txt)"
+grep -q 'giving up: iptsd-check-device refused /dev/hidraw' $G/logs/boot-1/iptsd.txt && [ $rc = 0 ] && ok "giving up names the refused node" \
+  || bad "giving-up line: rc=$rc $(tail -1 $G/logs/boot-1/iptsd.txt)"
 
 # 3. no such touchpad on this machine
 S=$W/sys3; mkdev $S hidraw0 0003:000004F2:0000B6B7 "USB Camera"

@@ -231,10 +231,25 @@ gbos_coldplug() {
   done
 }
 
+# Marvell's mwifiex (88W8897: Surface Pro 4/5/6, Surface Book) names its station interface mlan0. Android's Wi-Fi stack only
+# looks for wlan0 (wifi.interface), so on a Surface Pro 5 (1807, 2026-11-25) Wi-Fi switched itself off again right after being
+# switched on, although the firmware was running ("WLAN FW is active"). Renamed while it is still down, before Android starts.
+gbos_rename_wifi() {
+  _net=${GBOS_NET:-/sys/class/net}   # not N: hook.sh's boot number
+  [ -e $_net/wlan0 ] && return 0
+  for _if in $(ls $_net 2>/dev/null | grep '^mlan'); do
+    ip link set dev $_if down 2>/dev/null
+    if ip link set dev $_if name wlan0; then log "hwdetect: Wi-Fi interface $_if renamed to wlan0 (Android looks for wlan0)"
+    else log "hwdetect: renaming Wi-Fi interface $_if to wlan0 FAILED"; fi
+    return 0
+  done
+}
+
 # Give drivers time to finish probing and pull their firmware (Wi-Fi, Bluetooth, audio DSP).
 gbos_wait_devices() {
   i=0
   while [ $i -lt ${1:-15} ]; do
+    gbos_rename_wifi
     w=$(ls /sys/class/net 2>/dev/null | grep -c '^wl')
     b=$(ls /sys/class/bluetooth 2>/dev/null | wc -l)
     s=$(grep -c '\[' /proc/asound/cards 2>/dev/null)
@@ -246,6 +261,7 @@ gbos_wait_devices() {
     [ $((i % 2)) -eq 1 ] && gbos_coldplug_pass
     sleep 1; i=$((i+1))
   done
+  gbos_rename_wifi
   log "hwdetect: devices after ${i}s: wifi=$(ls /sys/class/net 2>/dev/null | grep '^wl' | tr '\n' ' ') bt=$(ls /sys/class/bluetooth 2>/dev/null | tr '\n' ' ') sound=$(cat /proc/asound/cards 2>/dev/null | grep '\[' | tr -s ' ' | tr '\n' ';') backlight=$(ls /sys/class/backlight 2>/dev/null | tr '\n' ' ')"
 }
 
