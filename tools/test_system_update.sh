@@ -57,7 +57,7 @@ FP() { echo "Android/desktop_system/desktop:17/CL3B.TEST/$1:user/release-keys"; 
 mk_src() { # DIR BUILD TAG: a usb/-like source with install.sh's FILES/DIRS
   _s=$1/usb; rm -rf "$1"; mkdir -p "$_s/patched" "$_s/firmware/intel" "$_s/audio" "$_s/installer/bin" "$_s/kmod" "$_s/surface" "$_s/ksu" "$_s/out" "$1/lapis"
   cp "$ROOT/usb/install.sh" "$ROOT/usb/sysupdate.sh" "$ROOT/usb/early_patch.sh" "$ROOT/usb/hook.sh" "$_s/"
-  for f in stick_fat.sh aidiag.sh native_zygote.sh sensor_vendor_overlay.sh sensor_trial_diag.sh tablet_mode.sh hwdetect.sh sensordiag.sh mask_vendor_modules.sh apex_patch.sh; do echo "true # $3" > "$_s/$f"; done
+  for f in stick_fat.sh optimize.sh aidiag.sh native_zygote.sh sensor_vendor_overlay.sh sensor_trial_diag.sh tablet_mode.sh hwdetect.sh sensordiag.sh mask_vendor_modules.sh apex_patch.sh; do echo "true # $3" > "$_s/$f"; done
   for f in crossystem bootdisk.img libkm_compat.so system_ext_manifest.xml soft_gk; do echo "$f $3" > "$_s/$f"; done
   cp "$PUB" "$_s/sysupdate.pub"
   printf '# gbOS86 patch manifest\n# build %s\n' "$(FP "$2")" > "$_s/patched/MANIFEST"

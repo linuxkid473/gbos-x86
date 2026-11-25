@@ -110,7 +110,7 @@ done
 # Cache the kernel in RAM and unmount the EFI partition so it does not keep the target disk busy
 mkdir -p /tmp && cp "$KERNEL" /tmp/BOOTX64.EFI && KERNEL=/tmp/BOOTX64.EFI
 umount /mnt/stickefi 2>/dev/null || true
-FILES="super.img super.layout hook.sh stick_fat.sh aidiag.sh native_zygote.sh early_patch.sh sensor_vendor_overlay.sh sensor_trial_diag.sh tablet_mode.sh hwdetect.sh sensordiag.sh mask_vendor_modules.sh apex_patch.sh crossystem bootdisk.img libkm_compat.so system_ext_manifest.xml soft_gk sysupdate.sh sysupdate.pub"
+FILES="super.img super.layout hook.sh stick_fat.sh optimize.sh aidiag.sh native_zygote.sh early_patch.sh sensor_vendor_overlay.sh sensor_trial_diag.sh tablet_mode.sh hwdetect.sh sensordiag.sh mask_vendor_modules.sh apex_patch.sh crossystem bootdisk.img libkm_compat.so system_ext_manifest.xml soft_gk sysupdate.sh sysupdate.pub"
 [ -f "$G/gbos_fp" ] && FILES="$FILES gbos_fp"
 # The gbOS86 Updater app (updater-app/, docs/system-update.md): optional, installed by hook.sh at boot when present.
 [ -f "$G/gbos86-updater.apk" ] && FILES="$FILES gbos86-updater.apk"
