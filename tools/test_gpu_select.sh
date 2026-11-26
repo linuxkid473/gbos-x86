@@ -80,6 +80,9 @@ radvmount() { grep -q "vulkan.radv.so" "$T/mounts" 2>/dev/null && echo radv || {
 rv() { # name expected GPU_VULKAN
   n=$((n+1)); runenable_quiet; r=$(radvmount)
   if [ "$r" = "$2" ]; then echo "ok   vulkan: $1 -> $r"; else echo "FAIL vulkan: $1: wanted $2, got $r"; cat "$T/log"; fails=$((fails+1)); fi
+  # GPU_VK must name the driver that was actually bound (empty when none was): it decides ro.gbos.software_rendering
+  n=$((n+1)); want=$2; [ "$want" = none ] && want=
+  if [ "$GPU_VK" = "$want" ]; then echo "ok   vulkan: $1 -> GPU_VK='$GPU_VK'"; else echo "FAIL vulkan: $1: GPU_VK='$GPU_VK', wanted '$want'"; fails=$((fails+1)); fi
 }
 runenable_quiet() { rm -f "$T/log" "$T/mounts"; GPU_SW=1; gbos_gpu_enable; }
 mk "card0:amdgpu" "$AMD"; SYSFS=$T/sys; : > $G/patched/vulkan.swiftshader.so
@@ -117,4 +120,14 @@ else
   echo "FAIL build.prop Intel has unexpected default_composition_pixel_format"; cat "$T/out.prop"; fails=$((fails+1))
 fi
 bp "Intel (stock, unchanged)" 0 true
+# issue 53: ro.gbos.software_rendering (optimize.sh zeroes the animation scales) only when the CPU renders, not with RADV
+sr() { # name GPU_SW GPU_VK expected-count
+  n=$((n+1)); printf 'ro.sf.lcd_density=260\n' > "$T/vendor.build.prop"
+  ( GPU_SW=$2; GPU_VK=$3; DENSITY=; DEVICE_MODEL=; . "$T/prop.sh" > "$T/out.prop" ) 2>/dev/null
+  c=$(grep -c '^ro.gbos.software_rendering=1$' "$T/out.prop")
+  if [ "$c" = "$4" ]; then echo "ok   build.prop: $1 -> software_rendering lines=$c"; else echo "FAIL build.prop: $1: software_rendering lines=$c, wanted $4"; fails=$((fails+1)); fi
+}
+sr "AMD + SwiftShader (CPU renders)" 1 swiftshader 1
+sr "AMD + RADV (GPU renders)" 1 radv 0
+sr "Intel" 0 "" 0
 [ $fails = 0 ] && echo "GPU_SELECT_TEST_PASS ($n checks)" || { echo "$fails FAILED"; exit 1; }
