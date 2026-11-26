@@ -326,20 +326,20 @@ public class MainActivity extends Activity {
         actionCard.addView(cancelRow);
 
         // ---------------------------------------------------------------- Layout: two columns on a laptop screen, one on a narrow window
-        // Left: the gbOS86 update, waiting files, local folder. Right: this laptop (installed system, integrity) and its Googlebook OS
-        // version.
+        // Left: this laptop (installed system, integrity), local folder, bug report. Right: the gbOS86 update, the Googlebook OS
+        // version, waiting files (the user's layout, 2026-11-26).
         if (wide) {
             LinearLayout cols = new LinearLayout(this);
             cols.setOrientation(LinearLayout.HORIZONTAL);
             cols.setBaselineAligned(false);
-            LinearLayout left = column(updateCard, actionCard, localCard, reportCard), right = column(deviceCard, googleCard);
+            LinearLayout left = column(deviceCard, localCard, reportCard), right = column(updateCard, googleCard, actionCard);
             LinearLayout.LayoutParams llp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f);
             llp.setMarginEnd(M3.dp(this, 16));
             cols.addView(left, llp);
             cols.addView(right, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f));
             root.addView(cols);
         } else {
-            for (View card : new View[] {updateCard, actionCard, deviceCard, localCard, googleCard, reportCard}) {
+            for (View card : new View[] {updateCard, googleCard, actionCard, deviceCard, localCard, reportCard}) {
                 root.addView(card);
                 addMarginBottom(card, 16);
             }
