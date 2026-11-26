@@ -49,7 +49,9 @@ esac
 
 U=${GBOS_USB_SOURCE:-$ROOT/usb}
 P=$ROOT/lapis/parts
-(
+# The IPU6 camera payload is needed only for a Latitude 7320 camera bridge image (GBOS_IPU6_CAMERA_BRIDGE=1, as below); other images
+# built from the release kernel, modules (r5) and firmware (r4) have no IPU6 parts and must not stop here (issue 65).
+[ "${GBOS_IPU6_CAMERA_BRIDGE:-0}" != 1 ] || (
   CAMERA_CONFIG=$(mktemp)
   trap 'rm -f "$CAMERA_CONFIG"' EXIT HUP INT TERM
   KREL=$(grep -a -m1 -o '[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*-gbos-whl+\{0,1\} (' "$U/out/BOOTX64.EFI" 2>/dev/null | sed 's/ ($//')

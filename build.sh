@@ -230,9 +230,11 @@ if [ -n "${GBOS_SENSOR_BUILD_INPUTS:-}" ]; then
 else
   echo "Experimental Sensors sub-HAL: not included (set GBOS_SENSOR_BUILD_INPUTS to the prepared compact build inputs)."
 fi
-echo "Goodix fingerprint HAL: will build from the local Android image and be enabled only for USB 27c6:6384 (set FINGERPRINT=0 to opt out at boot)."
+echo "Goodix fingerprint HAL: will build from the local Android image if the kernel build setup is there (else left out with a warning), enabled only for USB 27c6:6384 (set FINGERPRINT=0 to opt out at boot)."
 # Latitude 7320 cameras (IPU6 bridge, DMI-gated, so other laptops are unaffected): on in images built here.
-# usb/gbos.cfg keeps CAMERA_BRIDGE=0; GBOS_IPU6_CAMERA_BRIDGE=0 ./build.sh builds without it.
+# usb/gbos.cfg keeps CAMERA_BRIDGE=0; GBOS_IPU6_CAMERA_BRIDGE=0 ./build.sh builds without it. Left unset, a kernel/module/firmware
+# payload that lacks the IPU6 parts (release modules r5, firmware r4) only turns them off with a warning; =1 makes it an error.
+CAMERA_EXPLICIT=${GBOS_IPU6_CAMERA_BRIDGE:+1}
 GBOS_IPU6_CAMERA_BRIDGE=${GBOS_IPU6_CAMERA_BRIDGE:-1}
 if [ "$GBOS_IPU6_CAMERA_BRIDGE" = 1 ]; then
   echo "Latitude 7320 cameras: on (GBOS_IPU6_CAMERA_BRIDGE=0 to leave them off); calibration $( [ -d usb/camera ] && echo "from usb/camera/" || echo "missing (generic colour; copy gbos/camera/ from a working stick into usb/camera/)")."
@@ -240,13 +242,6 @@ else echo "Latitude 7320 cameras: off (GBOS_IPU6_CAMERA_BRIDGE=0)."; fi
 
 FREE_KB=$(df -k . | awk 'NR==2{print $4}'); [ "$FREE_KB" -gt 36000000 ] || printf '\nWARNING: only %d GB free here; about 35 GB are needed.\n' $((FREE_KB / 1000000))
 [ $DRY = 1 ] && { echo "(dry run: nothing changed)"; exit 0; }
-(
-  CAMERA_CONFIG=$(mktemp)
-  trap 'rm -f "$CAMERA_CONFIG"' EXIT HUP INT TERM
-  python3 tools/extract_ikconfig.py usb/out/BOOTX64.EFI > "$CAMERA_CONFIG" ||
-    die "could not extract the current kernel config; rebuild it with kernel/build_kernel.sh"
-  sh tools/check_camera_payload.sh "$CAMERA_CONFIG" "$KREL" usb
-)
 if [ -n "$NEED" ] && [ $YES = 0 ]; then printf '\nContinue? [y/N] '; read -r a; case $a in y|Y|yes) ;; *) exit 1;; esac; fi
 
 if ! have_parts; then
@@ -286,6 +281,26 @@ if ! have_ksu; then
   chmod 755 usb/ksu/ksud
 else say "    KernelSU manager + ksud: present"; fi
 
+# Latitude 7320 cameras: check the payload only now, after step 3/4 put the module tree and firmware in usb/ (a fresh clone has
+# neither before; issue 65). The release modules (r5) and firmware (r4) have no IPU6 driver or ipu6_fw.bin, so without a kernel
+# built here (kernel/build_kernel.sh) and tools/fetch_firmware.sh the bridge cannot work: left unset, it is then turned off.
+if [ "$GBOS_IPU6_CAMERA_BRIDGE" = 1 ]; then
+  say "Latitude 7320 cameras: checking the kernel, modules and firmware"
+  if (
+    CAMERA_CONFIG=$(mktemp)
+    trap 'rm -f "$CAMERA_CONFIG"' EXIT HUP INT TERM
+    python3 tools/extract_ikconfig.py usb/out/BOOTX64.EFI > "$CAMERA_CONFIG" ||
+      die "could not extract the current kernel config; rebuild it with kernel/build_kernel.sh"
+    sh tools/check_camera_payload.sh "$CAMERA_CONFIG" "$KREL" usb
+  ); then :
+  elif [ -n "$CAMERA_EXPLICIT" ]; then
+    die "GBOS_IPU6_CAMERA_BRIDGE=1, but the camera payload is incomplete (see above)"
+  else
+    printf '\nWARNING: Latitude 7320 cameras left out of this image (payload incomplete, see above; other laptops are unaffected).\n'
+    GBOS_IPU6_CAMERA_BRIDGE=0
+  fi
+fi
+
 SENSOR_PAYLOAD=
 if [ -n "${GBOS_SENSOR_BUILD_INPUTS:-}" ]; then
   say "Building experimental Latitude 7320 Sensors sub-HAL"
@@ -294,7 +309,12 @@ if [ -n "${GBOS_SENSOR_BUILD_INPUTS:-}" ]; then
 fi
 
 say "Building Goodix 27c6:6384 fingerprint HAL"
-sh fingerprint/build_image.sh lapis/parts
+# It needs the kernel build setup (docker images gbos-erofs and gbos-kbuild, volume gbos-ksrc with clang), which an image build from
+# the release kernel does not have (issue 65). Without it the image just has no gbos_fp (make_gbos86_image.sh copies it only if
+# present), which only matters on laptops with the USB reader 27c6:6384.
+if ! sh fingerprint/build_image.sh lapis/parts; then
+  printf '\nWARNING: no Goodix fingerprint HAL in this image (needs the kernel build setup, see above); only USB reader 27c6:6384 is affected.\n'
+fi
 
 if [ "$BUILD_TYPE" = "dualboot" ]; then
   [ -n "$TARGET_DISK" ] || die "Target disk required for dualboot. Pass --target /dev/sdX"
