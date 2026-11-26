@@ -252,7 +252,7 @@ def safety():
 <li>The CPU emulator runs inside the kernel; a bug there is a kernel bug.</li></ul>
 <h2>Compatibility limits</h2>
 <ul><li>Built for Intel x86-64. AMD CPUs (Ryzen) and AMD graphics are experimental: three Ryzen laptops are reported working (see Tested laptops), with the desktop drawn by the CPU or by a project-built RADV driver. ARM is not supported. The CPU must have AVX (many Celeron, Pentium and Atom parts do not): Google's init uses it from its first instruction.</li><li>Installing works to an internal NVMe, eMMC or SATA disk (live mode works without one).</li><li>Suspend and resume, fingerprint readers, IPU6 cameras and discrete GPUs are not supported. On a laptop with AMD Radeon graphics the desktop is drawn by the CPU (experimental).</li>
-<li>Thirty-six machines have been tried, fourteen of them fully working; see <a href="/docs/tested-laptops">Tested laptops</a>. Anything not on that list is untested.</li></ul>
+<li>Thirty-seven machines have been tried, fourteen of them fully working; see <a href="/docs/tested-laptops">Tested laptops</a>. Anything not on that list is untested.</li></ul>
 <h2>Legal</h2>
 <p>gbOS86 is an independent community project, not affiliated with or endorsed by Google. Googlebook OS, Android and Chrome are Google's. The built image contains Google's OS and is not redistributed. The source repository includes a small number of patched Google libraries (a patched libz, libcrypto and a software KeyMint library) that the build requires; Google's own terms apply to them.</p>'''
 
