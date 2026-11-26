@@ -10,8 +10,9 @@ WORK is a directory holding the extracted build:  system/  vendor/  system_ext/ 
 What it does
   1. Patches (the "substitutions"), each located by pattern or exported symbol, never by address:
        libz.so       tools/patch_libz_adler.py   adler32_z always takes its scalar path        (system, vendor)
-       libcrypto.so  tools/sha_redirect.py       SHA-NI block functions jump to the scalar ones (system, vendor, APEX copies)
+       libcrypto.so  tools/sha_redirect.py       SHA-NI/ADX routines jump to Haswell code      (system, vendor, APEX copies)
        libkm_compat  tools/patch_km_compat.py    software KeyMint for every security level
+       media/audio   tools/patch_vnni_avx2.py    AVX-VNNI & GFNI lowered to native Haswell AVX2 (system, vendor, swcodec APEX)
   2. system_ext_manifest.xml: Google's VINTF manifest minus the Trusty KeyMint/RKP/SecureClock declarations.
   3. usb/patched/MANIFEST: one line per patch with the sha256 of the original it was made from. hook.sh, early_patch.sh and
      apex_patch.sh read it (nothing is hard-coded in the scripts any more) and bind a patch only over a file with that hash.
@@ -38,9 +39,37 @@ TARGETS = [
     ('early', 'system', 'lib64/libcrypto.so', '/new/system/lib64/libcrypto.so', 'sha_redirect.py', 'patched/system.libcrypto.so'),
     ('early', 'vendor', 'lib64/libcrypto.so', '/new/vendor/lib64/libcrypto.so', 'sha_redirect.py', 'patched/vendor.libcrypto.so'),
     ('bind', 'system', 'lib64/libkm_compat.so', '/new/system/lib64/libkm_compat.so', 'patch_km_compat.py', 'libkm_compat.so'),
+    ('bind', 'system', 'lib64/libaudioprocessing.so', '/new/system/lib64/libaudioprocessing.so', 'patch_vnni_avx2.py', 'patched/system.libaudioprocessing.so'),
+    ('bind', 'system', 'lib64/libsfplugin_ccodec_utils.so', '/new/system/lib64/libsfplugin_ccodec_utils.so', 'patch_vnni_avx2.py', 'patched/system.libsfplugin_ccodec_utils.so'),
+    ('bind', 'system', 'lib64/libyuv.so', '/new/system/lib64/libyuv.so', 'patch_vnni_avx2.py', 'patched/system.libyuv.so'),
+    ('bind', 'system', 'lib64/libstagefright.so', '/new/system/lib64/libstagefright.so', 'patch_vnni_avx2.py', 'patched/system.libstagefright.so'),
+    ('bind', 'vendor', 'lib64/libcodec2_soft_common.so', '/new/vendor/lib64/libcodec2_soft_common.so', 'patch_vnni_avx2.py', 'patched/vendor.libcodec2_soft_common.so'),
+    ('bind', 'vendor', 'lib64/libsfplugin_ccodec_utils.so', '/new/vendor/lib64/libsfplugin_ccodec_utils.so', 'patch_vnni_avx2.py', 'patched/vendor.libsfplugin_ccodec_utils.so'),
+    ('bind', 'vendor', 'lib64/libyuv.so', '/new/vendor/lib64/libyuv.so', 'patch_vnni_avx2.py', 'patched/vendor.libyuv.so'),
 ]
 # The Conscrypt APEX's libcrypto is the reference; every APEX copy with the same hash is bound to the same patched file.
 APEX_REF = ('com.google.android.conscrypt', 'lib64/libcrypto.so', 'sha_redirect.py', 'patched/conscrypt.libcrypto.so')
+# Media software codecs & buffer-copy libraries inside the swcodec APEX (bound by apex_patch.sh before perform_apex_config / zygote):
+APEX_TARGETS = [
+    ('com.google.android.media.swcodec', 'lib64/libvpx.so', 'patch_vnni_avx2.py', 'patched/swcodec.libvpx.so'),
+    ('com.google.android.media.swcodec', 'lib64/libcodec2_soft_avcdec.so', 'patch_vnni_avx2.py', 'patched/swcodec.avcdec.so'),
+    ('com.google.android.media.swcodec', 'lib64/libcodec2_soft_av1dec_dav1d.so', 'patch_vnni_avx2.py', 'patched/swcodec.dav1d.so'),
+    ('com.google.android.media.swcodec', 'lib64/libFraunhoferAAC.so', 'patch_vnni_avx2.py', 'patched/swcodec.aac.so'),
+    ('com.google.android.media.swcodec', 'lib64/libopus.so', 'patch_vnni_avx2.py', 'patched/swcodec.opus.so'),
+    ('com.google.android.media.swcodec', 'lib64/libcodec2_soft_common.so', 'patch_vnni_avx2.py', 'patched/swcodec.common.so'),
+    ('com.google.android.media.swcodec', 'lib64/libsfplugin_ccodec_utils.so', 'patch_vnni_avx2.py', 'patched/swcodec.ccodec_utils.so'),
+    ('com.google.android.media.swcodec', 'lib64/libcom.android.media.swcodec.apexcodecs.so', 'patch_vnni_avx2.py', 'patched/swcodec.apexcodecs.so'),
+    ('com.google.android.media.swcodec', 'lib64/libcodec2_soft_mpeg4dec.so', 'patch_vnni_avx2.py', 'patched/swcodec.mpeg4dec.so'),
+    ('com.google.android.media.swcodec', 'lib64/libcodec2_soft_h263dec.so', 'patch_vnni_avx2.py', 'patched/swcodec.h263dec.so'),
+    ('com.google.android.media.swcodec', 'lib64/libcodec2_soft_amrnbdec.so', 'patch_vnni_avx2.py', 'patched/swcodec.amrnbdec.so'),
+    ('com.google.android.media.swcodec', 'lib64/libcodec2_soft_amrwbdec.so', 'patch_vnni_avx2.py', 'patched/swcodec.amrwbdec.so'),
+]
+# Vendor libraries bound conditionally by hook.sh when GPU_SW=1 (AMD GPUs and Intel Gen <= 8):
+EXTRA_TARGETS = [
+    ('vendor', 'lib64/hw/libdesktop_camera_common.dylib.so', 'patch_camera_common_cpu.py', 'patched/libdesktop_camera_common.cpu.so'),
+    ('vendor', 'lib64/libminigbm_gralloc.so', 'patch_gralloc_amdgpu.py', 'patched/libminigbm_gralloc.amdgpu.so'),
+    ('vendor', 'lib64/libgbm.so', 'patch_libgbm_amdgpu.py', 'patched/libgbm.amdgpu.so'),
+]
 
 # <hal> blocks removed from system_ext's VINTF manifest: Trusty KeyMint/RKP/SecureClock (km_compat serves them instead).
 HIDE_HALS = {('android.hardware.security.keymint', 'IKeyMintDevice/default'),
@@ -115,10 +144,11 @@ def patch_one(tree_root, tree, rel, patcher, shipped, outdir, label):
     a, b = open(src, 'rb').read(), open(dst, 'rb').read()
     regs = changed_regions(a, b)
     if regs is not None and not regs:
-        # nothing changed: only fine for a library that has nothing to patch
-        note('WARN', '%s: patcher changed nothing (no SHA-NI / gate in this file?). Not shipped' % label)
+        # nothing changed: fine for patch_vnni_avx2.py when a build compiled this library without VNNI/GFNI
+        lvl = 'INFO' if patcher == 'patch_vnni_avx2.py' else 'WARN'
+        note(lvl, '%s: patcher changed nothing (no target instructions in this file). Not shipped' % label)
         return None
-    desc = '%d byte(s) in %d place(s)' % (sum(n for _, n in regs), len(regs)) if regs else 'size changed'
+    desc = '%d byte(s) in %d place(s)' % (sum(n for _, n in regs), len(regs)) if regs else 'size +%d KB' % ((len(b) - len(a) + 1023) >> 10)
     ship = os.path.join(USB, shipped)
     if os.path.isfile(ship):
         same = filecmp.cmp(dst, ship, shallow=False)
@@ -350,11 +380,42 @@ def main(argv):
                     other.setdefault(sha(p), []).append(n)
             note('INFO', 'APEX libcrypto copies bound to the Conscrypt patch: %d (%s)' % (len(same), ', '.join(same)))
             for h, names in sorted(other.items()):
+                names = sorted(names)
                 rc, txt = run([PY, '-I', os.path.join(HERE, 'sha_redirect.py'), '--scan', libs[names[0]]])
-                note('INFO', 'other APEX libcrypto %s (%s): %s -- %s' % (h[:12], ', '.join(names), txt.splitlines()[0] if txt else '',
-                     'not patched today' if 'patches=0' not in txt else 'nothing to patch'))
+                if 'patches=0' in txt:
+                    note('INFO', 'other APEX libcrypto %s (%s): %s -- nothing to patch' % (h[:12], ', '.join(names), txt.splitlines()[0] if txt else ''))
+                    continue
+                if any(n.startswith('com.google.android.widevine') for n in names):
+                    sub_shipped = 'patched/widevine.libcrypto.so'
+                elif 'com.android.hardware.drm.clearkey' in names:
+                    sub_shipped = 'patched/clearkey.libcrypto.so'
+                else:
+                    sub_shipped = 'patched/apex-%s.libcrypto.so' % h[:12]
+                e2 = patch_one(root, 'apex/' + names[0], rel, patcher, sub_shipped, outdir, 'apex/%s/%s' % (names[0], rel))
+                if e2:
+                    entries.append(('apex', rel, e2['orig_sha'], e2['shipped']))
+                    copies.append((e2['patched'], os.path.join(USB, e2['shipped'])))
+                    note('INFO', 'APEX libcrypto copies bound to %s: %d (%s)' % (sub_shipped, len(names), ', '.join(names)))
     else:
         note('FAIL', 'APEX %s has no lib64/libcrypto.so in WORK/apex (extraction failed or the APEX changed)' % name)
+
+    # APEX media/audio codec libraries (swcodec)
+    for apex_prefix, rel, patcher, shipped in APEX_TARGETS:
+        matches = sorted(d for d in glob.glob(os.path.join(root, 'apex', apex_prefix + '*')) if os.path.isdir(d))
+        if not matches:
+            note('FAIL', 'APEX %s missing in WORK/apex' % apex_prefix)
+            continue
+        aname = os.path.basename(matches[0])
+        e = patch_one(root, 'apex/' + aname, rel, patcher, shipped, outdir, 'apex/%s/%s' % (aname, rel))
+        if e:
+            entries.append(('apex', rel, e['orig_sha'], e['shipped']))
+            copies.append((e['patched'], os.path.join(USB, e['shipped'])))
+
+    # Conditional GPU_SW=1 vendor patches (bound by hook.sh via sha256 check, not unconditional MANIFEST entries)
+    for tree, rel, patcher, shipped in EXTRA_TARGETS:
+        e = patch_one(root, tree, rel, patcher, shipped, outdir, '%s/%s' % (tree, rel))
+        if e:
+            copies.append((e['patched'], os.path.join(USB, e['shipped'])))
 
     # 2. derived VINTF manifest
     mf = gen_system_ext_manifest(root, outdir)
@@ -417,7 +478,9 @@ def main(argv):
             open(cur, 'w').write(text)
             print('wrote %s' % os.path.relpath(cur, ROOT))
             for k in os.listdir(os.path.join(USB, 'patched')):
-                if k != 'MANIFEST' and ('patched/' + k) not in {e[3] for e in entries}:
+                if k == 'MANIFEST' or k.startswith('vulkan.') or k.endswith('.amdgpu.so') or k == 'libdesktop_camera_common.cpu.so' or k == 'i965_drv_video.so':
+                    continue
+                if ('patched/' + k) not in {e[3] for e in entries}:
                     print('NOTE: usb/patched/%s is not in the manifest any more: delete it if the build dropped it' % k)
     else:
         print('(dry run: repo untouched. --write copies the patches, system_ext_manifest.xml and MANIFEST into usb/)')

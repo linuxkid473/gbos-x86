@@ -58,20 +58,35 @@ usb_settled() {
   return 0
 }
 log "waiting for LABEL=GBOS (USB) or LABEL=GBOSSYS (NVMe) ..."
-STICK=; SYS=; n=0; usbn=; still=0
+STICK=; SYS=; n=0; s=0; usbn=; still=0
 for i in $(seq 1 60); do
   mdev -s
   STICK=$(findfs LABEL=GBOS 2>/dev/null)
   SYS=$(findfs LABEL=GBOSSYS 2>/dev/null)
-  [ -n "$STICK" ] && break
+  if [ -n "$STICK" ]; then
+    [ -n "$SYS" ] && break
+    # SATA SSDs (e.g. Sony VAIO Flip 13 M.2 SATA) can finish libata probing 1-2s after USB: give GBOSSYS up to 3s to appear for menu item 3.
+    s=$((s+1)); [ $s -ge 3 ] && break
+  fi
   if [ -n "$SYS" ]; then
-    n=$((n+1)); [ $n -ge 6 ] && break
-    _u=$(usb_settled) && _ok=1 || _ok=0
-    if [ "$_u" = "$usbn" ]; then still=$((still+1)); else still=0; usbn=$_u; fi
-    [ $_ok = 1 ] && [ $still -ge ${STICK_SETTLE_S:-2} ] && { log "USB settled ($usbn devices, no GBOS stick) after $n s with GBOSSYS"; break; }
+    n=$((n+1))
+    # Internal sensors on xHCI (e.g. Sony VAIO Flip 13 ST_SENSOR_HUB 0483:91d1) can stall USB port enumeration for 8-11s while internal
+    # SATA/NVMe GBOSSYS is ready at 1.3s: wait up to 18-25s when slow xHCI devices or USB mass storage (class 08) are present.
+    _usb_cap=6
+    grep -qi 'VAIO\|SVF13N' /sys/class/dmi/id/product_name /sys/class/dmi/id/sys_vendor 2>/dev/null && _usb_cap=18
+    grep -qi '^08$' /sys/bus/usb/devices/*/bInterfaceClass 2>/dev/null && _usb_cap=25
+    if [ "$_usb_cap" -gt 6 ]; then
+      [ $n -ge $_usb_cap ] && break
+    else
+      [ $n -ge 6 ] && break
+      _u=$(usb_settled) && _ok=1 || _ok=0
+      if [ "$_u" = "$usbn" ]; then still=$((still+1)); else still=0; usbn=$_u; fi
+      [ $_ok = 1 ] && [ $still -ge ${STICK_SETTLE_S:-2} ] && { log "USB settled ($usbn devices, no GBOS stick) after $n s with GBOSSYS"; break; }
+    fi
   fi
   sleep 1
 done
+printf '\r                                        \r' > /dev/tty1 2>/dev/null || true
 [ -n "$STICK$SYS" ] || fail "no GBOS (USB) or GBOSSYS (NVMe) volume after 60s (block devices: $(ls /sys/class/block | tr '\n' ' '))"
 mkdir -p /gbos
 DEV=$STICK; FROM=stick; SELMODE=

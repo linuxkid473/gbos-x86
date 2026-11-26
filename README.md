@@ -76,7 +76,7 @@ Fedora/RHEL with SELinux enforcing: the scripts add `:z` to the docker bind moun
 | Fingerprint reader (Latitude 7320 Detachable, Goodix `27c6:6384`) | Works on hardware (2026-11-17): the userspace AIDL HAL registers, one finger enrolled and unlocked the lock screen. Enabled by default for this exact USB ID (`FINGERPRINT=0` disables it); CrosFP is unchanged on other devices. The HAL runs from the stick's VFAT under permissive SELinux, so enforcing-mode USB access is still unverified. See [`HANDOFF.md`](HANDOFF.md) |
 | Auto-rotation (Latitude 7320 Detachable) | Experimental, DMI-scoped Sensors 2.1 sub-HAL and display-policy trial. Confirmed working by the user on the 2026-11-15 Live boot; logs show accelerometer enumeration and sensor-driven transitions through all four display rotations. The axis mapping has been validated for that test, but the physical full-scale range remains unknown and the HAL's ±2 g range is provisional. `SENSOR_HAL=0` disables both changes. Tablet mode (on-screen keyboard with the cover detached, intel_hid tablet switch) and a rotation policy that survives Google's LaptopController resets are added but hardware-unverified (`usb/tablet_mode.sh`, `TABLET_*` in `gbos.cfg`). See [`sensors/trogdor/`](sensors/trogdor/). |
 | Intel IPU6 cameras | Experimental Latitude 7320-only UVC loopback bridge is available in an opt-in test image (`GBOS_IPU6_CAMERA_BRIDGE=1`). The Latitude's V4L2 frame-size enumeration and initial format are limited to its producer mode, 1280×960 YUYV since 2026-11-20 (640×480 before). An Android-native build (`installer/bin/vulkan/ipu6-loopback`, `tools/build_ipu6_loopback_gpu.sh`, needs the Android NDK) does the per-pixel work on the GPU with Vulkan compute; the launcher uses it when `--probe-gpu` succeeds (`CAMERA_GPU=0` in gbos.cfg keeps the CPU build). The bridge keeps the sensor streaming until reboot because IPU6 stream-stop/close timed out in prior tests. A second bridge instance exposes the rear OV8856 on `/dev/video65` as the back camera (`CAMERA_REAR=0` turns it off, `CAMERA_REAR_ROTATION=180` turns its picture); it is not yet hardware-verified. See [`docs/latitude-7320-camera-test.md`](docs/latitude-7320-camera-test.md) for the image and instructions. |
-| Other laptops | Fourteen of thirty-six tried machines work fully, fourteen partly, six have a fix pending, two do not; see [Tested laptops](#tested-laptops). The CPU-emulation kernel should help any pre-2021 Intel CPU |
+| Other laptops | Fifteen of thirty-seven tried machines work fully, fourteen partly, six have a fix pending, two do not; see [Tested laptops](#tested-laptops). The CPU-emulation kernel + AVX2 patches support Intel 4th gen (Haswell) and newer |
 
 ## How it works
 
@@ -163,12 +163,13 @@ changing anything.
 
 ## Tested laptops
 
-Reports from people who booted the stick (updated 2026-11-18). A row says what was reported, not what the newest build can do. The same list is on
+Reports from people who booted the stick (updated 2026-11-26). A row says what was reported, not what the newest build can do. The same list is on
 [gbos86.com/hardware](https://gbos86.com/hardware); the source of truth is [`website/laptops.py`](website/laptops.py).
 
 | Laptop | CPU | Result | Works | Does not work / notes |
 |---|---|---|---|---|
 | Dell Latitude 5300 | Core i5-8365U, 16 GB | **Works** | Everything tested: Wi-Fi, Bluetooth, sound, touchpad, brightness, battery, install | Suspend. The maintainer's machine |
+| Sony VAIO Flip 13 (SVF13N24CXB) | Core i5-4200U (Haswell), 8 GB | **Works** | Hardware GPU (`vulkan.hasvk.so`), H.264 VA-API + AVX2 media & Widevine, Wi-Fi, Bluetooth, sound, Elantech PS/2 touchpad gestures, N-Trig touch & stylus, front & rear UVC cameras, lid/idle `sleep-guard`, M.2 SATA install | Hardware ACPI S3 (handled by `sleep-guard` deep S0 idle + 60 m on-battery auto-shutdown). Kernel #53 |
 | Acer Aspire Lite AL15-52 | Core i5-1235U, 8 GB | **Works** | Wi-Fi, display, touchpad, keyboard, sound, brightness, camera, Bluetooth, SD card | Needed two firmware fixes (Realtek Wi-Fi; Intel AX201 Bluetooth name `ibt-0040-1050.sfi`), both in firmware v34+. Older sticks need a rebuild or an Update from a fresh stick |
 | Lenovo ThinkPad T470 | Intel 7th gen | **Works** | Reported as working with no setup | Short report |
 | Intel NUC8BEH (mini PC) | Core i3-8109U, 8 GB | **Works** | Wi-Fi, Bluetooth, display and brightness (external monitor), keyboard (external), USB ports, install to the SATA M.2 SSD | Sound not tested. First tried live on kernel #32; the installer gained SATA support afterwards and the reporter has now installed to the SSD |
@@ -223,8 +224,8 @@ The kernel (#31) builds drivers for most Intel-era laptops as **modules**, and b
 
 | Area | Covered |
 |---|---|
-| CPU | Anything the ISA-emulation kernel handles: 4th gen (Haswell) and newer **with AVX2** (CPUs lacking AVX2, such as Celeron/Pentium/Atom or Sandy/Ivy Bridge, halt at boot with a clear message, as AOSP's dynamic linker executes AVX2 instructions); the Googlebook OS needs instructions older CPUs lack, so it is emulated (slow on pre-2021 CPUs) |
-| Graphics / display / brightness | `i915` (Gen9 to Raptor Lake) + ACPI video/backlight; `xe` for newer parts (needs its own firmware, in firmware release v35; the colour/gamma fixes are i915-only). **AMD Radeon (`amdgpu`): experimental, software rendering only** (CPU-drawn, slow; see below; **untested on hardware**) |
+| CPU | Anything the ISA-emulation kernel handles: 4th gen (Haswell) and newer **with AVX2** (CPUs lacking AVX2, such as Celeron/Pentium/Atom or Sandy/Ivy Bridge, halt at boot with a clear message, as AOSP's dynamic linker executes AVX2 instructions); hot BoringSSL (`SHA-NI`/`ADX`) and media/audio (`AVX-VNNI`/`GFNI`) paths are binary-lowered to native Haswell AVX2 |
+| Graphics / display / brightness | `i915` (Gen 7.5 Haswell/Broadwell via Mesa `vulkan.hasvk.so` + `i965_drv_video.so` VA-API; Gen 9 Skylake to Raptor Lake via Google's `vulkan.intel.so` + `iHD_drv_video.so`) + ACPI video/backlight; `xe` for newer parts (needs its own firmware, in firmware release v35; the colour/gamma fixes are i915-only). **AMD Radeon (`amdgpu`): experimental, RADV or SwiftShader** (see below) |
 | Wi-Fi | Intel (`iwldvm`: 7260/7265, `iwlmvm`: 8265 to AX211/BE200), Realtek rtw88/rtw89, MediaTek mt7921/7922/7925, Qualcomm ath10k/ath11k, Broadcom brcmfmac |
 | Bluetooth | `btusb` with Intel/Realtek/MediaTek/Qualcomm/Broadcom, Intel PCIe BT |
 | Sound | Legacy HDA with every common codec, **or** SOF (Intel DSP, DMIC, SoundWire); the kernel picks per machine (`snd_intel_dspcfg`). The audio HAL config is generated for the card that appears (`hook.sh`) |
@@ -284,10 +285,19 @@ MSI Modern 15 B7M (Ryzen 5 7530U, Barcelo, RADV RENOIR), and video previews in P
 HEVC clips (the software HEVC decoder fails), the pointer renders as a red square, and the built-in touchpad is absent; AMD pinctrl/GPIO is now enabled in the generic kernel profile, but that touchpad change still needs hardware verification. See `HANDOFF.md`.
 `tools/test_gpu_select.sh` tests only the driver-selection logic.
 
-`GPU_SOFTWARE` in `gbos.cfg`: `auto` (default; never changes anything while an Intel GPU is present), `1` (force, for testing on Intel), `0` (never).
+`GPU_SOFTWARE` in `gbos.cfg`: `auto` (default; never changes anything while an Intel Gen 9+ GPU is present), `1` (force, for testing on Intel), `0` (never).
 Expect a working desktop; use a lower `RESOLUTION` if it crawls. The AMD CPU side (Ryzen) has been tested on one MSI Modern 15 B7M (Ryzen 5 7530U).
 `tools/test_gpu_select.sh` tests the decision logic and `tools/swiftshader-android/qemu/run.py` smoke-tests the
 driver inside Google's userspace under QEMU.
+
+### Intel Gen 7.5 / Gen 8 graphics & media (`HasVK` + `i965` VA-API)
+
+Google's stock `vulkan.intel.so` (ANV) and `iHD_drv_video.so` reject Intel GPUs older than Gen 9 Skylake (`devinfo->ver < 9`). On 4th-gen Haswell and 5th-gen Broadwell (`i915`), `hook.sh` enables hardware GPU rendering and video decode when the companion drivers are placed in `usb/patched/`:
+
+- `tools/hasvk-android/build.sh` cross-builds Mesa `b888682c`'s `intel_hasvk` (`gfx7`/`gfx75`/`gfx8`) with NDK r30 in Docker (`tools/hasvk-android/patch_mesa.py` adds Android deferred swapchain binding, `RGBX_8888`, and multi-planar `YV12`/`NV12` `AHardwareBuffer` import) -> `usb/patched/vulkan.hasvk.so`.
+- `tools/i965-vaapi-android/build.sh` cross-builds `intel-vaapi-driver` (`tools/i965-vaapi-android/patch_i965.py` adds `DRM_PRIME_2`/`DRM_PRIME_3` dma-buf export/import for `c2-cros-codecs-service`) -> `usb/patched/i965_drv_video.so` (H.264 hardware decode on Haswell/Broadwell, plus VP8 on Broadwell).
+- `./build.sh` (`tools/port_build.sh --write`) generates the Haswell/AVX2 codec & crypto patches (`tools/patch_vnni_avx2.py`, `tools/sha_redirect.py`) and `usb/patched/libdesktop_camera_common.cpu.so` (`tools/patch_camera_common_cpu.py`, so UVC cameras use the AVX2 `libyuv` pipeline instead of failing Vulkan `STORAGE_IMAGE` imports on Gen <= 8 GPUs) locally from your downloaded `lapis/parts/` — no patched Google binaries are redistributed.
+- Verified end-to-end on a Sony VAIO Flip 13 (`SVF13N24CXB`, Core i5-4200U / HD 4400).
 
 ## Repository map
 

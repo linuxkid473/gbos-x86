@@ -116,4 +116,15 @@ expect "different copy is left alone and logged" "apex_patch: $A/com.c/lib64/lib
 reject "versioned @ dirs skipped" "com.a@1"
 [ "$(grep -c -- '-o bind' $MNT)" = 2 ] && echo "ok   exactly two APEX mounts" || { echo "FAIL expected two APEX mounts"; cat $MNT; FAIL=1; }
 
+# Multiple apex lines for the same rel path (Conscrypt + Widevine/ClearKey libcrypto variants)
+AS_C=$(sha256sum $A/com.c/lib64/libcrypto.so | cut -d' ' -f1)
+echo patched-wv > $T/pi/gbos/patched/widevine.libcrypto.so
+printf 'apex lib64/libcrypto.so %s patched/conscrypt.libcrypto.so\napex lib64/libcrypto.so %s patched/widevine.libcrypto.so\n' $AS $AS_C > $T/pi/gbos/patched/MANIFEST
+reset
+. $T/apex_patch.sh
+expect "multi-rule: Conscrypt copy bound" "apex_patch: patched $A/com.a/lib64/libcrypto.so"
+expect "multi-rule: Widevine copy bound" "apex_patch: patched $A/com.c/lib64/libcrypto.so"
+reject "multi-rule: no spurious left-alone log" "left alone"
+[ "$(grep -c -- '-o bind' $MNT)" = 3 ] && echo "ok   all three matching APEX copies bound" || { echo "FAIL expected three APEX mounts"; cat $MNT; FAIL=1; }
+
 [ $FAIL = 0 ] && echo PORT_SCRIPTS_PASS || { echo PORT_SCRIPTS_FAIL; exit 1; }

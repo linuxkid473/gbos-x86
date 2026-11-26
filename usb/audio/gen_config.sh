@@ -81,8 +81,8 @@ HPJ=; MICJ=; COMBO=
 for n in "$CNAME Headphone Mic" "$CNAME Headset Jack" "$CNAME Headset"; do has "$n" && { COMBO=$n; break; }; done
 if [ -n "$COMBO" ]; then HPJ=$COMBO; MICJ=$COMBO; else
   # "Front Headphone"/"Front Mic": the HDA parser names a jack after its pin location (Acer Aspire A515-46, ALC255: "HD-Audio Generic Front Headphone").
-  for n in "$CNAME Headphone" "$CNAME Headphones" "$CNAME Front Headphone"; do has "$n" && { HPJ=$n; break; }; done
-  for n in "$CNAME Headset Mic" "$CNAME Mic" "$CNAME Front Mic"; do has "$n" && { MICJ=$n; break; }; done
+  for n in "$CNAME Headphone" "$CNAME Headphones" "$CNAME Front Headphone" "$CNAME Headphone Jack"; do has "$n" && { HPJ=$n; break; }; done
+  for n in "$CNAME Headset Mic" "$CNAME Mic" "$CNAME Front Mic" "$CNAME Mic Jack" "$CNAME Internal Mic"; do has "$n" && { MICJ=$n; break; }; done
   # A jack with no mic input device (the headset mic pin is not wired) must still name a device that exists: the template's
   # "<name> Headphone Mic" does not, and the HAL cannot open it. Use the headphone jack's device for the mic section too.
   [ -z "$MICJ" ] && [ -n "$HPJ" ] && MICJ=$HPJ

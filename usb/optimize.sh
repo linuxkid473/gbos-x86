@@ -15,10 +15,44 @@ for g in /sys/devices/system/cpu/cpu*/cpufreq/energy_performance_preference; do
     echo performance > "$g" 2>/dev/null
 done
 
-# Disable USB autosuspend on mice/keyboards so there is no wake latency
-for d in /sys/bus/usb/devices/*/power/control; do
-    echo on > "$d" 2>/dev/null
+# Keep interactive USB HID devices (mice, keyboards, touchscreens) awake while screen is on so there is no input lag,
+# while allowing USB root hubs, webcams, Bluetooth, and sensor hubs to autosuspend (required for Intel Package C6/C7).
+for u in /sys/bus/usb/devices/*; do
+    [ -w "$u/power/control" ] || continue
+    case "${u##*/}" in *:*) continue ;; esac
+    _is_hid=0
+    _is_sensor=0
+    for _if in "$u":*; do
+        [ -e "$_if/driver" ] || continue
+        case "$(readlink "$_if/driver" 2>/dev/null)" in */usbhid) _is_hid=1 ;; esac
+        for _hd in "$_if"/0003:*; do
+            [ -e "$_hd/driver" ] || continue
+            case "$(readlink "$_hd/driver" 2>/dev/null)" in */hid-sensor-hub) _is_sensor=1 ;; esac
+        done
+    done
+    if [ "$_is_hid" = 1 ] && [ "$_is_sensor" = 0 ]; then
+        echo on > "$u/power/control" 2>/dev/null
+    else
+        echo auto > "$u/power/control" 2>/dev/null
+    fi
 done
+
+# Enable sleep/lid behavior and wakeup sources (ACPI power button, lid, PS/2 keyboard & touchpad, USB HID)
+settings put global lid_behavior 1 2>/dev/null
+for w in /sys/bus/acpi/devices/PNP0C0C:*/power/wakeup \
+         /sys/bus/acpi/devices/PNP0C0D:*/power/wakeup \
+         /sys/bus/acpi/devices/LNXPWRBN:*/power/wakeup \
+         /sys/bus/acpi/devices/LNXSLPBN:*/power/wakeup \
+         /sys/devices/platform/i8042/serio*/power/wakeup; do
+    [ -w "$w" ] && echo enabled > "$w" 2>/dev/null
+done
+for u in /sys/bus/usb/devices/*; do
+    [ -w "$u/power/wakeup" ] || continue
+    if ls -d "$u":* 2>/dev/null | xargs -I{} readlink "{}/driver" 2>/dev/null | grep -q 'usbhid$'; then
+        echo enabled > "$u/power/wakeup" 2>/dev/null
+    fi
+done
+[ -w /sys/devices/platform/sony-laptop/lid_resume_S3 ] && echo 1 > /sys/devices/platform/sony-laptop/lid_resume_S3 2>/dev/null
 
 # Ensure all cpusets are valid for the actual online CPU count (e.g. 0-3 on a 4-thread CPU)
 # Google's powerhint assumes 8 cores (4-7) which fails with EINVAL and starves background tasks

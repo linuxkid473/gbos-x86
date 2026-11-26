@@ -37,6 +37,11 @@ and freezing presentation. We rewrite the returned FourCC from 'AB24' (0x3432424
 exact FourCC already returned for RGBX_8888 at 0x1a35d). Because DRM_FORMAT_XBGR8888 shares the identical 32bpp RGBA byte-order memory
 layout, CPU/SwiftShader rendering is completely unaffected, while DRM/KMS scanout succeeds on all Intel display generations and AMD.
 
+Fifth edit (cache-line flush on Intel Gen 4/5 Haswell/Broadwell): i915_bo_flush (0x10940) and xe_bo_flush (0x15c20) execute
+`clflushopt byte ptr [rcx]` (`66 0f ae 39`) unconditionally without checking CPUID. Haswell and Broadwell lack CLFLUSHOPT (introduced
+in Skylake Gen 6) and raise #UD (SIGILL). Dropping the 0x66 prefix (`90 0f ae 39` = `nop; clflush byte ptr [rcx]`, already bracketed
+by `mfence`) executes natively on every x86-64 CPU with zero kernel traps.
+
 Only applied to the exact original (sha256 pinned): the offset is into one specific build.
 """
 import hashlib, sys
@@ -47,6 +52,7 @@ ALIGN_SITE = 0xe4a7   # drv_dumb_bo_create_ex, YVU420_ANDROID: add r12d,0x1f; an
 CAVE = 0xe422         # int3 padding before drv_dumb_bo_create_ex
 PASTEL = 0x51af   # .rodata literal strstr()'d against ro.hardware.vulkan at 0x17364 (its only reference)
 RGBA8888_SITE = 0x1a304  # cros_gralloc_convert_format: mov $0x34324241, %eax (b'AB24' -> b'XB24')
+CLFLUSHOPT_SITES = (0x10940, 0x15c20)  # i915_bo_flush, xe_bo_flush: 66 0f ae 39 -> 90 0f ae 39
 
 
 def main():
@@ -67,9 +73,12 @@ def main():
     assert d[RGBA8888_SITE:RGBA8888_SITE + 4] == b'AB24'
     assert d[RGBA8888_SITE - 1] == 0xb8
     d[RGBA8888_SITE:RGBA8888_SITE + 4] = b'XB24'
+    for off in CLFLUSHOPT_SITES:
+        assert d[off:off + 4] == b'\x66\x0f\xae\x39', hex(off)
+        d[off] = 0x90
     open(dst, 'wb').write(d)
     print('patched: generic linear backend answers to DRM driver "amdgpu"; software-renderer flag set by ro.hardware.vulkan=intel; '
-          'YV12 dumb-buffer width aligned to 512; RGBA_8888 mapped to DRM_FORMAT_XBGR8888 (XB24) for universal KMS scanout')
+          'YV12 dumb-buffer width aligned to 512; RGBA_8888 mapped to DRM_FORMAT_XBGR8888 (XB24); clflushopt -> clflush')
 
 
 if __name__ == '__main__':

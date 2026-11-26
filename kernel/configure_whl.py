@@ -30,14 +30,23 @@ OVERRIDES = {
     'HID_GENERIC': 'y', 'USB_HID': 'y', 'HID_MULTITOUCH': 'y',
     'I2C_HID': 'y', 'I2C_HID_ACPI': 'y', 'I2C_DESIGNWARE_CORE': 'y', 'I2C_DESIGNWARE_PLATFORM': 'y',
     'PINCTRL_CANNONLAKE': 'y', 'KEYBOARD_ATKBD': 'y', 'MOUSE_PS2': 'y',
+    # PS/2 touchpad protocol extensions (bools under MOUSE_PS2=y): Elantech is used on Sony VAIO Flip 13
+    # (SVF13N24CXB, otherwise misdetected as "PS/2 Logitech Wheel Mouse" with no 2-finger scroll), plus
+    # Synaptics, ALPS, FocalTech, Cypress and Sentelic.
+    'MOUSE_PS2_ELANTECH': 'y', 'MOUSE_PS2_ELANTECH_SMBUS': 'y', 'MOUSE_PS2_SENTELIC': 'y',
+    'MOUSE_PS2_SYNAPTICS': 'y', 'MOUSE_PS2_SYNAPTICS_SMBUS': 'y', 'MOUSE_PS2_ALPS': 'y',
+    'MOUSE_PS2_FOCALTECH': 'y', 'MOUSE_PS2_CYPRESS': 'y',
     'BLK_DEV_DM': 'y', 'DM_VERITY': 'y', 'EXT4_FS': 'y', 'EROFS_FS': 'y',
     # Intel Wi-Fi (the Latitude 5300 has a CNVi 9560, 8086:9df0).
     'CFG80211': 'm', 'MAC80211': 'm', 'WLAN_VENDOR_INTEL': 'y', 'IWLWIFI': 'm', 'IWLMVM': 'm',
     # Battery/AC: Google builds these as modules, which won't load on this kernel.
     'ACPI_BATTERY': 'y', 'ACPI_AC': 'y',
-    # Touchpad: the I2C controllers (8086:9de8/9de9) are LPSS PCI devices. Without this the touchpad
-    # is only its PS/2 fallback (no scrolling or gestures).
-    'MFD_INTEL_LPSS': 'y', 'MFD_INTEL_LPSS_PCI': 'y',
+    # Touchpad: the I2C controllers (8086:9de8/9de9) are LPSS PCI devices on Skylake+, and ACPI LPSS +
+    # Lynx Point GPIO/pinctrl + DesignWare DMA on 4th/5th Gen Haswell/Broadwell (e.g. Sony VAIO Flip 13).
+    'MFD_INTEL_LPSS': 'y', 'MFD_INTEL_LPSS_PCI': 'y', 'MFD_INTEL_LPSS_ACPI': 'y',
+    'PINCTRL_LYNXPOINT': 'y', 'DW_DMAC': 'y', 'I2C_DESIGNWARE_PCI': 'y',
+    # N-Trig DuoSense touchscreen + active stylus (Sony VAIO Flip 13 / Duo 13 / Surface Pro 3).
+    'HID_NTRIG': 'y',
     # Audio: legacy HDA + Realtek ALC3254 (ALC269 family) + HDMI, instead of Google's SOF modules.
     # Needs snd_intel_dspcfg.dsp_driver=1 on the cmdline (isa_emu_patch/debug_cmdline.txt). The internal
     # mic is on the codec (pin 0x12), so it works with this driver too.
@@ -77,10 +86,12 @@ _y('WLAN_VENDOR_REALTEK', 'WLAN_VENDOR_MEDIATEK', 'WLAN_VENDOR_ATH', 'WLAN_VENDO
 _m('MWIFIEX', 'MWIFIEX_PCIE', 'MWIFIEX_USB', 'MWIFIEX_SDIO')
 _m('IWLDVM', 'RTW88', 'RTW88_PCI', 'RTW88_8822BE', 'RTW88_8822CE', 'RTW88_8723DE', 'RTW88_8821CE',
    'RTW89', 'RTW89_PCI', 'RTW89_8852AE', 'RTW89_8852BE', 'RTW89_8852BTE', 'RTW89_8852CE', 'RTW89_8851BE', 'RTW89_8922AE',
+   'RTL8192CE', 'RTL8192EE', 'RTL8723BE',
    'MT76_CORE', 'MT7921E', 'MT7921U', 'MT7925E', 'MT7615E', 'MT76x2E',
-   'ATH10K', 'ATH10K_PCI', 'ATH11K', 'ATH11K_PCI', 'ATH12K', 'BRCMFMAC', 'BRCMFMAC_PCIE', 'BRCMFMAC_USB')
-# Bluetooth (USB btusb covers Intel/Realtek/MediaTek/Qualcomm/Broadcom; Intel 8087:* on USB, newer on PCIe).
-_m('BT_INTEL', 'BT_RTL', 'BT_MTK', 'BT_QCA', 'BT_BCM', 'BT_INTEL_PCIE', 'BT_HCIBTUSB')
+   'ATH9K', 'ATH9K_HTC', 'ATH10K', 'ATH10K_PCI', 'ATH11K', 'ATH11K_PCI', 'ATH12K',
+   'BRCMFMAC', 'BRCMFMAC_PCIE', 'BRCMFMAC_USB')
+# Bluetooth (USB btusb covers Intel/Realtek/MediaTek/Qualcomm/Broadcom; Intel 8087:* on USB, newer on PCIe; ath3k for Atheros AR9462/AR3012).
+_m('BT_INTEL', 'BT_RTL', 'BT_MTK', 'BT_QCA', 'BT_BCM', 'BT_INTEL_PCIE', 'BT_HCIBTUSB', 'BT_ATH3K')
 _y('BT_HCIBTUSB_BCM', 'BT_HCIBTUSB_MTK', 'BT_HCIBTUSB_RTL', 'BT_HCIBTUSB_INTEL')
 # Graphics/brightness: i915 handles gen6..Raptor Lake; ACPI video + backlight class give brightness keys.
 _m('DRM_I915')
@@ -90,15 +101,18 @@ _m('DRM_XE')  # Arrow Lake and newer; optional
 _y('PINCTRL_AMD', 'PINCTRL_INTEL', 'PINCTRL_SUNRISEPOINT', 'PINCTRL_ICELAKE', 'PINCTRL_TIGERLAKE', 'PINCTRL_ALDERLAKE',
    'PINCTRL_METEORLAKE', 'PINCTRL_JASPERLAKE', 'PINCTRL_ELKHARTLAKE', 'PINCTRL_LAKEFIELD', 'PINCTRL_GEMINILAKE',
    'PINCTRL_BROXTON', 'PINCTRL_CEDARFORK', 'PINCTRL_EMMITSBURG', 'PINCTRL_LEWISBURG', 'PINCTRL_TIGERLAKE',
-   'INTEL_PCH_THERMAL', 'SERIAL_8250_DW', 'SPI_PXA2XX', 'SPI_PXA2XX_PCI')
+   'INTEL_PCH_THERMAL', 'SERIAL_8250_DW', 'SPI_PXA2XX', 'SPI_PXA2XX_PCI',
+   'MOUSE_ELAN_I2C_I2C', 'MOUSE_ELAN_I2C_SMBUS')
 _m('INTEL_ISH_HID', 'INTEL_ISH_HOST', 'HID_RMI', 'RMI4_CORE', 'RMI4_I2C', 'RMI4_SMB', 'RMI4_F11', 'RMI4_F12', 'RMI4_F30',
-   'MOUSE_PS2_SYNAPTICS', 'MOUSE_ELAN_I2C', 'MOUSE_SYNAPTICS_I2C', 'HID_SENSOR_HUB', 'I2C_I801', 'I2C_SMBUS',
-   'HID_ALPS', 'HID_GOOGLE_HAMMER', 'INPUT_SPARSEKMAP')
-# Accelerometer/gyro/ALS/hinge angle behind the Intel ISH sensor hub (2-in-1 auto-rotate): hid_sensor_hub loaded but no IIO sensor driver
+   'MOUSE_ELAN_I2C', 'MOUSE_SYNAPTICS_I2C', 'HID_SENSOR_HUB', 'I2C_I801', 'I2C_SMBUS',
+   'HID_ALPS', 'HID_WACOM', 'HID_GOOGLE_HAMMER', 'INPUT_SPARSEKMAP',
+   'TOUCHSCREEN_ATMEL_MXT', 'TOUCHSCREEN_ELAN', 'TOUCHSCREEN_GOODIX')
+# Accelerometer/gyro/ALS/hinge angle behind the Intel ISH / HID sensor hub (2-in-1 auto-rotate): hid_sensor_hub loaded but no IIO sensor driver
 # was built (Latitude 5300 2-in-1 report: auto-rotate does not work).
 _y('IIO', 'IIO_BUFFER', 'IIO_TRIGGER', 'IIO_TRIGGERED_BUFFER', 'IIO_KFIFO_BUF')
 _m('HID_SENSOR_IIO_COMMON', 'HID_SENSOR_IIO_TRIGGER', 'HID_SENSOR_ACCEL_3D', 'HID_SENSOR_GYRO_3D', 'HID_SENSOR_MAGNETOMETER_3D',
-   'HID_SENSOR_ALS', 'HID_SENSOR_PROX', 'HID_SENSOR_INCLINOMETER_3D', 'HID_SENSOR_DEVICE_ROTATION', 'HID_SENSOR_CUSTOM_SENSOR')
+   'HID_SENSOR_ALS', 'HID_SENSOR_PROX', 'HID_SENSOR_INCLINOMETER_3D', 'HID_SENSOR_DEVICE_ROTATION',
+   'HID_SENSOR_CUSTOM_INTEL_HINGE', 'HID_SENSOR_CUSTOM_SENSOR')
 # Intel Touch Host Controller (Lunar Lake and newer laptops put keyboard/touchpad/touch behind it:
 # QuickI2C = HID-over-I2C, QuickSPI = HID-over-SPI; PCI 8086:a848/a84a and a849/a84b on Lunar Lake).
 _m('INTEL_THC_HID', 'INTEL_QUICKSPI', 'INTEL_QUICKI2C')
@@ -123,8 +137,8 @@ _m('SURFACE_ACPI_NOTIFY', 'SURFACE_GPE', 'INPUT_SOC_BUTTON_ARRAY', 'SURFACE_PRO3
 # to the installer until this root-port driver is in the kernel (HP 14s-dq2509TU, Core i3-1115G4, 8086:9a0b).
 _y('VMD')
 # Laptop platform drivers (hotkeys, rfkill, fan/thermal, battery thresholds). The vendor menus gate the drivers.
-_y('X86_PLATFORM_DEVICES', 'X86_PLATFORM_DRIVERS_DELL', 'X86_PLATFORM_DRIVERS_HP', 'ACPI_VIDEO', 'RFKILL_INPUT')
-_m('INTEL_PMT_TELEMETRY', 'INTEL_PMT_CLASS')
+_y('X86_PLATFORM_DEVICES', 'X86_PLATFORM_DRIVERS_DELL', 'X86_PLATFORM_DRIVERS_HP', 'ACPI_VIDEO', 'RFKILL_INPUT', 'SONYPI_COMPAT', 'NFC_SHDLC')
+_m('INTEL_PMT_TELEMETRY', 'INTEL_PMT_CLASS', 'NFC_NCI', 'NFC_HCI', 'NFC_PN544', 'NFC_PN544_I2C', 'NFC_PN533', 'NFC_PN533_USB')
 _m('DELL_LAPTOP', 'DELL_WMI', 'DELL_SMBIOS', 'DELL_WMI_DESCRIPTOR', 'THINKPAD_ACPI', 'HP_WMI', 'IDEAPAD_LAPTOP',
    'ASUS_WMI', 'ASUS_NB_WMI', 'ACER_WMI', 'SAMSUNG_LAPTOP', 'MSI_WMI', 'TOSHIBA_ACPI', 'SONY_LAPTOP',
    'FUJITSU_LAPTOP', 'PANASONIC_LAPTOP', 'LG_LAPTOP', 'INTEL_HID_EVENT', 'INTEL_VBTN', 'INTEL_WMI_SBL_FW_UPDATE',
@@ -181,7 +195,8 @@ REQUIRED = ['DRM_I915', 'TRIM_UNUSED_KSYMS', 'MODULE_SIG_PROTECT', 'ANDROID_BIND
             'KSU', 'VMD', 'IPU_BRIDGE', 'VIDEO_INTEL_IPU6', 'VIDEO_OV5675', 'VIDEO_OV8856', 'VIDEO_DW9714',
             'INTEL_SKL_INT3472', 'GPIO_TPS68470', 'REGULATOR_TPS68470', 'COMMON_CLK_TPS68470',
             'SND_SOC_AMD_RENOIR_MACH', 'SND_SOC_AMD_YC_MACH', 'SND_SOC_AMD_PS', 'SND_SOC_AMD_PS_MACH',
-            'SND_SOC_AMD_ACP_PCI', 'SND_AMD_ASOC_ACP70', 'SND_SOC_AMD_LEGACY_MACH']
+            'SND_SOC_AMD_ACP_PCI', 'SND_AMD_ASOC_ACP70', 'SND_SOC_AMD_LEGACY_MACH',
+            'PINCTRL_LYNXPOINT', 'MFD_INTEL_LPSS_ACPI', 'HID_NTRIG', 'MOUSE_PS2_ELANTECH', 'USB_VIDEO_CLASS']
 
 
 def parse(text):
@@ -205,7 +220,7 @@ def render(values):
 def main():
     if sys.argv[1] == '--check':
         resolved = parse(open(sys.argv[2]).read())
-        want = {**GENERIC, **OVERRIDES}  # REQUIRED names come from either table (VMD is a GENERIC one)
+        want = {**OVERRIDES, **GENERIC}  # REQUIRED names come from either table (VMD is a GENERIC one)
         bad = {k: resolved.get(k, 'n') for k in REQUIRED if resolved.get(k, 'n') != want[k]}
         missed = {k: resolved.get(k, 'n') for k, v in OVERRIDES.items() if resolved.get(k, 'n') != v}
         print('not resolved as requested:', missed or 'none')

@@ -5,7 +5,7 @@ status: works | partial | pending | no
 """
 from html import escape
 
-UPDATED = '2026-11-18'
+UPDATED = '2026-11-26'
 
 STATUS = {'works': 'Works', 'partial': 'Partly works', 'pending': 'Fix pending', 'no': 'Does not work'}
 
@@ -73,6 +73,10 @@ LAPTOPS = [
          works='Hardware graphics, Wi-Fi, Bluetooth, USB Ethernet, keyboard, Dell hotkeys and lid switch, touchpad, sound, Widevine, Play Store installs and updates, Night Light, Magic Pointer, root adb, the Linux Terminal VM (Debian, Linux apps in their own windows)',
          broken='',
          notes='Kernel #37, installed by hand next to Fedora. GitHub issue 17 (closed): the reporter found five bugs, each with a fix (sound on Meteor Lake needing the <code>sof-ace-tplg</code> topology, Widevine, Play Store installs, the touchpad), and confirmed the list after applying them.'),
+    dict(name='Sony VAIO Flip 13 (SVF13N24CXB)', cpu='Core i5-4200U (Haswell-ULT), Intel HD 4400, 8 GB DDR3L, M.2 SATA SSD', status='works',
+         works='Hardware graphics (Mesa HasVK), H.264 VA-API + AVX2-lowered VP9/AV1/AAC/Opus/YUV video & Widevine DRM, Wi-Fi (Intel 7260), Bluetooth, dual HDA audio (ALC283 + HDMI), Elantech PS/2 touchpad with 2-finger scroll, N-Trig touchscreen & stylus, front & rear UVC webcams, lid-close/reopen & idle sleep-guard with on-battery auto-shutdown (installed to M.2 SATA SSD)',
+         broken='Hardware ACPI S3 deep sleep (handled by sleep-guard low-power S0 idle + configurable lid-closed auto-shutdown)',
+         notes='Kernel #53. First 4th-gen Haswell laptop confirmed working end-to-end: needed <code>ADX</code>/<code>RDSEED</code>/<code>CLFLUSHOPT</code> support, BoringSSL non-ADX redirects across system/vendor/APEXes, AVX-VNNI/GFNI -> AVX2 lowering across 19 media/audio libraries, Mesa <code>vulkan.hasvk.so</code> + <code>i965_drv_video.so</code> VA-API, Elantech PS/2 + UVC camera CPU <code>libyuv</code> pipeline, and universal <code>sleep-guard.sh</code>. See HANDOFF.md (2026-11-24..26).'),
     dict(name='Dell Latitude 3380', cpu='Core i5-7200U (Kaby Lake), 8 GB DDR4, 256 GB SSD', status='partial',
          works='Wi-Fi, sound, touchpad, keyboard, brightness, display, webcam (installed)',
          broken='Bluetooth',

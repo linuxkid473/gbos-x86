@@ -12,7 +12,7 @@ fails=0; n=0
 log() { echo "$*" >> "$T/log"; }
 sleep() { :; }
 mount() { echo "$*" >> "$T/mounts"; return ${MOUNT_RC:-0}; }
-sha256sum() { case "$1" in */libminigbm_gralloc.so) echo "${FAKE_GRALLOC_SHA:-d48536951fd0e9643e71a5c8843e90833ce3e212e182782185470e2fbbfad673}  $1";; */libgbm.so) echo "${FAKE_LIBGBM_SHA:-64a0f2537a5917822cb3f538dc74229e7ccf4ca45a30265bb97f742678ba294e}  $1";; */vulkan.intel.so) echo "${FAKE_VK_SHA:-5c687450523ea9ed9e8d4d9cc98ef4fef6c8d592d46db4bf425ad571dc6f7c73}  $1";; *) command sha256sum "$@" 2>/dev/null || shasum -a 256 "$@";; esac; }
+sha256sum() { case "$1" in */libminigbm_gralloc.so) echo "${FAKE_GRALLOC_SHA:-d48536951fd0e9643e71a5c8843e90833ce3e212e182782185470e2fbbfad673}  $1";; */libgbm.so) echo "${FAKE_LIBGBM_SHA:-64a0f2537a5917822cb3f538dc74229e7ccf4ca45a30265bb97f742678ba294e}  $1";; */vulkan.intel.so) echo "${FAKE_VK_SHA:-5c687450523ea9ed9e8d4d9cc98ef4fef6c8d592d46db4bf425ad571dc6f7c73}  $1";; */iHD_drv_video.so) echo "${FAKE_IHD_SHA:-df201109d84aa6b66a8349a862aed4aac1fc3bc122cd2df337441088a996c68c}  $1";; */libdesktop_camera_common.dylib.so) echo "${FAKE_CAM_SHA:-1e3444bd4abd757e74e579a6687d86dd00d7bd770ccb1d272b68900e9b5b1d13}  $1";; *) command sha256sum "$@" 2>/dev/null || shasum -a 256 "$@";; esac; }
 . "$T/block.sh"
 
 # fake sysfs: $1 = list of "cardN:driver" ("none" = unbound), $2 = list of "vendor:class" PCI devices
@@ -37,11 +37,12 @@ check() { # name expected(GPU_SW) cards pci [GPU_SOFTWARE]
   if [ "$GPU_SW" = "$2" ]; then echo "ok   $1 -> $GPU_SW ($(tail -n1 $T/log | cut -c1-110))"; else echo "FAIL $1: wanted $2, got $GPU_SW"; cat "$T/log"; fails=$((fails+1)); fi
 }
 AMD=0x1002:0x030000; INTEL=0x8086:0x030000; NV=0x10de:0x030200
-INTEL_BDW=0x8086:0x030000:0x1616; INTEL_HSW=0x8086:0x030000:0x0416
+INTEL_BDW=0x8086:0x030000:0x1616; INTEL_HSW=0x8086:0x030000:0x0416; INTEL_HSW_ULT=0x8086:0x030000:0x0a16
 check "Intel i915 laptop"              0 "card0:i915"                "$INTEL"
 check "Intel xe"                       0 "card0:xe"                  "$INTEL"
 check "Intel Broadwell Gen 8 (legacy)" 1 "card0:i915"                "$INTEL_BDW"
 check "Intel Haswell Gen 7.5 (legacy)" 1 "card0:i915"                "$INTEL_HSW"
+check "Intel Haswell-ULT HD 4400 (VAIO Flip 13)" 1 "card0:i915"      "$INTEL_HSW_ULT"
 check "Intel, i915 not bound yet"      0 "card0:simpledrm"           "$INTEL"
 check "Intel Broadwell unbound"        1 "card0:simpledrm"           "$INTEL_BDW"
 check "Intel + AMD dGPU (hybrid)"      0 "card0:i915 card1:amdgpu"   "$INTEL $AMD"
@@ -75,8 +76,13 @@ rm $G/patched/vulkan.swiftshader.so
 runenable "no SwiftShader HAL on the stick" 1 1 0 0
 : > $G/patched/vulkan.swiftshader.so; MOUNT_RC=1; runenable "bind fails" 1 1 1 0; unset MOUNT_RC
 
-# RADV: used when it is on the stick and amdgpu is bound; GPU_VULKAN forces either; falls back to SwiftShader when RADV cannot be bound
-radvmount() { grep -q "vulkan.radv.so" "$T/mounts" 2>/dev/null && echo radv || { grep -q "vulkan.swiftshader.so" "$T/mounts" 2>/dev/null && echo swiftshader || echo none; }; }
+# RADV / HasVK: used when on the stick and matching GPU driver is bound; GPU_VULKAN forces one; falls back to SwiftShader
+radvmount() {
+  if grep -q "vulkan.radv.so" "$T/mounts" 2>/dev/null; then echo radv
+  elif grep -q "vulkan.hasvk.so" "$T/mounts" 2>/dev/null; then echo hasvk
+  elif grep -q "vulkan.swiftshader.so" "$T/mounts" 2>/dev/null; then echo swiftshader
+  else echo none; fi
+}
 rv() { # name expected GPU_VULKAN
   n=$((n+1)); runenable_quiet; r=$(radvmount)
   if [ "$r" = "$2" ]; then echo "ok   vulkan: $1 -> $r"; else echo "FAIL vulkan: $1: wanted $2, got $r"; cat "$T/log"; fails=$((fails+1)); fi
@@ -91,8 +97,35 @@ rv "amdgpu, no RADV on the stick" swiftshader
 rv "amdgpu + RADV on the stick" radv
 GPU_VULKAN=swiftshader; rv "forced SwiftShader" swiftshader
 GPU_VULKAN=radv; rv "forced RADV" radv; unset GPU_VULKAN
-mk "card0:nouveau" "$NV"; SYSFS=$T/sys; rv "other GPU driver, RADV present" swiftshader
+mk "card0:i915" "$INTEL_HSW_ULT"; SYSFS=$T/sys
+rv "Haswell-ULT i915, no HasVK on the stick" swiftshader
+: > $G/patched/vulkan.hasvk.so
+rv "Haswell-ULT i915 (VAIO Flip 13) + HasVK on the stick" hasvk
+mk "card0:i915" "$INTEL_BDW"; SYSFS=$T/sys
+rv "Broadwell i915 + HasVK on the stick" hasvk
+mk "card0:i915" "0x8086:0x030000:0x0116"; SYSFS=$T/sys
+rv "Sandy Bridge Gen 6 i915 falls back to SwiftShader" swiftshader
+mk "card0:i915" "$INTEL_HSW_ULT"; SYSFS=$T/sys
+GPU_VULKAN=swiftshader; rv "Haswell forced SwiftShader" swiftshader; unset GPU_VULKAN
+mk "card0:nouveau" "$NV"; SYSFS=$T/sys; rv "other GPU driver, RADV+HasVK present" swiftshader
 mk "card0:amdgpu" "$AMD"; SYSFS=$T/sys; FAKE_VK_SHA=deadbeef; rv "unknown vulkan.intel.so" none; unset FAKE_VK_SHA
+
+# i965 VA-API driver: bound over /vendor/lib64/iHD_drv_video.so on Intel Gen 7/7.5/8 when i965_drv_video.so is on the stick
+: > $NEWROOT/vendor/lib64/iHD_drv_video.so; : > $G/patched/i965_drv_video.so
+mk "card0:i915" "$INTEL_HSW_ULT"; SYSFS=$T/sys; runenable_quiet
+n=$((n+1)); if [ "$GPU_VAAPI_USED" = i965 ] && grep -q "i965_drv_video.so.*iHD_drv_video.so" "$T/mounts"; then echo "ok   vaapi: Haswell-ULT binds i965_drv_video.so over iHD_drv_video.so"; else echo "FAIL vaapi Haswell-ULT"; cat "$T/log"; fails=$((fails+1)); fi
+GPU_VAAPI=0; runenable_quiet; unset GPU_VAAPI
+n=$((n+1)); if [ -z "$GPU_VAAPI_USED" ] && ! grep -q "i965_drv_video.so" "$T/mounts"; then echo "ok   vaapi: GPU_VAAPI=0 skips i965_drv_video.so"; else echo "FAIL vaapi GPU_VAAPI=0"; fails=$((fails+1)); fi
+mk "card0:amdgpu" "$AMD"; SYSFS=$T/sys; runenable_quiet
+n=$((n+1)); if [ -z "$GPU_VAAPI_USED" ] && ! grep -q "i965_drv_video.so" "$T/mounts"; then echo "ok   vaapi: AMD does not bind i965_drv_video.so"; else echo "FAIL vaapi AMD"; fails=$((fails+1)); fi
+
+# USB camera CPU libyuv pipeline bind (Gen <= 8 HasVK lacks R8/R8G8 STORAGE_IMAGE -> black camera frames without this)
+mkdir -p $NEWROOT/vendor/lib64/hw
+: > $NEWROOT/vendor/lib64/hw/libdesktop_camera_common.dylib.so; : > $G/patched/libdesktop_camera_common.cpu.so
+mk "card0:i915" "$INTEL_HSW_ULT"; SYSFS=$T/sys; runenable_quiet
+n=$((n+1)); if grep -q "libdesktop_camera_common.cpu.so.*libdesktop_camera_common.dylib.so" "$T/mounts"; then echo "ok   camera: Haswell-ULT binds libdesktop_camera_common.cpu.so"; else echo "FAIL camera common Haswell-ULT"; cat "$T/log"; fails=$((fails+1)); fi
+CAMERA_VULKAN=1; runenable_quiet; unset CAMERA_VULKAN
+n=$((n+1)); if ! grep -q "libdesktop_camera_common.cpu.so" "$T/mounts"; then echo "ok   camera: CAMERA_VULKAN=1 skips libdesktop_camera_common.cpu.so"; else echo "FAIL camera CAMERA_VULKAN=1"; fails=$((fails+1)); fi
 # vendor build.prop rewrite: in software-GPU mode Google's enable_color_pipeline=true must become false (drm_hwcomposer rejects every amdgpu plane otherwise)
 sed -n '/^DROP=/,/^} > \/tmp\/vendor.build.prop/p' "$HOOK" | sed "s#/new/vendor/build.prop#$T/vendor.build.prop#g; s#/tmp/vendor.build.prop#$T/out.prop#g; s#^} > .*#}#" > "$T/prop.sh"
 bp() { # name GPU_SW expected(enable_color_pipeline in the result)
@@ -129,5 +162,6 @@ sr() { # name GPU_SW GPU_VK expected-count
 }
 sr "AMD + SwiftShader (CPU renders)" 1 swiftshader 1
 sr "AMD + RADV (GPU renders)" 1 radv 0
+sr "Intel Haswell + HasVK (GPU renders)" 1 hasvk 0
 sr "Intel" 0 "" 0
 [ $fails = 0 ] && echo "GPU_SELECT_TEST_PASS ($n checks)" || { echo "$fails FAILED"; exit 1; }

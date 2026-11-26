@@ -24,9 +24,9 @@
 # (EFI/BOOT/ and GBOS/EFI/BOOT/) and pick "1 Update" to install it on the internal disk.
 set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-JOBS=${2:-$(nproc)}
+JOBS=${2:-$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 8)}
 VOL=${GBOS_KERNEL_VOLUME:-gbos-ksrc}
-C=${CLANG_DIR:-/build/inputs/clang-r584948c}
+C=${CLANG_DIR:-}
 
 # The base config: the one embedded in the shipped kernel, unless one is given.
 BASE=${1:-}
@@ -44,8 +44,9 @@ fi
 
 docker run --rm -i --platform linux/amd64 -v "$VOL":/build -v "$ROOT":/host:ro -v "$W":/cfg gbos-kbuild bash -s <<EOF
 set -e
-[ -x $C/bin/clang-22 ] || { echo "missing clang-22 in $C (set CLANG_DIR to an installed toolchain)" >&2; exit 1; }
-export PATH=$C/bin:\$PATH LD_LIBRARY_PATH=$C/lib:\$LD_LIBRARY_PATH
+C=${C:-$(ls -d /build/inputs/clang-r584948* 2>/dev/null | head -1)}
+[ -n "\$C" ] && [ -x "\$C/bin/clang-22" ] || { echo "clang toolchain missing in /build/inputs (run kernel/fetch_kernel_sources.sh or set CLANG_DIR)" >&2; exit 1; }
+export PATH=\$C/bin:\$PATH LD_LIBRARY_PATH=\$C/lib:\$LD_LIBRARY_PATH
 # KernelSU reads its version from its own git checkout; the volume's files are root's, the
 # checkout on the host is not, so git would refuse it without this.
 git config --global --add safe.directory /build/inputs/KernelSU
@@ -85,19 +86,19 @@ cp /build/out/.config.new /build/out/.config
 /build/src/scripts/config --file /build/out/.config \\
   --set-str CMDLINE "\$(cat /host/kernel/isa_emu_patch/generic_cmdline.txt)" \\
   --set-str INITRAMFS_SOURCE ""
-make -C /build/src O=/build/out ARCH=x86_64 LLVM=$C/bin/ CC=$C/bin/clang-22 olddefconfig > /dev/null
+make -C /build/src O=/build/out ARCH=x86_64 LLVM=\$C/bin/ CC=\$C/bin/clang-22 olddefconfig > /dev/null
 
 # 3. the kernel and the modules
-make -C /build/src O=/build/out ARCH=x86_64 LLVM=$C/bin/ CC=$C/bin/clang-22 -j$JOBS bzImage modules
+make -C /build/src O=/build/out ARCH=x86_64 LLVM=\$C/bin/ CC=\$C/bin/clang-22 -j$JOBS bzImage modules
 
 # 4. the stage0 initramfs (busybox + init + the modules stage0 loads) and the kernel with it
 rm -rf /build/modroot_all
-make -C /build/src O=/build/out ARCH=x86_64 LLVM=$C/bin/ CC=$C/bin/clang-22 \\
+make -C /build/src O=/build/out ARCH=x86_64 LLVM=\$C/bin/ CC=\$C/bin/clang-22 \\
   modules_install INSTALL_MOD_PATH=/build/modroot_all INSTALL_MOD_STRIP=1 > /dev/null
 sh /host/kernel/make_stage0_initramfs.sh /build/modroot_all /build/out/gbos_stage0.cpio
 /build/src/scripts/config --file /build/out/.config --set-str INITRAMFS_SOURCE /build/out/gbos_stage0.cpio
-make -C /build/src O=/build/out ARCH=x86_64 LLVM=$C/bin/ CC=$C/bin/clang-22 olddefconfig > /dev/null
-make -C /build/src O=/build/out ARCH=x86_64 LLVM=$C/bin/ CC=$C/bin/clang-22 -j$JOBS bzImage
+make -C /build/src O=/build/out ARCH=x86_64 LLVM=\$C/bin/ CC=\$C/bin/clang-22 olddefconfig > /dev/null
+make -C /build/src O=/build/out ARCH=x86_64 LLVM=\$C/bin/ CC=\$C/bin/clang-22 -j$JOBS bzImage
 echo "BUILD OK"
 EOF
 
