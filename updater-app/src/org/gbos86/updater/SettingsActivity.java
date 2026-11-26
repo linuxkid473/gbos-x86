@@ -145,6 +145,44 @@ public class SettingsActivity extends Activity {
         contentCol.addView(featCard);
         addMarginBottom(featCard, 16);
 
+        // Card: where the app appears (launcher icon / Google's Settings entry)
+        LinearLayout appCard = M3.card(this, 20);
+        appCard.addView(M3.eyebrow(this, "APP ACCESS"));
+        TextView appTitle = M3.titleLarge(this, "Where gbOS86 Updater appears");
+        appTitle.setPadding(0, M3.dp(this, 4), 0, M3.dp(this, 8));
+        appCard.addView(appTitle);
+        final boolean entry = Launcher.settingsEntry(this);
+        final CheckBox hideCb = new CheckBox(this);
+        hideCb.setText("Hide from the app list");
+        hideCb.setTextSize(15);
+        hideCb.setTextColor(M3Theme.onSurface(this));
+        hideCb.setChecked(Launcher.hidden(this));
+        hideCb.setEnabled(entry || Launcher.hidden(this));
+        final TextView hideMsg = M3.bodySmall(this, entry
+                ? "Settings > System > Software update > gbOS86 updates opens this app, so its icon can be hidden."
+                : "Not available: Settings has no \"gbOS86 updates\" entry on this system (it comes with gbOS86's boot hook; "
+                        + "SETTINGS_UPDATER=0 in gbos.cfg turns it off). The icon stays so the app remains reachable.");
+        hideMsg.setPadding(M3.dp(this, 32), M3.dp(this, 2), 0, M3.dp(this, 4));
+        final boolean[] quiet = {false};   // true while the box is set to the real state (not a user's tap)
+        hideCb.setOnCheckedChangeListener((b, on) -> {
+            if (quiet[0]) return;
+            hideCb.setEnabled(false);
+            new Thread(() -> {
+                String m = Launcher.setHidden(this, on);
+                runOnUiThread(() -> {
+                    hideMsg.setText(m);
+                    quiet[0] = true;
+                    hideCb.setChecked(Launcher.hidden(this));
+                    quiet[0] = false;
+                    hideCb.setEnabled(Launcher.settingsEntry(this) || Launcher.hidden(this));
+                });
+            }).start();
+        });
+        appCard.addView(hideCb);
+        appCard.addView(hideMsg);
+        contentCol.addView(appCard);
+        addMarginBottom(appCard, 16);
+
         // Card 3: Update Source Feed
         LinearLayout sourceCard = M3.card(this, 20);
         sourceCard.addView(M3.eyebrow(this, "UPDATE SOURCE"));

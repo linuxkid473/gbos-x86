@@ -903,6 +903,7 @@ cmd_request() {
   _pr=$(sed -n 's/^prune_logs \([01]\)$/\1/p' "$W/req" | head -n 1)
   _wh=$(sed -En 's/^where (app|shared)$/\1/p' "$W/req" | head -n 1)
   _dp=$(sed -n 's/^deep \([01]\)$/\1/p' "$W/req" | head -n 1)
+  _hd=$(sed -n 's/^hide \([01]\)$/\1/p' "$W/req" | head -n 1)
   # the app's modification warning the user accepted with "Install anyway" (codes: Updater.warningCodes), kept in update/history.txt
   _aw=$(sed -n 's/^accepted_warning \([a-z,]\{1,100\}\)$/\1/p' "$W/req" | head -n 1)
   SU_STATUSF=$W/progress
@@ -942,6 +943,12 @@ cmd_request() {
       _o=$( ( set -- report "$G" "$_rod" --desc "$W/desc"; if [ -n "${SU_BB:-}" ]; then "$SU_BB" sh "$0" "$@"; else sh "$0" "$@"; fi ) 2>&1); _r=$?
       for _f in "$_rod"/*; do [ -f "$_f" ] && chown "$_uid:$_uid" "$_f" && chmod 600 "$_f"; done
       if [ $_r = 0 ]; then echo "$_o" | grep -E '^[a-z_]+=' | respond done; else echo "$_o" | tail -n 5 | respond failed; fi;;
+    launcher)
+      # the app hid (1) or showed (0) its launcher icon: Android 10+ otherwise lists a hidden app that requests permissions as an
+      # "App info" placeholder (LauncherAppsService, global show_hidden_icon_apps_enabled, default 1). Only this one setting.
+      case "$_hd" in 1) _sv=0;; 0) _sv=1;; *) echo "bad hide value" | respond failed; exit 1;; esac
+      if settings put global show_hidden_icon_apps_enabled "$_sv" 2>"$W/se"; then echo "show_hidden_icon_apps_enabled=$_sv" | respond done
+      else respond failed < "$W/se"; fi;;
     cleanup) ( set -- cleanup "$G"; if [ -n "${SU_BB:-}" ]; then "$SU_BB" sh "$0" "$@"; else sh "$0" "$@"; fi ) 2>&1 | respond done;;
     *) echo "unknown action '$_act'" | respond failed;;
   esac

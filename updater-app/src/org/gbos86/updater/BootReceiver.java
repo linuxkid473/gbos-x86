@@ -13,6 +13,7 @@ public class BootReceiver extends BroadcastReceiver {
     @Override
     public void onReceive(Context c, Intent i) {
         String a = i.getAction();
+        Launcher.ensureReachable(c);
         if (Intent.ACTION_BOOT_COMPLETED.equals(a) || "org.gbos86.updater.BOOT_CHECK".equals(a)) CheckJob.schedule(c, true);
         else if (Intent.ACTION_MY_PACKAGE_REPLACED.equals(a)) CheckJob.schedule(c, false);
     }
