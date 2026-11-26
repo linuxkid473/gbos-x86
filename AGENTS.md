@@ -8,7 +8,7 @@ Read `README.md` (what/how) and `HANDOFF.md` (chronological log of every bug and
 - **The repo is public (owner's decision, 2026-10-16).** `usb/patched/` and `usb/libkm_compat.so` are modified Google binaries and stay in
   it knowingly. Never commit Google's OS images (`lapis/parts`, `*.img`), keys, tokens, server addresses or personal data.
 - Ask before downloading anything (firmware, images) and say what, from where, and how big.
-- Releasing an update from main: `tools/release.sh check`, then `publish` (skill `.claude/skills/gbos-release`). Never pass
+- Releasing an update from main (main repository only, never the lab): `tools/release.sh`, `check`, then `publish` (skill `.claude/skills/gbos-release`). Never pass
   `--skip-tests`/`--allow-stick-only`/`--yes` unless the maintainer asks; they type the key passphrase themselves.
 - After changing a file on the stick, make the same change in `usb/` here, or copy it from here (they must
   match), and commit.

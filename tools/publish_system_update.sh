@@ -19,6 +19,7 @@
 #   --commit REV        what to publish (default HEAD); the set is git archive of REV, so local edits never slip in
 #   --kernel FILE       default: usb/out/BOOTX64.EFI of REV          --seq N   default: UTC yyyymmddHHMM
 #   --bases N           how many earlier updates the delta covers (default 3; 0 = no delta)
+#   --since SEQ         instead of --bases: the delta covers every published update from SEQ on (tools/release.sh's starting point)
 #   --repo OWNER/NAME   default: the origin remote's GitHub repository
 #   --parts DIR         Google's partitions of this build (default lapis/parts): proves super.img holds them unmodified
 #   --out DIR           default build/releases (keeps each release's files, and manifests/ of the published sets)
@@ -36,11 +37,11 @@ say() { echo "== $*"; }
 sha() { sha256sum "$1" | cut -c1-64; }
 
 KEY=; TREE=; REV=HEAD; KERNEL=; SEQ=; NBASES=3; REPO=; PARTS=; OUT=$ROOT/build/releases; UPLOAD=1; YES=0; UNPUSHED=0; NOTES=
-SRCDIR=; COMMIT_ID=; BASESDIR=; GURL=; SUPERCHECK=
+SRCDIR=; COMMIT_ID=; BASESDIR=; GURL=; SUPERCHECK=; SINCE=
 while [ $# -gt 0 ]; do
   case "$1" in
     --key) KEY=$2; shift 2;; --tree) TREE=$2; shift 2;; --commit) REV=$2; shift 2;; --kernel) KERNEL=$2; shift 2;;
-    --seq) SEQ=$2; shift 2;; --bases) NBASES=$2; shift 2;; --repo) REPO=$2; shift 2;; --parts) PARTS=$2; shift 2;;
+    --seq) SEQ=$2; shift 2;; --bases) NBASES=$2; shift 2;; --since) SINCE=$2; shift 2;; --repo) REPO=$2; shift 2;; --parts) PARTS=$2; shift 2;;
     --out) OUT=$2; shift 2;; --no-upload) UPLOAD=0; shift;; --yes) YES=1; shift;; --allow-unpushed) UNPUSHED=1; shift;;
     --notes) NOTES=$2; shift 2;; --src) SRCDIR=$2; shift 2;; --commit-id) COMMIT_ID=$2; shift 2;; --bases-dir) BASESDIR=$2; shift 2;;
     --google-url) GURL=$2; shift 2;; --no-super-check) SUPERCHECK=--no-super-check; shift;;
@@ -51,6 +52,7 @@ done
 [ -n "$KEY" ] && [ -f "$KEY" ] || die "needs --key PRIVATE.pem (the offline signing key)"
 [ -n "$TREE" ] && [ -d "$TREE" ] || die "needs --tree GBOSDIR (a stick-like gbos/ folder: super.img, super.layout, firmware, modules ...)"
 echo "$NBASES" | grep -qE '^[0-9]+$' || die "--bases must be a number"
+[ -z "$SINCE" ] || echo "$SINCE" | grep -qE '^[0-9]{1,12}$' || die "--since must be an update number (seq)"
 [ -n "$SEQ" ] || SEQ=$(date -u +%Y%m%d%H%M)
 echo "$SEQ" | grep -qE '^[1-9][0-9]{0,11}$' || die "--seq must be a number (1 to 12 digits)"
 OUT=$(mkdir -p "$OUT" && cd "$OUT" && pwd)
@@ -95,9 +97,10 @@ gh_ok() { command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; }
 if [ $UPLOAD = 1 ]; then
   gh_ok || die "gh (the GitHub CLI) is missing or not logged in: install it and run 'gh auth login' (or use --no-upload)"
   say "earlier updates on github.com/$REPO"
-  gh release list --repo "$REPO" --limit 100 --json tagName,isDraft --jq '.[] | select(.isDraft | not) | .tagName' > "$T/tags" 2>/dev/null \
+  gh release list --repo "$REPO" --limit 1000 --json tagName,isDraft --jq '.[] | select(.isDraft | not) | .tagName' > "$T/tags" 2>/dev/null \
     || die "cannot list the releases of $REPO"
-  grep -E '^sysupdate-[0-9]+$' "$T/tags" | sort -t- -k2 -n | tail -n "$((NBASES + 1))" | while read -r _t; do
+  grep -E '^sysupdate-[0-9]+$' "$T/tags" | sort -t- -k2 -n > "$T/tags.s"
+  if [ -n "$SINCE" ]; then awk -F- -v s="$SINCE" '$2 >= s' "$T/tags.s"; else tail -n "$((NBASES + 1))" "$T/tags.s"; fi | while read -r _t; do
     _s=${_t#sysupdate-}
     [ -f "$BASESDIR/$_s.manifest" ] && continue
     rm -rf "$T/dl"; mkdir -p "$T/dl"
@@ -113,7 +116,8 @@ done
 sort -n "$T/bases" -o "$T/bases"
 _last=$(tail -n 1 "$T/bases" | cut -d' ' -f1)
 [ -z "$_last" ] || [ "$SEQ" -gt "$_last" ] || die "seq $SEQ is not newer than the last published update ($_last)"
-tail -n "$NBASES" "$T/bases" > "$T/use"; [ "$NBASES" = 0 ] && : > "$T/use"
+if [ -n "$SINCE" ]; then awk -v s="$SINCE" '$1 >= s' "$T/bases" > "$T/use"
+else tail -n "$NBASES" "$T/bases" > "$T/use"; [ "$NBASES" = 0 ] && : > "$T/use"; fi
 
 # ------------------------------------------------------------------------------------------------ build
 say "building the set (seq $SEQ, $( [ -n "$SRCDIR" ] && echo "source $SRCDIR" || echo "commit $COMMIT"))"

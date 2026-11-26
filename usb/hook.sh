@@ -320,8 +320,14 @@ gbos_configure_boot_debug() {
   GBOS_LOGCAT_START=
   GBOS_DEBUG_DIAGNOSTIC_START=
   GBOS_DRM_DEBUG_STOP=
+  # Tags left out of the logcat files (filterspecs, so logd and the crash buffer still have them): pixel-thermal logs every sensor
+  # read at INFO (10,085 lines, 13% of boot 19's logcat), and keystore2 logs the same RKP/TEE failures (no Trusty here) at ERROR
+  # (940 lines). LOGCAT_FULL=1 in gbos.cfg keeps both.
+  GBOS_LOGCAT_FILTER=' pixel-thermal:W keystore2:F'
+  [ "${LOGCAT_FULL:-0}" = 1 ] && GBOS_LOGCAT_FILTER=
   if [ "${DEBUG_LOGS:-0}" = 1 ]; then
-    GBOS_LOGCAT_START='    start gbos_logcat'
+    GBOS_LOGCAT_START='    start gbos_logcat
+    start gbos_logcat_boot'
     GBOS_DEBUG_DIAGNOSTIC_START='    start gbos_audiodiag
     start gbos_displaydiag
     start gbos_aidiag'
@@ -932,10 +938,18 @@ on post-fs-data
 # the FAT cluster chain before power-off (fsck: "size ... should at most be 4046848"). Rotating
 # closes each file; logcat.txt is newest, then logcat.txt.1, .2, ...
 # Rotate at 1 MB, keep last 10 files to reduce USB flash drive write wear and I/O latency
-service gbos_logcat /system/bin/logcat -b all -v threadtime -r 1024 -n 10 -f /postinstall/gbos/logs/boot-$N/logcat.txt
+service gbos_logcat /system/bin/logcat -b all -v threadtime -r 1024 -n 10 -f /postinstall/gbos/logs/boot-$N/logcat.txt$GBOS_LOGCAT_FILTER
     user root
     group root log
     seclabel u:r:shell:s0
+
+# The first 10 minutes on their own: logcat.txt's 11 MB ring covered only the last 5.8 h of a 6.9 h boot (boot 19), so the start,
+# where most failures are, was gone. 41 files of 1 MB is room for well over 10 minutes; timeout then stops it for the rest of the boot.
+service gbos_logcat_boot /system/bin/timeout 600 /system/bin/logcat -b all -v threadtime -r 1024 -n 40 -f /postinstall/gbos/logs/boot-$N/logcat-boot.txt$GBOS_LOGCAT_FILTER
+    user root
+    group root log
+    seclabel u:r:shell:s0
+    oneshot
 
 # Crash buffer only (FATAL EXCEPTION / native crashes): small, so it survives a hard power-off.
 service gbos_crashlog /system/bin/logcat -b crash -v threadtime -f /postinstall/gbos/logs/boot-$N/crash.txt

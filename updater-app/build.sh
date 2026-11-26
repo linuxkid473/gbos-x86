@@ -19,9 +19,17 @@ API=${API:-35}
 MIN_SDK=30
 VERSION_CODE=${VERSION_CODE:-2}
 VERSION_NAME=${VERSION_NAME:-2.0}
-# the update source the app checks by default (Settings > General can change it): this checkout's GitHub origin, or REPO=OWNER/NAME
+# The update source the app checks by default (Settings > General can change it): the project's main repository (REPO in
+# tools/release.conf, where tools/release.sh publishes from main), whatever this clone's remotes are. REPO=OWNER/NAME for a
+# lab or fork build. Only without a release.conf REPO: this checkout's GitHub origin.
+REPO=${REPO:-$(sed -n 's/^REPO=//p' "$ROOT/tools/release.conf" 2>/dev/null | tail -n 1)}
 REPO=${REPO:-$(git -C "$ROOT" remote get-url origin 2>/dev/null | sed -n 's#^\(https://github\.com/\|git@github\.com:\|ssh://git@github\.com/\)\([^/]*/[^/]*\)$#\2#p' | sed 's/\.git$//')}
 echo "$REPO" | grep -qE '^([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?$' || { echo "bad REPO=$REPO" >&2; exit 1; }
+# Build stamp (tools/apk_stamp.py reads it back; tools/release.sh refuses an APK whose repo or sources are not the release's):
+# the git tree of updater-app/ at HEAD, "-dirty" when updater-app/ has uncommitted changes, and the HEAD commit.
+SRC_TREE=$(git -C "$ROOT" rev-parse HEAD:updater-app 2>/dev/null || echo unknown)
+[ -z "$(git -C "$ROOT" status --porcelain -- updater-app 2>/dev/null)" ] || SRC_TREE=$SRC_TREE-dirty
+SRC_COMMIT=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unknown)
 OUT=$ROOT/build/updater-app
 APK=${APK_OUT:-$ROOT/usb/gbos86-updater.apk}
 TESTKEY=0; [ "${1:-}" = --test-key ] && TESTKEY=1
@@ -48,9 +56,12 @@ package org.gbos86.updater;
 final class BuildInfo {
     private BuildInfo() {}
     static final String DEFAULT_REPO = "$REPO";
+    /** Read from the dex by tools/apk_stamp.py: keep it one string, in this format. */
+    static final String BUILD_STAMP = "gbos86-build repo=${REPO:--} tree=$SRC_TREE commit=$SRC_COMMIT";
 }
 EOF
 echo "default update source: ${REPO:-none (set it in the app's Settings)}"
+echo "built from: updater-app tree $SRC_TREE (commit $SRC_COMMIT)"
 RES_ZIP=""
 if [ -d "$HERE/res" ]; then
   echo "== aapt2 compile"
