@@ -27,7 +27,7 @@ The maintainer reads it with Claude Code, so the file is laid out for an agent: 
   previous complete one) are about 2.5 MB: fine for e-mail, chat apps and GitHub attachments (25 MB limit).
 * **Specs are mostly in the logs already:** `kmsg.log` has `DMI: Dell Inc. Latitude 7320 Detachable/0TNW0H, BIOS 1.49.0` and
   `Linux version ... #N`; `hw.txt` has the CPU, memory, PCI list, block devices and DRM; `hwdetect.txt` has the detection result;
-  `stage0-dmesg.txt` has `PATCH-STATUS`, the lab marker and the update lines. `sysupdate.sh info` gives the set, seq, commit and Google build.
+  `stage0-dmesg.txt` has `PATCH-STATUS` and the update lines. `sysupdate.sh info` gives the set, seq, commit and Google build.
 * **Personal data found in one boot's logs:** USB serial numbers (`SerialNumber: ...`, e.g. the stick's), 12 MAC addresses, Wi-Fi
   `SSID:` lines (empty in that boot, real names in others), `@` names that are not e-mails here but could be (accounts). No DMI
   serial / service tag in hw.txt or kmsg.
@@ -113,4 +113,3 @@ No new permission: the share sheet and MediaStore Downloads need none on Android
 2. **How much log:** current + previous boot (~2.5 MB) (`--boots`, default 2).
 3. **Redaction:** MAC, serial numbers, Wi-Fi names, account names, e-mail addresses (common TLDs only, so `name@com.android.x`
    package-style names stay readable).
-4. **Channel:** build on `latitude-7320-integration`, deliver to the laptop as a lab update (cherry-pick, lab key); main untouched.
