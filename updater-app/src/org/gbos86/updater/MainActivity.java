@@ -91,7 +91,7 @@ public class MainActivity extends Activity {
 
         // ---------------------------------------------------------------- Hero Card: Updates
         LinearLayout updateCard = M3.card(this, 20);
-        updateCard.addView(M3.eyebrow(this, "UPDATE STATUS"));
+        updateCard.addView(M3.eyebrow(this, "GBOS X86 UPDATES"));
 
         updateStatusTitle = M3.titleLarge(this, "Checking for updates ...");
         updateStatusTitle.setPadding(0, M3.dp(this, 4), 0, M3.dp(this, 2));
