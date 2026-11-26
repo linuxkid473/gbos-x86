@@ -13,8 +13,7 @@ ROOT=$(pwd)
 
 VOL=gbos-ksrc
 KSRC_COMMIT=3938c8d97142d5cf31543aa96f864a2cf832dda0   # AOSP kernel/common android17-6.18
-KSRC_TAR=kernel-common-$KSRC_COMMIT.tar.gz
-KSRC_SHA=d078c2db2db1d2e47d74c59a31a5020774814655bfbe20bbb2286b9e430495c9
+KSRC_URL=https://android.googlesource.com/kernel/common
 CLANG_TAG=android-17.0.0_r1        # AOSP prebuilts/clang/host/linux-x86
 CLANG_DIR=clang-r584948b           # the toolchain the shipped kernel #37 was built with
 KSU_TAG=v3.3.1
@@ -23,7 +22,6 @@ DL=$ROOT/build/dl
 mkdir -p "$DL"
 say() { printf '\n== %s\n' "$*"; }
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
-sha() { sha256sum "$1" | cut -d' ' -f1; }
 
 command -v docker >/dev/null || die "docker is not installed"
 docker info >/dev/null 2>&1 || die "docker is installed but not running"
@@ -34,12 +32,15 @@ if docker run --rm -v "$VOL":/build debian:trixie test -f /build/src/Makefile; t
   say "kernel source: present in $VOL"
 else
   say "kernel source: android.googlesource.com kernel/common @ $KSRC_COMMIT"
-  [ -f "$DL/$KSRC_TAR" ] || curl -fL --retry 5 -o "$DL/$KSRC_TAR" \
-    "https://android.googlesource.com/kernel/common/+archive/$KSRC_COMMIT.tar.gz"
-  got=$(sha "$DL/$KSRC_TAR")
-  [ "$got" = "$KSRC_SHA" ] || die "sha256 mismatch for $KSRC_TAR ($got); delete it and retry"
-  docker run --rm -v "$VOL":/build -v "$DL":/dl:ro debian:trixie \
-    bash -c "set -e; mkdir -p /build/src; tar -xzf /dl/$KSRC_TAR -C /build/src"
+  # A shallow git fetch of the pinned commit, exported with git archive (a plain tree, no .git, as the tarball was). Git checks
+  # every object against its hash, so the commit id is the integrity check. The +archive/<commit>.tar.gz download used before is
+  # generated on request: its bytes (and the sha256 this script used to pin) changed while the tree did not.
+  G=$DL/kernel-common.git
+  [ -d "$G" ] || git init -q --bare "$G"
+  git -C "$G" cat-file -e "$KSRC_COMMIT^{commit}" 2>/dev/null || git -C "$G" fetch -q --depth 1 "$KSRC_URL" "$KSRC_COMMIT"
+  [ "$(git -C "$G" rev-parse "$KSRC_COMMIT^{commit}")" = "$KSRC_COMMIT" ] || die "could not fetch $KSRC_COMMIT from $KSRC_URL"
+  git -C "$G" archive --format=tar "$KSRC_COMMIT" | docker run --rm -i -v "$VOL":/build debian:trixie \
+    sh -c "set -e; mkdir -p /build/src; tar -xf - -C /build/src"
 fi
 
 # --- 2. AOSP clang -----------------------------------------------------------------

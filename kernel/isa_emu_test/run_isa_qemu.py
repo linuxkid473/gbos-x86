@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""run_isa_qemu.py KERNEL -- boot KERNEL with the ISA emulator's own test program as /init.
+"""run_isa_qemu.py [KERNEL] [CPU] -- boot KERNEL with the ISA emulator's own test program as /init.
 
-This is the project's ISA emulator test (kernel/isa_emu_test/t.c, 16 known answers) without the
-gbrunch helper module: the test program is put into a tiny initramfs and the kernel is booted in
-QEMU. The stock kernel dies with SIGILL on the first emulated instruction, ours must print
-16/16 PASS.
+This is the project's ISA emulator test (kernel/isa_emu_test/t.c, one known answer per check() call)
+without the gbrunch helper module: the test program is put into a tiny initramfs and the kernel is
+booted in QEMU (CPU model Skylake-Client unless given; Haswell also exercises ADCX/ADOX). The stock
+kernel dies with SIGILL on the first emulated instruction, ours must pass every check in t.c.
 """
 import pathlib
 import subprocess
@@ -34,8 +34,16 @@ def cpio(files):
     return bytes(out)
 
 
+def expected_checks() -> int:
+    """Number of known answers in t.c: one check("...") call each (several can share a line)."""
+    return (HERE / "t.c").read_text().count('check("')
+
+
 def main() -> int:
     kernel = sys.argv[1] if len(sys.argv) > 1 else str(ROOT / "usb/out/BOOTX64.EFI")
+    # QEMU CPU model. Skylake-Client lacks the AVX-512-era instructions the emulator covers, but it has ADX; Haswell does not,
+    # so `run_isa_qemu.py KERNEL Haswell` also exercises the ADCX/ADOX emulation.
+    cpu = sys.argv[2] if len(sys.argv) > 2 else "Skylake-Client"
     test = HERE / "t"
     if not test.exists():
         print("no test program (kernel/isa_emu_test/t): run kernel/isa_emu_test/build_test.sh in gbos-kbuild")
@@ -48,7 +56,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         rd = pathlib.Path(tmp) / "rd.cpio"
         rd.write_bytes(cpio(files))
-        cmd = ["qemu-system-x86_64", "-machine", "q35", "-cpu", "Skylake-Client", "-m", "1024",
+        cmd = ["qemu-system-x86_64", "-machine", "q35", "-cpu", cpu, "-m", "1024",
                "-smp", "2", "-nographic", "-no-reboot", "-nic", "none", "-kernel", kernel,
                "-initrd", str(rd), "-append",
                "console=ttyS0 8250.nr_uarts=1 panic=-1 loglevel=4 rdinit=/init"]
@@ -57,11 +65,12 @@ def main() -> int:
     (HERE / "last_isa.log").write_text(out)
     passes = out.count("PASS ")
     fails = out.count("FAIL ")
-    print("%d PASS, %d FAIL" % (passes, fails))
+    want = expected_checks()
+    print("%d PASS, %d FAIL (of %d in t.c, -cpu %s)" % (passes, fails, want, cpu))
     for line in out.splitlines():
         if line.startswith(("PASS ", "FAIL ")):
             print(" ", line)
-    if passes == 16 and fails == 0:
+    if passes == want and fails == 0:
         print("ISA_EMU_TEST_PASS")
         return 0
     print("ISA_EMU_TEST_FAIL")
