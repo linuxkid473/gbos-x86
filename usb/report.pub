@@ -1,0 +1,2 @@
+gbos86-report-key 1
+none: no report key is installed, so the Updater app cannot make bug reports. Put the maintainer's report key here (tools/open_report.sh keygen); see docs/bug-report-plan.md.

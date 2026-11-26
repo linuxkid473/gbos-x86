@@ -196,9 +196,9 @@ mkdir -p "$MNT_SYS/EFI/BOOT" "$MNT_SYS/gbos/logs"
 [ -f "$ROOT/kernel/out/busybox" ] && cp "$ROOT/kernel/out/busybox" "$MNT_SYS/busybox"
 
 # The same files and folders usb/install.sh copies to an internal disk (tools/test_build_lists.sh keeps them in step).
-for f in hook.sh stick_fat.sh aidiag.sh native_zygote.sh early_patch.sh sensor_vendor_overlay.sh sensor_trial_diag.sh \
+for f in hook.sh stick_fat.sh optimize.sh aidiag.sh native_zygote.sh early_patch.sh sensor_vendor_overlay.sh sensor_trial_diag.sh \
          tablet_mode.sh hwdetect.sh sensordiag.sh mask_vendor_modules.sh install.sh apex_patch.sh gbos.cfg \
-         crossystem bootdisk.img libkm_compat.so system_ext_manifest.xml soft_gk gbos_fp sysupdate.sh sysupdate.pub gbos86-updater.apk; do
+         crossystem bootdisk.img libkm_compat.so system_ext_manifest.xml soft_gk gbos_fp sysupdate.sh sysupdate.pub report.pub gbos86-updater.apk; do
   [ -f "$U/$f" ] && cp "$U/$f" "$MNT_SYS/gbos/$f"
 done
 

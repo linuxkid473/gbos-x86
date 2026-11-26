@@ -58,6 +58,12 @@ mkdir -p "$T/e3/a/files" "$T/e3/b/files"; echo 1 > "$T/e3/a/files/1"; echo 2 > "
 mkdir -p "$T/e4"; echo x > "$T/e4/x"; tar -P -cf "$T/evil-abs.tar" "$T/e4/x"
 mkdir -p "$T/e5/$N/files"; echo x > "$T/e5/$N/files/a"; ln "$T/e5/$N/files/a" "$T/e5/$N/files/b"; tar -C "$T/e5" -cf "$T/evil-hardlink.tar" "$N"
 
+# bug report: a small .tar.gz the Java side encrypts (CoreTest), checked with tools/open_report.sh below
+mkdir -p "$T/rep/gbos86-report-0123abcd-202611261200"; echo "## What the user says" > "$T/rep/gbos86-report-0123abcd-202611261200/REPORT.md"
+head -c 300000 /dev/urandom > "$T/rep/gbos86-report-0123abcd-202611261200/kmsg.log"
+(cd "$T/rep/gbos86-report-0123abcd-202611261200" && sha256sum REPORT.md kmsg.log > SHA256SUMS)
+tar -C "$T/rep" -czf "$T/report.tar.gz" gbos86-report-0123abcd-202611261200
+
 # local server, compile, run
 python3 -I "$ROOT/tools/updater_core_fixtures.py" serve "$T" "$T/port" & SRV=$!
 for i in $(seq 1 50); do [ -f "$T/port" ] && break; sleep 0.1; done
@@ -69,7 +75,23 @@ java -cp "$T/cls" org.gbos86.updater.core.CoreTest "$T" "$(cat "$T/port")" > "$T
 cat "$T/java.log"
 if [ $R = 0 ] && grep -qx CORE_JAVA_PASS "$T/java.log"; then
   # what the Java tar extraction made must equal the source tree
-  if diff -r "$T/tsrc/$N" "$T/untar/$N" >/dev/null; then echo "ok - tar: unpacked files equal the originals"; echo UPDATER_CORE_TEST_PASS; exit 0; fi
-  echo "FAIL: tar: unpacked files differ"
+  diff -r "$T/tsrc/$N" "$T/untar/$N" >/dev/null || { echo "FAIL: tar: unpacked files differ"; exit 1; }
+  echo "ok - tar: unpacked files equal the originals"
+  O=$(sh "$ROOT/tools/open_report.sh" open "$T/report.enc" --key "$T/key.pem" --out "$T/opened" 2>&1)
+  [ "$O" = "$T/opened/gbos86-report-0123abcd-202611261200/REPORT.md" ] && cmp -s "$T/rep/gbos86-report-0123abcd-202611261200/kmsg.log" "$T/opened/gbos86-report-0123abcd-202611261200/kmsg.log" \
+    || { echo "FAIL: open_report: Java's encrypted report does not open ($O)"; exit 1; }
+  echo "ok - report: Java encrypts, open_report.sh (openssl) decrypts it byte for byte"
+  (cd "$T" && mkdir -p zz && cp report.enc zz/x.enc && printf 'r' > zz/README.txt && cd zz && python3 -I -c 'import zipfile; z = zipfile.ZipFile("../r.zip", "w"); z.write("README.txt"); z.write("x.enc")')
+  sh "$ROOT/tools/open_report.sh" open "$T/r.zip" --key "$T/key.pem" --out "$T/opened2" >/dev/null 2>&1 && [ -f "$T/opened2/gbos86-report-0123abcd-202611261200/REPORT.md" ] \
+    || { echo "FAIL: open_report: the .zip form does not open"; exit 1; }
+  echo "ok - report: the .zip the app saves opens too"
+  cp "$T/report.enc" "$T/bad.enc"; printf '\001' | dd of="$T/bad.enc" bs=1 seek=5000 conv=notrunc 2>/dev/null
+  ! sh "$ROOT/tools/open_report.sh" open "$T/bad.enc" --key "$T/key.pem" --out "$T/opened3" 2>"$T/bad.err" && grep -q HMAC "$T/bad.err" \
+    || { echo "FAIL: open_report: a changed byte was not refused"; exit 1; }
+  echo "ok - report: a changed byte is refused (HMAC)"
+  openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out "$T/k2.pem" 2>/dev/null
+  ! sh "$ROOT/tools/open_report.sh" open "$T/report.enc" --key "$T/k2.pem" --out "$T/opened4" 2>/dev/null || { echo "FAIL: open_report: another key opened it"; exit 1; }
+  echo "ok - report: another key cannot open it"
+  echo UPDATER_CORE_TEST_PASS; exit 0
 fi
 exit 1

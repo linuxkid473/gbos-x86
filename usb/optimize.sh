@@ -5,33 +5,11 @@
 sleep 4
 
 # ==============================================================================
-# 1. HARDWARE & CPU PERFORMANCE
+# 1. LOGGING
 # ==============================================================================
-# Set CPU governor to maximum performance to prevent throttling on software rendering
-for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
-    echo performance > "$g" 2>/dev/null
-done
-for g in /sys/devices/system/cpu/cpu*/cpufreq/energy_performance_preference; do
-    echo performance > "$g" 2>/dev/null
-done
-
-# Disable USB autosuspend on mice/keyboards so there is no wake latency
-for d in /sys/bus/usb/devices/*/power/control; do
-    echo on > "$d" 2>/dev/null
-done
-
-# Ensure all cpusets are valid for the actual online CPU count (e.g. 0-3 on a 4-thread CPU)
-# Google's powerhint assumes 8 cores (4-7) which fails with EINVAL and starves background tasks
-NUM_CPUS=$(nproc 2>/dev/null || echo 4)
-VALID_CPUS="0-$((NUM_CPUS - 1))"
-for cs in /dev/cpuset/*/cpus /dev/cpuset/cpus; do
-    echo "$VALID_CPUS" > "$cs" 2>/dev/null
-done
-setprop vendor.sys_tuner.disable_cpuset_config true
-
-# Stop OEM proprietary touchpad inhibitor if it is spinning in a 1-second busy loop
-stop touchpad-inhibitor 2>/dev/null
-
+# Left out on purpose (2026-11-25, first time this script is shipped; it had never run on hardware): forcing the
+# performance governor/EPP (battery, heat), USB autosuspend off, rewriting every cpuset to all CPUs, and
+# "stop touchpad-inhibitor" (hook.sh: it must keep running, it inhibits the touchpad when the keyboard is folded).
 # Suppress drmhwc 60 FPS gamma log spam that causes SurfaceFlinger frame pacing jitter
 setprop log.tag.drmhwc WARN
 setprop persist.log.tag.drmhwc WARN
@@ -60,24 +38,15 @@ elif [ "$(getprop persist.gbos.anim_restored)" != 1 ]; then
 fi
 
 # ==============================================================================
-# 3. DISABLE SWAP (Protects storage from wear, latency spikes, and stalls)
+# 3. SWAP: left alone. Google's zram swap and vm sysctls stay; turning zram off would mean more lmkd kills on 8 GB.
 # ==============================================================================
-swapoff -a 2>/dev/null
-if [ -e /sys/block/zram0/reset ]; then
-    echo 1 > /sys/block/zram0/reset 2>/dev/null
-fi
-rm -rf /data/per_boot/zram_swap /data/vendor/swap 2>/dev/null
-
-sysctl -w vm.swappiness=0 2>/dev/null
-sysctl -w vm.dirty_background_ratio=5 2>/dev/null
-sysctl -w vm.dirty_ratio=10 2>/dev/null
-sysctl -w vm.vfs_cache_pressure=100 2>/dev/null
 
 # ==============================================================================
 # 4. OPTIMIZE HEADLESS USER 0 (Frees 2.5 - 3.0 GB of RAM)
 # User 0 is headless (system only); User 10 is the interactive human user.
 # Disable duplicate client apps & Google services in User 0 ONLY.
 # User 10 remains 100% untouched so the user can run all apps normally.
+# NOT TalkBack: gbos_talkback (ACCESSIBILITY=talkback) turns it on in user 0 too.
 # NOT com.android.vending: Play Store in user 10 binds its MultiUserCoordinatorService in user 0 before every download, and with
 # the user-0 copy disabled every update and "system services" update stayed "Pending" (HANDOFF.md 2026-11-17).
 # ==============================================================================
@@ -94,7 +63,6 @@ com.google.android.retaildemo
 com.google.android.federatedcompute
 com.google.android.ondevicepersonalization.services
 com.google.android.aicore
-com.google.android.marvin.talkback
 com.google.android.googlequicksearchbox
 com.android.chrome
 "

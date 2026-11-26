@@ -25,6 +25,12 @@ check() { # tool, items it gets elsewhere
     grep -Eq "(^|[ \"])$i([ \";]|$)" "$ROOT/$tool" || { echo "FAIL: $tool does not copy $i (usb/install.sh does)"; fail=1; }
   done
 }
+# Everything hook.sh runs or reads from /postinstall/gbos/ must be in those lists (optimize.sh was in none: its
+# gbos_optimize service exited 127 on every boot, 2026-11-25). logs/ is made at boot.
+for i in $(grep -o '/postinstall/gbos/[A-Za-z0-9_.-]*' "$ROOT/usb/hook.sh" | sed 's#.*/##' | sort -u); do
+  [ "$i" = logs ] && continue
+  case " $FILES $DIRS " in *" $i "*) ;; *) echo "FAIL: hook.sh uses /postinstall/gbos/$i but usb/install.sh does not copy it"; fail=1;; esac
+done
 check tools/make_gbos86_image.sh "super.img super.layout sensors"
 check tools/install_dualboot.sh "super.img super.layout"
 check tools/deploy_stick.sh "super.img super.layout bootdisk.img firmware modules sensors"

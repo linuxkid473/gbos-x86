@@ -24,9 +24,10 @@ final class Updater {
 
     // ------------------------------------------------------------------------------------------------ the laptop
     static final class Info {
-        String set = "none", commit = "unknown", superSha = "", pub = "none", pending = "none", inbox = "", hook = "", last = "";
+        String set = "none", commit = "unknown", superSha = "", pub = "none", reportPub = "none", pending = "none", inbox = "", hook = "", last = "";
         long seq, googleBuild, freeKb = -1, logsKb;
         boolean hasKey() { return pub.matches("[0-9A-F]{768}"); }
+        boolean hasReportKey() { return reportPub.matches("[0-9A-F]{768}"); }
     }
 
     static Info info(Context c) throws Exception {
@@ -38,6 +39,7 @@ final class Updater {
         i.commit = m.getOrDefault("commit", "unknown");
         i.superSha = m.getOrDefault("super", "");
         i.pub = m.getOrDefault("pub", "none");
+        i.reportPub = m.getOrDefault("report_pub", "none");
         i.pending = m.getOrDefault("pending", "none");
         i.inbox = m.getOrDefault("inbox", "").trim();
         i.hook = m.getOrDefault("hook", "");
