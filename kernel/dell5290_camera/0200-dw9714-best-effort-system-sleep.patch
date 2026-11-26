@@ -1,0 +1,56 @@
+--- a/drivers/media/i2c/dw9714.c
++++ b/drivers/media/i2c/dw9714.c
+@@ -318,8 +318,52 @@ static const struct of_device_id dw9714_of_table[] = {
+ };
+ MODULE_DEVICE_TABLE(of, dw9714_of_table);
+ 
++/*
++ * Runtime PM should keep reporting real failures to camera users.  System
++ * sleep is different: on some ACPI platforms the lens can already be
++ * unreachable when system suspend/resume walks devices.  Failing suspend for
++ * a best-effort lens park/restore operation leaves the whole machine unable
++ * to sleep.  Power the VCM down/up when possible, but do not abort system
++ * sleep if the I2C/regulator path is not usable.
++ */
++static int __maybe_unused dw9714_vcm_system_suspend(struct device *dev)
++{
++	struct i2c_client *client = to_i2c_client(dev);
++	struct v4l2_subdev *sd = i2c_get_clientdata(client);
++	struct dw9714_device *dw9714_dev = sd_to_dw9714_vcm(sd);
++	int ret;
++
++	if (pm_runtime_suspended(&client->dev))
++		return 0;
++
++	ret = dw9714_power_down(dw9714_dev);
++	if (ret)
++		dev_warn(dev, "Ignoring power down failure during system suspend: %d\n",
++			 ret);
++
++	return 0;
++}
++
++static int __maybe_unused dw9714_vcm_system_resume(struct device *dev)
++{
++	struct i2c_client *client = to_i2c_client(dev);
++	struct v4l2_subdev *sd = i2c_get_clientdata(client);
++	struct dw9714_device *dw9714_dev = sd_to_dw9714_vcm(sd);
++	int ret;
++
++	if (pm_runtime_suspended(&client->dev))
++		return 0;
++
++	ret = dw9714_power_up(dw9714_dev);
++	if (ret)
++		dev_warn(dev, "Ignoring power up failure during system resume: %d\n",
++			 ret);
++
++	return 0;
++}
++
+ static const struct dev_pm_ops dw9714_pm_ops = {
+-	SET_SYSTEM_SLEEP_PM_OPS(dw9714_vcm_suspend, dw9714_vcm_resume)
++	SET_SYSTEM_SLEEP_PM_OPS(dw9714_vcm_system_suspend, dw9714_vcm_system_resume)
+ 	SET_RUNTIME_PM_OPS(dw9714_vcm_suspend, dw9714_vcm_resume, NULL)
+ };
+ 

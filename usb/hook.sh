@@ -831,6 +831,17 @@ fi
   else
     SURFACESTART="# gbos: no DMI-approved camera bridge or Surface sleep guard"
   fi
+  if grep -qx 'Latitude 7320 Detachable' /sys/class/dmi/id/product_name 2>/dev/null; then
+    AUTOROTATESTART=
+  else AUTOROTATESTART="start gbos_autorotate"; fi
+  CAMSTART=
+  for d in /sys/bus/pci/devices/*; do
+    [ "$(cat $d/vendor 2>/dev/null):$(cat $d/device 2>/dev/null)" = 0x8086:0x9d32 ] || continue
+    CAMSTART="start gbos_ipu3cam"
+    SURFACESTART=$(echo "$SURFACESTART" | sed '/^ *start gbos_camera$/d')
+    log "hook: IPU3 CIO2 found (${d##*/}): camera bridge gbos_ipu3cam queued"
+    break
+  done
   IDCRC=
   if [ "${TOUCHPAD_FLICK:-1}" != 0 ]; then
     for tp in $(gbos_touchpads); do
@@ -1029,11 +1040,7 @@ $GBOS_DRM_DEBUG_STOP
 $GBOS_KVM_TRACE_STOP
     # Speakup synth hardware probe causes kernel panic if unassigned
     write /sys/accessibility/speakup/synth none
-    # Maximize CPU frequency governor permanently
-    write /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor performance
-    write /sys/devices/system/cpu/cpu1/cpufreq/scaling_governor performance
-    write /sys/devices/system/cpu/cpu2/cpufreq/scaling_governor performance
-    write /sys/devices/system/cpu/cpu3/cpufreq/scaling_governor performance
+    start gbos_power
     $TRUSTYSTOP
     start gbos_skip_setup
     start gbos_optimize
@@ -1047,6 +1054,9 @@ $GBOS_CAMERA_CAPTURE_START
     start gbos_talkback
     start gbos_iptsd
     $SURFACESTART
+    $CAMSTART
+    start gbos_tabletdiag
+    $AUTOROTATESTART
     start gbos_wmsize
 $GBOS_DEBUG_DIAGNOSTIC_START
     start gbos_ksu
@@ -1155,6 +1165,34 @@ service gbos_iptsd /system/bin/sh /postinstall/gbos/surface/iptsd-run.sh $N
 service gbos_camera /system/bin/sh /postinstall/gbos/surface/surface-camera.sh $N
     user root
     group root
+    seclabel u:r:shell:s0
+    oneshot
+    disabled
+
+service gbos_power /system/bin/sh /postinstall/gbos/device/power.sh $N ${GPU_SW:-0}
+    user root
+    group root
+    seclabel u:r:shell:s0
+    oneshot
+    disabled
+
+service gbos_ipu3cam /system/bin/sh /postinstall/gbos/device/ipu3-camera.sh $N
+    user root
+    group root camera
+    seclabel u:r:shell:s0
+    oneshot
+    disabled
+
+service gbos_autorotate /system/bin/sh /postinstall/gbos/device/autorotate.sh $N
+    user root
+    group root input
+    seclabel u:r:shell:s0
+    oneshot
+    disabled
+
+service gbos_tabletdiag /system/bin/sh -c "sleep 75; sh /postinstall/gbos/device/diag.sh $N"
+    user root
+    group root input camera
     seclabel u:r:shell:s0
     oneshot
     disabled

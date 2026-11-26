@@ -104,7 +104,7 @@ bright_line=$(grep -n '^gbos_enable_latitude7320_brightness$' "$ROOT/usb/hook.sh
   fail "hook.sh must call the brightness step after the sensor HAL step"
 grep -q 'for d in [^;]* display; do' "$ROOT/tools/deploy_stick.sh" || fail "deploy_stick.sh does not copy display/"
 grep -q 'for d in [^;]* display; do cp -R' "$ROOT/tools/make_gbos86_image.sh" || fail "make_gbos86_image.sh does not copy display/"
-grep -q '^for d in sensors camera thermal display; do' "$ROOT/usb/install.sh" || fail "install.sh does not copy display/"
+grep -q '^for d in sensors camera thermal display device; do' "$ROOT/usb/install.sh" || fail "install.sh does not copy display/"
 grep -q '^ADAPTIVE_BRIGHTNESS=1$' "$ROOT/usb/gbos.cfg" || fail "gbos.cfg does not document ADAPTIVE_BRIGHTNESS"
 
 log() { printf '%s\n' "$*" >> "$T/log"; }

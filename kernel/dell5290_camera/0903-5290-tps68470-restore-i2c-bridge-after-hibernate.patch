@@ -1,0 +1,64 @@
+--- a/drivers/platform/x86/intel/int3472/tps68470.c
++++ b/drivers/platform/x86/intel/int3472/tps68470.c
+@@ -423,10 +423,60 @@ static int skl_int3472_tps68470_resume(struct device *dev)
+ 	return 0;
+ }
+ 
++#define DELL5290_VSIO_SEL_1800600UV	52
++
++static int dell5290_tps68470_restore_i2c_bridge(struct device *dev,
++						struct regmap *regmap)
++{
++	unsigned int val;
++	int ret;
++
++	if (!dmi_check_system(dell5290_gnvs_dmi))
++		return 0;
++
++	/*
++	 * On the Latitude 5290 2-in-1, both OV sensors and the DW9714 VCM sit
++	 * behind the TPS68470 secondary I2C path.  After S4 the PMIC is still
++	 * reachable, but the downstream devices can return -EIO unless the
++	 * VSIO/S_I2C state is replayed.
++	 */
++	ret = regmap_write(regmap, TPS68470_REG_VSIOVAL,
++			   DELL5290_VSIO_SEL_1800600UV);
++	if (ret)
++		return dev_err_probe(dev, ret,
++				     "Failed to restore TPS68470 VSIO voltage\n");
++
++	ret = regmap_update_bits(regmap, TPS68470_REG_S_I2C_CTL,
++				 TPS68470_S_I2C_CTL_EN_MASK,
++				 TPS68470_S_I2C_CTL_EN_MASK);
++	if (ret)
++		return dev_err_probe(dev, ret,
++				     "Failed to restore TPS68470 secondary I2C bridge\n");
++
++	ret = regmap_read(regmap, TPS68470_REG_S_I2C_CTL, &val);
++	if (ret)
++		return dev_err_probe(dev, ret,
++				     "Failed to read TPS68470 secondary I2C bridge\n");
++
++	dev_info(dev, "Dell 5290 2-in-1 restored TPS68470 S_I2C_CTL=0x%02x after hibernate\n",
++		 val);
++
++	return 0;
++}
++
++static int skl_int3472_tps68470_restore(struct device *dev)
++{
++	struct i2c_client *client = to_i2c_client(dev);
++	struct regmap *regmap = i2c_get_clientdata(client);
++
++	dell5290_gnvs_fix();
++	return dell5290_tps68470_restore_i2c_bridge(dev, regmap);
++}
++
+ static const struct dev_pm_ops skl_int3472_tps68470_pm_ops = {
+ 	.resume = skl_int3472_tps68470_resume,
+ 	.thaw = skl_int3472_tps68470_resume,
+-	.restore = skl_int3472_tps68470_resume,
++	.restore = skl_int3472_tps68470_restore,
+ };
+ 
+ static const struct acpi_device_id int3472_device_id[] = {

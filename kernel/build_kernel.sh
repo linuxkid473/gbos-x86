@@ -26,9 +26,13 @@ set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 JOBS=${2:-$(nproc)}
 VOL=${GBOS_KERNEL_VOLUME:-gbos-ksrc}
-C=${CLANG_DIR:-/build/inputs/clang-r584948c}
+C=${CLANG_DIR:-$(docker run --rm --platform linux/amd64 -v "$VOL":/build gbos-kbuild sh -c 'for c in /build/inputs/clang-r584948c /build/inputs/clang-r584948b; do [ -x $c/bin/clang-22 ] && { echo $c; exit; }; done')}
+[ -n "$C" ] || { echo "no AOSP clang in the $VOL volume: run kernel/fetch_kernel_sources.sh"; exit 1; }
+echo "clang: $C"
 
 # The base config: the one embedded in the shipped kernel, unless one is given.
+[ -x "$ROOT/kernel/out/busybox" ] || sh "$ROOT/tools/fetch_busybox.sh"
+
 BASE=${1:-}
 W=$(mktemp -d "${TMPDIR:-/tmp}/kcfg.XXXXXX"); trap 'rm -rf "$W"' EXIT
 if [ -z "$BASE" ]; then
@@ -75,6 +79,8 @@ done
 python3 \$P/sdw_sl7.py /build/src > /dev/null
 python3 \$P/sdw_link_skip.py /build/src > /dev/null
 python3 /host/kernel/isa_emu_patch/camera_7320.py /build/src
+command -v patch >/dev/null || { apt-get update -qq && apt-get install -y -qq patch > /dev/null; }
+P=/host/kernel/dell5290_camera sh /host/kernel/dell5290_camera/apply.sh
 P=/host/kernel/kernelsu sh /host/kernel/kernelsu/apply.sh | tail -2
 P=/host/kernel/surface sh /host/kernel/surface/apply.sh
 
@@ -98,6 +104,11 @@ sh /host/kernel/make_stage0_initramfs.sh /build/modroot_all /build/out/gbos_stag
 /build/src/scripts/config --file /build/out/.config --set-str INITRAMFS_SOURCE /build/out/gbos_stage0.cpio
 make -C /build/src O=/build/out ARCH=x86_64 LLVM=$C/bin/ CC=$C/bin/clang-22 olddefconfig > /dev/null
 make -C /build/src O=/build/out ARCH=x86_64 LLVM=$C/bin/ CC=$C/bin/clang-22 -j$JOBS bzImage
+
+rm -rf /build/v4l2lb /build/v4l2lb_root && cp -a /host/kernel/v4l2loopback /build/v4l2lb
+make -C /build/src O=/build/out ARCH=x86_64 LLVM=$C/bin/ CC=$C/bin/clang-22 M=/build/v4l2lb modules > /dev/null
+make -C /build/src O=/build/out ARCH=x86_64 LLVM=$C/bin/ CC=$C/bin/clang-22 M=/build/v4l2lb \\
+  modules_install INSTALL_MOD_PATH=/build/v4l2lb_root INSTALL_MOD_STRIP=1 > /dev/null
 echo "BUILD OK"
 EOF
 
@@ -123,6 +134,9 @@ for m in btusb btintel btrtl; do
   f=\$(find /build/out/drivers/bluetooth -name "\$m.ko" | head -1)
   [ -n "\$f" ] && cp "\$f" /host/usb/kmod/\$m.ko
 done
+f=\$(find /build/v4l2lb_root -name v4l2loopback.ko | head -1)
+[ -n "\$f" ] && cp "\$f" /host/usb/kmod/v4l2loopback.ko || echo "WARNING: v4l2loopback.ko was not built (cameras on IPU3/IPU7 need it)" >&2
+chown $(id -u):$(id -g) /host/usb/kmod/*.ko
 EOF
 echo "kernel: usb/out/BOOTX64.EFI ($(wc -c < "$ROOT/usb/out/BOOTX64.EFI" | tr -d " ") bytes)"
 echo "modules: $(find "$ROOT/usb/modules" -name '*.ko' | wc -l) in usb/modules/"

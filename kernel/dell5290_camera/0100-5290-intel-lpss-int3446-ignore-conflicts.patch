@@ -1,0 +1,56 @@
+--- a/drivers/mfd/intel-lpss-acpi.c
++++ b/drivers/mfd/intel-lpss-acpi.c
+@@ -9,6 +9,8 @@
+  */
+ 
+ #include <linux/device.h>
++#include <linux/acpi.h>
++#include <linux/dmi.h>
+ #include <linux/gfp_types.h>
+ #include <linux/ioport.h>
+ #include <linux/mod_devicetable.h>
+@@ -52,6 +53,12 @@
+ 	.swnode = &spt_i2c_node,
+ };
+ 
++static const struct intel_lpss_platform_info spt_i2c_info_ignore_conflicts = {
++	.clk_rate = 120000000,
++	.swnode = &spt_i2c_node,
++	.quirks = QUIRK_IGNORE_RESOURCE_CONFLICTS,
++};
++
+ static const struct property_entry uart_properties[] = {
+ 	PROPERTY_ENTRY_U32("reg-io-width", 4),
+ 	PROPERTY_ENTRY_U32("reg-shift", 2),
+@@ -172,6 +179,16 @@
+ };
+ MODULE_DEVICE_TABLE(acpi, intel_lpss_acpi_ids);
+ 
++static const struct dmi_system_id dell5290_lpss_dmi[] = {
++	{
++		.matches = {
++			DMI_EXACT_MATCH(DMI_SYS_VENDOR, "Dell Inc."),
++			DMI_EXACT_MATCH(DMI_PRODUCT_NAME, "Latitude 5290 2-in-1"),
++		},
++	},
++	{ }
++};
++
+ static int intel_lpss_acpi_probe(struct platform_device *pdev)
+ {
+ 	const struct intel_lpss_platform_info *data;
+@@ -182,6 +199,14 @@
+ 	if (!data)
+ 		return -ENODEV;
+ 
++	if (data == &spt_i2c_info &&
++	    acpi_dev_hid_uid_match(ACPI_COMPANION(&pdev->dev), "INT3446", NULL) &&
++	    dmi_check_system(dell5290_lpss_dmi)) {
++		dev_info(&pdev->dev,
++			 "Dell 5290 2-in-1: applying IGNORE_RESOURCE_CONFLICTS for I2C4\n");
++		data = &spt_i2c_info_ignore_conflicts;
++	}
++
+ 	info = devm_kmemdup(&pdev->dev, data, sizeof(*info), GFP_KERNEL);
+ 	if (!info)
+ 		return -ENOMEM;

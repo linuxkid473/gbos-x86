@@ -1,0 +1,188 @@
+--- a/drivers/platform/x86/intel/int3472/tps68470.c
++++ b/drivers/platform/x86/intel/int3472/tps68470.c
+@@ -2,6 +2,7 @@
+ /* Author: Dan Scally <djrscally@gmail.com> */
+ 
+ #include <linux/acpi.h>
++#include <linux/dmi.h>
+ #include <linux/i2c.h>
+ #include <linux/kernel.h>
+ #include <linux/mfd/core.h>
+@@ -11,6 +12,7 @@
+ #include <linux/platform_data/x86/int3472.h>
+ #include <linux/regmap.h>
+ #include <linux/string.h>
++#include <linux/unaligned.h>
+ 
+ #include "tps68470.h"
+ 
+@@ -140,6 +142,160 @@
+ 	return n_consumers;
+ }
+ 
++#define DELL5290_C0TP_OFF	0x43A
++#define DELL5290_L0CL_OFF	0x4F7
++#define DELL5290_L1CL_OFF	0x549
++#define DELL5290_GNVS_MIN_SIZE	(DELL5290_L1CL_OFF + 1)
++
++#define AML_ZERO_OP		0x00
++#define AML_ONE_OP		0x01
++#define AML_BYTE_PREFIX		0x0A
++#define AML_WORD_PREFIX		0x0B
++#define AML_DWORD_PREFIX	0x0C
++#define AML_QWORD_PREFIX	0x0E
++
++static int aml_parse_int(const u8 *p, const u8 *end, u64 *val)
++{
++	if (p >= end)
++		return 0;
++
++	switch (*p) {
++	case AML_ZERO_OP:
++		*val = 0;
++		return 1;
++	case AML_ONE_OP:
++		*val = 1;
++		return 1;
++	case AML_BYTE_PREFIX:
++		if (p + 2 > end)
++			return 0;
++		*val = p[1];
++		return 2;
++	case AML_WORD_PREFIX:
++		if (p + 3 > end)
++			return 0;
++		*val = get_unaligned_le16(p + 1);
++		return 3;
++	case AML_DWORD_PREFIX:
++		if (p + 5 > end)
++			return 0;
++		*val = get_unaligned_le32(p + 1);
++		return 5;
++	case AML_QWORD_PREFIX:
++		if (p + 9 > end)
++			return 0;
++		*val = get_unaligned_le64(p + 1);
++		return 9;
++	default:
++		return 0;
++	}
++}
++
++static bool dell5290_gnvs_from_table(const struct acpi_table_header *tbl,
++				     phys_addr_t *addr, u32 *size)
++{
++	static const u8 sig[] = { 0x5B, 0x80, 'G', 'N', 'V', 'S', 0x00 };
++	const u8 *aml = (const u8 *)tbl + sizeof(*tbl);
++	const u8 *end = (const u8 *)tbl + tbl->length;
++	const u8 *p;
++
++	for (p = aml; p + sizeof(sig) < end; p++) {
++		u64 region_addr, region_size;
++		int consumed;
++
++		if (memcmp(p, sig, sizeof(sig)) != 0)
++			continue;
++
++		p += sizeof(sig);
++		consumed = aml_parse_int(p, end, &region_addr);
++		if (!consumed || !region_addr)
++			continue;
++
++		p += consumed;
++		consumed = aml_parse_int(p, end, &region_size);
++		if (!consumed || region_size < DELL5290_GNVS_MIN_SIZE)
++			continue;
++
++		*addr = (phys_addr_t)region_addr;
++		*size = (u32)region_size;
++		return true;
++	}
++
++	return false;
++}
++
++static bool dell5290_gnvs_find(phys_addr_t *addr, u32 *size)
++{
++	struct acpi_table_header *tbl;
++	u32 i;
++
++	if (ACPI_SUCCESS(acpi_get_table(ACPI_SIG_DSDT, 1, &tbl))) {
++		bool found = dell5290_gnvs_from_table(tbl, addr, size);
++
++		acpi_put_table(tbl);
++		if (found)
++			return true;
++	}
++
++	for (i = 1; i <= 32; i++) {
++		bool found;
++
++		if (ACPI_FAILURE(acpi_get_table(ACPI_SIG_SSDT, i, &tbl)))
++			break;
++
++		found = dell5290_gnvs_from_table(tbl, addr, size);
++		acpi_put_table(tbl);
++		if (found)
++			return true;
++	}
++
++	return false;
++}
++
++static const struct dmi_system_id dell5290_gnvs_dmi[] = {
++	{
++		.matches = {
++			DMI_EXACT_MATCH(DMI_SYS_VENDOR, "Dell Inc."),
++			DMI_EXACT_MATCH(DMI_PRODUCT_NAME, "Latitude 5290 2-in-1"),
++		},
++	},
++	{ }
++};
++
++static void dell5290_gnvs_fix(void)
++{
++	phys_addr_t gnvs_addr;
++	u32 gnvs_size;
++	void *gnvs;
++
++	if (!dmi_check_system(dell5290_gnvs_dmi))
++		return;
++
++	if (!dell5290_gnvs_find(&gnvs_addr, &gnvs_size)) {
++		pr_err("int3472-tps68470: Dell 5290 2-in-1: GNVS OperationRegion not found in DSDT/SSDTs\n");
++		return;
++	}
++
++	gnvs = acpi_os_map_memory(gnvs_addr, gnvs_size);
++	if (!gnvs) {
++		pr_err("int3472-tps68470: Dell 5290 2-in-1: failed to map GNVS at %pa\n",
++		       &gnvs_addr);
++		return;
++	}
++
++	pr_info("int3472-tps68470: Dell 5290 2-in-1 GNVS fix at %pa: C0TP=0x%02x L0CL=0x%02x L1CL=0x%02x -> 0x02\n",
++		&gnvs_addr,
++		*(u8 *)(gnvs + DELL5290_C0TP_OFF),
++		*(u8 *)(gnvs + DELL5290_L0CL_OFF),
++		*(u8 *)(gnvs + DELL5290_L1CL_OFF));
++
++	*(u8 *)(gnvs + DELL5290_C0TP_OFF) = 0x02;
++	*(u8 *)(gnvs + DELL5290_L0CL_OFF) = 0x02;
++	*(u8 *)(gnvs + DELL5290_L1CL_OFF) = 0x02;
++
++	acpi_os_unmap_memory(gnvs, gnvs_size);
++}
++
+ static int skl_int3472_tps68470_probe(struct i2c_client *client)
+ {
+ 	struct acpi_device *adev = ACPI_COMPANION(&client->dev);
+@@ -155,6 +311,8 @@
+ 	if (!adev)
+ 		return -ENODEV;
+ 
++	dell5290_gnvs_fix();
++
+ 	board_data = int3472_tps68470_get_board_data(dev_name(&client->dev));
+ 	if (board_data && board_data->n_clk_consumers) {
+ 		clk_pdata = devm_kzalloc(&client->dev,

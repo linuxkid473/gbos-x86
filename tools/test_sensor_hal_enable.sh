@@ -27,7 +27,7 @@ fi
 for f in "$ROOT/tools/make_gbos86_image.sh" "$ROOT/tools/deploy_stick.sh"; do
   grep -Eq '^for d in .* display; do' "$f" || { echo "FAIL: $f does not ship display/"; exit 1; }
 done
-grep -Fq 'for d in sensors camera thermal display;' "$ROOT/usb/install.sh"
+grep -Fq 'for d in sensors camera thermal display device;' "$ROOT/usb/install.sh"
 grep -Fq '_sensor_policy_source=$G/display/$_sensor_policy_name' "$ROOT/usb/hook.sh"
 sh "$ROOT/tools/build_rotation_policy_overlay.sh" --check > "$T/rro-check" ||
   { cat "$T/rro-check"; echo "FAIL: committed rotation overlay is unsigned or differs from its sources"; exit 1; }

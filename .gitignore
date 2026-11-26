@@ -87,3 +87,5 @@ ov5678_lsc.txt
 # signed with the same key). Whether release builds are committed is the maintainer's call.
 /usb/gbos86-updater.apk
 /usb/gbos86-updater.apk.idsig
+/usb/device/ipu3-webcam
+/usb/device/gbos-autorotate
