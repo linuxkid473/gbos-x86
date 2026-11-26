@@ -1685,6 +1685,13 @@ if [ -f $G/audio/gbos-hda-pch/audio_config.xml ]; then
     ASRC=/tmp/gbos-audio/$AC; ADEF=/tmp/gbos-audio/audio_default.xml
   else
     ASRC=$G/audio/gbos-hda-pch; ADEF=$G/audio/audio_default.xml
+    # The template's Master volume 87 is the usual Realtek maximum. A codec with another step count (ALC298: 127, issues 31/32)
+    # gets a copy with its own maxima (usb/audio/volmax.sh); the shipped files stay as they are.
+    CNO=$(echo "$CARD" | sed -n 's/^ *\([0-9][0-9]*\) \[.*/\1/p')
+    if [ -n "$CNO" ] && [ -f $G/audio/volmax.sh ] && rm -rf /tmp/gbos-audio/$AC && cp -r $ASRC /tmp/gbos-audio/$AC; then
+      VMSG=$(sh $G/audio/volmax.sh /proc/asound/card$CNO /tmp/gbos-audio/$AC/mixer_paths.xml) && ASRC=/tmp/gbos-audio/$AC
+      log "hook: audio $VMSG"
+    fi
   fi
   mkdir -p /tmp/vaudio && mount --bind $A /tmp/vaudio && mount -t tmpfs -o mode=0755 tmpfs $A \
     && for f in /tmp/vaudio/*; do n=${f##*/}; { [ -d $f ] && mkdir -p $A/$n || touch $A/$n; } && mount --bind $f $A/$n; done \
