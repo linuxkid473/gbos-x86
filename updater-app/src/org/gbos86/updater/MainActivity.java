@@ -48,8 +48,9 @@ public class MainActivity extends Activity {
     private TextView laptopView, integrityView, integrityBadge, folderView, folderSummaryView;
     private TextView googleTitle, googleDetail, googleStatus, reportStatus;
     private android.widget.EditText reportText;
-    private Button reportButton, reportIssueButton;
+    private Button reportButton, reportIssueButton, reportShareButton;
     private String reportIssueUrl;
+    private Report.Made reportMade;
     private Button googleCheckButton, googleInstallButton;
     private long finishingSince;
     private Button checkButton, installButton, stopButton, rebootButton;
@@ -257,9 +258,15 @@ public class MainActivity extends Activity {
             if (reportIssueUrl != null) startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(reportIssueUrl)));
         });
         reportIssueButton.setVisibility(View.GONE);
+        reportShareButton = M3.tonalButton(this, "Share", v -> {
+            if (reportMade != null && reportMade.uri != null) startActivity(Report.shareIntent(reportMade));
+        });
+        reportShareButton.setVisibility(View.GONE);
         reportActions.addView(reportButton);
         addMarginEnd(reportButton, 10);
         reportActions.addView(reportIssueButton);
+        addMarginEnd(reportIssueButton, 10);
+        reportActions.addView(reportShareButton);
         reportCard.addView(reportActions);
 
         // ---------------------------------------------------------------- Card 3: Install from Folder
@@ -628,6 +635,7 @@ public class MainActivity extends Activity {
         }
         busy = true;
         reportIssueButton.setVisibility(View.GONE);
+        reportShareButton.setVisibility(View.GONE);
         reportStatus.setText("Collecting the logs (up to a minute) ...");
         new Thread(() -> {
             String msg;
@@ -637,8 +645,9 @@ public class MainActivity extends Activity {
                 info = i;
                 made = Report.make(this, i, text, body -> ui.post(() -> reportStatus.setText(body)));
                 msg = "Saved Download/gbOS86/" + made.fileName + " (" + Util.size(made.size) + ", encrypted).\n"
-                        + (made.issueUrl != null ? "Tap Open GitHub issue, sign in, and attach this file before you submit."
-                                : "No update source is set (Settings), so there is no issue page to open: send the file to the maintainer.");
+                        + (made.issueUrl != null ? "Tap Open GitHub issue, sign in, and attach this file before you submit, or Share it "
+                                + "with any app (e-mail, chat, Drive)." : "No update source is set (Settings), so there is no issue page: "
+                                + "Share it with the maintainer.");
             } catch (Exception e) {
                 msg = "The report failed: " + e.getMessage();
             } finally {
@@ -651,6 +660,10 @@ public class MainActivity extends Activity {
                 if (md != null && md.issueUrl != null) {
                     reportIssueUrl = md.issueUrl;
                     reportIssueButton.setVisibility(View.VISIBLE);
+                }
+                if (md != null && md.uri != null) {
+                    reportMade = md;
+                    reportShareButton.setVisibility(View.VISIBLE);
                 }
             });
         }).start();
