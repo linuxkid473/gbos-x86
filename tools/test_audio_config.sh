@@ -205,6 +205,49 @@ chk "acer: headphone jack = Front Headphone" "$C" "<JackDev>HD-Audio Generic Fro
 nochk "acer: no jack device that does not exist" "$C" "Headphone Mic</JackDev>"
 chk "acer: volumes set" "$W/out-acer/gbos-gen/mixer_paths.xml" 'name="Speaker Playback Volume" value="87 87"'
 
+# ---- 3c. Lenovo Yoga Pro 7 14AKP10 (Ryzen AI 7 350, issue 39): Radeon HDMI card 0, ALC287 card 1 (speaker, jack), and the built-in
+# DMICs on the ACP as their own ASoC card (acp-pdm-mach, id acppdmmach, no HDA codec). Internal mic must use the ACP card, the jack
+# mic stays on the ALC287. A 4th card (HDA, with a codec) that happens to have a "DMIC" capture PCM must not be picked.
+D=$(mk acp)
+cat > $D/cards <<'EOF'
+ 0 [Generic        ]: HDA-Intel - HD-Audio Generic
+                      HD-Audio Generic at 0x902c8000 irq 47
+ 1 [Generic_1      ]: HDA-Intel - HD-Audio Generic
+                      HD-Audio Generic at 0x902c0000 irq 48
+ 2 [Other          ]: HDA-Intel - Other HDA
+ 3 [acppdmmach     ]: acp-pdm-mach - acp-pdm-mach
+                      LENOVO-83KG-YogaPro714AKP10-LNVNB161216
+EOF
+cat > $D/pcm <<'EOF'
+00-03: HDMI 0 : HDMI 0 : playback 1
+01-00: ALC287 Analog : ALC287 Analog : playback 1 : capture 1
+02-00: DMIC Fake : DMIC Fake : capture 1
+03-00: DMIC capture dmic-hifi-0 : DMIC capture dmic-hifi-0 : capture 1
+EOF
+for c in 0 1 2; do mkdir -p $D/card$c; echo "Codec: x" > "$D/card$c/codec#0"; done; mkdir -p $D/card3
+cat > $D/input <<'EOF'
+N: Name="HD-Audio Generic Mic"
+N: Name="HD-Audio Generic Headphone"
+EOF
+M=$(gen acp gbos-gen Generic_1 "HD-Audio Generic")
+C=$W/out-acp/gbos-gen/audio_config.xml
+wellformed "$C"
+python3 - "$C" > "$W/acp.py.out" 2>&1 <<'EOF'
+import sys, xml.etree.ElementTree as E
+h = E.parse(sys.argv[1]).getroot().find('HiFi')
+exp = {('Speaker','PlaybackPCM'): 'hw:Generic_1,0', ('InternalMic','CapturePCM'): 'hw:acppdmmach,0',
+       ('Mic','CapturePCM'): 'hw:Generic_1,0', ('Mic','JackDev'): 'HD-Audio Generic Mic'}
+bad = [f'{s}/{t}={h.find(s).findtext(t)!r} want {v!r}' for (s, t), v in exp.items() if h.find(s).findtext(t) != v]
+print('\n'.join(bad) or 'PYOK'); sys.exit(1 if bad else 0)
+EOF
+if [ $? = 0 ]; then ok "acp: internal mic = ACP DMIC card, speaker and jack mic on the ALC287"; else bad "acp mapping: $(cat $W/acp.py.out)"; fi
+case "$M" in *"internal-mic=acppdmmach,0"*) ok "acp: log line names the DMIC card";; *) bad "acp: log line: $M";; esac
+# without the ACP card the internal mic falls back to the ALC287's analog capture (as before)
+grep -v acppdmmach $D/cards > $D/cards.n && mv $D/cards.n $D/cards; grep -v '^03-' $D/pcm > $D/pcm.n && mv $D/pcm.n $D/pcm
+gen acp gbos-gen Generic_1 "HD-Audio Generic" >/dev/null
+chk "acp: no ACP card -> internal mic on analog capture" "$C" "<CapturePCM>hw:Generic_1,0</CapturePCM>"
+nochk "acp: no ACP card -> the HDA card's DMIC PCM is not used" "$C" "hw:Other"
+
 # ---- 4. SOF, combo jack, one HDMI, only DMIC16kHz ---------------------------------------------------------------------------
 gen sofcombo gbos-gen sofrt5682 sof-rt5682 >/dev/null
 C=$W/out-sofcombo/gbos-gen/audio_config.xml

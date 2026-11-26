@@ -155,11 +155,25 @@ _m('SND_SOC_SOF_PCI', 'SND_SOC_SOF_ACPI', 'SND_SOC_SOF_INTEL_COMMON', 'SND_SOC_S
    'SND_SOC_RT1318_SDW', 'SND_SOC_RT712_SDCA_SDW', 'SND_SOC_RT722_SDCA_SDW', 'SND_SOC_MAX98357A', 'SND_SOC_MAX98373_I2C',
    'SND_SOC_MAX98390', 'SND_SOC_CS42L42', 'SND_SOC_ES8336', 'SND_SOC_NAU8825', 'SND_SOC_DA7219', 'SND_SOC_RT1011',
    'SND_SOC_RT1015', 'SND_SOC_RT1015P', 'SND_SOC_TAS2562')
+# AMD built-in microphones: the DMICs hang off the audio coprocessor (ACP, PCI 1022:15e2), not the HDA codec, and register as their
+# own ASoC card next to the HDA one (issue 39, Ryzen AI 7 350 / ACP 7.x: "pci devices without a driver" listed 1022:15e2).
+# snd_acp_config (SND_AMD_ACP_CONFIG) decides per platform which driver takes the ACP:
+#   Renoir/Cezanne/Lucienne (rev 0x01):   snd_rn_pci_acp3x + snd_acp3x_rn (card "acp")
+#   Rembrandt/Phoenix (rev 0x6x):         snd_pci_acp6x + snd_acp6x_mach (card "acp6x", DMI quirk table)
+#   ACP 6.3 (rev 0x63), and ACP 7.x whose BIOS sets acp-audio-config-flag to 0: snd_pci_ps + snd_ps_mach (card "acp63")
+#   ACP 7.x (rev 0x70-0x72) without that ACPI property (FLAG_AMD_LEGACY_ONLY_DMIC): snd_acp_pci + snd_acp_legacy_mach ("acp-pdm-mach")
+# usb/audio/gen_config.sh points InternalMic at that card's DMIC PCM. SoundWire AMD (SOUNDWIRE_AMD) stays off: DMIC only.
+_m('SND_AMD_ACP_CONFIG', 'SND_SOC_AMD_RENOIR', 'SND_SOC_AMD_RENOIR_MACH', 'SND_SOC_AMD_ACP6x', 'SND_SOC_AMD_YC_MACH',
+   'SND_SOC_AMD_ACP63_TOPLEVEL', 'SND_SOC_AMD_PS', 'SND_SOC_AMD_PS_MACH',
+   'SND_SOC_AMD_ACP_COMMON', 'SND_SOC_AMD_ACP_PCI', 'SND_AMD_ASOC_RENOIR', 'SND_AMD_ASOC_REMBRANDT', 'SND_AMD_ASOC_ACP63',
+   'SND_AMD_ASOC_ACP70', 'SND_SOC_AMD_LEGACY_MACH')
 
 # These must come out exactly as requested after olddefconfig.
 REQUIRED = ['DRM_I915', 'TRIM_UNUSED_KSYMS', 'MODULE_SIG_PROTECT', 'ANDROID_BINDER_IPC', 'BLK_DEV_NVME',
             'KSU', 'VMD', 'IPU_BRIDGE', 'VIDEO_INTEL_IPU6', 'VIDEO_OV5675', 'VIDEO_OV8856', 'VIDEO_DW9714',
-            'INTEL_SKL_INT3472', 'GPIO_TPS68470', 'REGULATOR_TPS68470', 'COMMON_CLK_TPS68470']
+            'INTEL_SKL_INT3472', 'GPIO_TPS68470', 'REGULATOR_TPS68470', 'COMMON_CLK_TPS68470',
+            'SND_SOC_AMD_RENOIR_MACH', 'SND_SOC_AMD_YC_MACH', 'SND_SOC_AMD_PS', 'SND_SOC_AMD_PS_MACH',
+            'SND_SOC_AMD_ACP_PCI', 'SND_AMD_ASOC_ACP70', 'SND_SOC_AMD_LEGACY_MACH']
 
 
 def parse(text):
