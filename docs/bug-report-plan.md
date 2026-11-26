@@ -113,4 +113,6 @@ No new permission: the share sheet and MediaStore Downloads need none on Android
 2. **How much log:** current + previous boot (~2.5 MB) (`--boots`, default 2).
 3. **Redaction:** MAC, serial numbers, Wi-Fi names, account names, e-mail addresses (common TLDs only, so `name@com.android.x`
    package-style names stay readable).
-4. **Channel:** build on `latitude-7320-integration`, deliver to the laptop as a lab update (cherry-pick, lab key); main untouched.
+4. **Channel:** first built on `latitude-7320-integration` and tested on the laptop as a lab update. On main the app's update source,
+   and so the issue page, is `REPO` in `tools/release.conf` (the main repository, through `updater-app/build.sh`), and `usb/report.pub`
+   stays the placeholder until the main maintainer runs `tools/open_report.sh keygen`. The lab's report key is never committed here.
