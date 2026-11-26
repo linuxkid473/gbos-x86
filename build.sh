@@ -204,8 +204,12 @@ fetch() { # url dest sha
 }
 
 for c in python3 curl tar xz; do command -v $c >/dev/null 2>&1 || die "missing '$c'"; done
-if [ ! -x kernel/out/busybox ]; then
-  command -v docker >/dev/null 2>&1 || die "missing 'docker' (needed to extract busybox)"
+NEED_PORT_PATCHES=0
+if [ ! -f usb/patched/swcodec.libvpx.so ] || [ ! -f usb/patched/libdesktop_camera_common.cpu.so ]; then
+  NEED_PORT_PATCHES=1
+fi
+if [ ! -x kernel/out/busybox ] || [ "$NEED_PORT_PATCHES" = 1 ]; then
+  command -v docker >/dev/null 2>&1 || die "missing 'docker' (needed to extract busybox / generate local binary patches)"
   docker info >/dev/null 2>&1 || die "docker is installed but not running"
 fi
 
@@ -250,6 +254,13 @@ if ! have_parts; then
   python3 tools/fetch_google_parts.py lapis/recovery.zip lapis/parts $PARTS
   [ "${KEEP_ZIP:-0}" = 1 ] || rm -f lapis/recovery.zip
 else say "1/4 Google's OS image: already extracted"; fi
+
+if [ "$NEED_PORT_PATCHES" = 1 ]; then
+  if [ -f lapis/parts/system_a.img ] && [ -f lapis/parts/vendor_a.img ] && [ -f lapis/parts/system_ext_a.img ]; then
+    say "1b/4 generating Haswell/AVX2 & camera binary patches locally from Google's OS image"
+    sh tools/port_build.sh --write
+  fi
+fi
 
 if [ ! -x kernel/out/busybox ]; then say "2/4 busybox"; sh tools/fetch_busybox.sh; else say "2/4 busybox: present"; fi
 

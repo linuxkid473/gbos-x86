@@ -28,7 +28,7 @@ docker info >/dev/null 2>&1 || die "docker is installed but not running"
 docker volume create "$VOL" >/dev/null
 
 # --- 1. kernel source --------------------------------------------------------------
-if docker run --rm -v "$VOL":/build debian:trixie test -f /build/src/Makefile; then
+if docker run --rm --platform linux/amd64 -v "$VOL":/build debian:trixie test -f /build/src/Makefile; then
   say "kernel source: present in $VOL"
 else
   say "kernel source: android.googlesource.com kernel/common @ $KSRC_COMMIT"
@@ -39,12 +39,12 @@ else
   [ -d "$G" ] || git init -q --bare "$G"
   git -C "$G" cat-file -e "$KSRC_COMMIT^{commit}" 2>/dev/null || git -C "$G" fetch -q --depth 1 "$KSRC_URL" "$KSRC_COMMIT"
   [ "$(git -C "$G" rev-parse "$KSRC_COMMIT^{commit}")" = "$KSRC_COMMIT" ] || die "could not fetch $KSRC_COMMIT from $KSRC_URL"
-  git -C "$G" archive --format=tar "$KSRC_COMMIT" | docker run --rm -i -v "$VOL":/build debian:trixie \
+  git -C "$G" archive --format=tar "$KSRC_COMMIT" | docker run --rm --platform linux/amd64 -i -v "$VOL":/build debian:trixie \
     sh -c "set -e; mkdir -p /build/src; tar -xf - -C /build/src"
 fi
 
 # --- 2. AOSP clang -----------------------------------------------------------------
-if docker run --rm -v "$VOL":/build debian:trixie test -x /build/inputs/$CLANG_DIR/bin/clang; then
+if docker run --rm --platform linux/amd64 -v "$VOL":/build debian:trixie test -x /build/inputs/$CLANG_DIR/bin/clang; then
   say "clang: present in $VOL"
 else
   say "clang: android.googlesource.com prebuilts/clang/host/linux-x86 ($CLANG_TAG)"
@@ -54,12 +54,12 @@ else
   git -C "$DL/clang-prebuilts" sparse-checkout set "$CLANG_DIR"
   # Only the toolchain is needed; the NDK runtimes and the C++ library are not.
   rm -rf "$DL/clang-prebuilts/$CLANG_DIR"/{android_libc++,musl,python3,runtimes_ndk_cxx}
-  docker run --rm -v "$VOL":/build -v "$DL":/dl:ro debian:trixie \
+  docker run --rm --platform linux/amd64 -v "$VOL":/build -v "$DL":/dl:ro debian:trixie \
     bash -c "set -e; mkdir -p /build/inputs; cp -a /dl/clang-prebuilts/$CLANG_DIR /build/inputs/"
 fi
 
 # --- 3. KernelSU -------------------------------------------------------------------
-if docker run --rm -v "$VOL":/build debian:trixie test -d /build/inputs/KernelSU/kernel; then
+if docker run --rm --platform linux/amd64 -v "$VOL":/build debian:trixie test -d /build/inputs/KernelSU/kernel; then
   say "KernelSU: present in $VOL"
 else
   say "KernelSU: github.com/tiann/KernelSU ($KSU_TAG)"
@@ -68,7 +68,7 @@ else
   git -C "$DL/KernelSU" checkout "$KSU_TAG"
   # The kernel side derives its version from the commit count; a shallow clone would
   # report a wrong version, so keep the full history.
-  docker run --rm -v "$VOL":/build -v "$DL":/dl:ro debian:trixie \
+  docker run --rm --platform linux/amd64 -v "$VOL":/build -v "$DL":/dl:ro debian:trixie \
     bash -c "set -e; rm -rf /build/inputs/KernelSU; cp -a /dl/KernelSU /build/inputs/KernelSU; chown -R root:root /build/inputs/KernelSU"
 fi
 

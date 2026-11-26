@@ -224,6 +224,20 @@ void _start_c(void)
 		__asm__ volatile("stc\n adcx %[z],%k[x]\n setc %[cf]\n" : [x] "+r"(wide), [cf] "=m"(cf) : [z] "r"(0u) : "cc");
 		check("adcx r32 zero-extends into r64", wide == 0 && cf == 1);
 	}
+	{
+		unsigned long long seed = 0;
+		int ok_seed = _rdseed64_step(&seed);
+		unsigned short s16 = 0;
+		int ok_s16 = _rdseed16_step(&s16);
+		check("rdseed 64/16", ok_seed == 1 && ok_s16 == 1);
+	}
+	{
+		volatile uint64_t line[8] = { 1, 2, 3, 4, 5, 6, 7, 8 };
+		_mm_clflushopt((const void *)line);
+		_mm_clwb((const void *)&line[4]);
+		_mm_mfence();
+		check("clflushopt/clwb", line[0] == 1 && line[4] == 5);
+	}
 	puts_(fails ? "ISA_EMU_TEST_FAIL\n" : "ISA_EMU_TEST_PASS\n");
 	sc3(169, 0xfee1dead, 0x28121969, 0x4321fedc); /* reboot(POWER_OFF) */
 	for (;;) sc3(34, 0, 0, 0);

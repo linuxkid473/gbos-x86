@@ -14,9 +14,6 @@ import subprocess
 import sys
 import tempfile
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'gbrunch/tools'))
-from test_amd_kernel_qemu import closure, modinfo  # noqa: E402
-
 ROOTS = ['i915', 'iwlmvm']
 
 
@@ -33,6 +30,8 @@ def cpio(files):
 
 
 def main():
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'gbrunch/tools'))
+    from test_amd_kernel_qemu import closure, modinfo  # noqa: E402
     root = pathlib.Path(sys.argv[1]).resolve()
     release = (root / 'kernel.release').read_text().strip()
     moddir = root / 'modules' / release

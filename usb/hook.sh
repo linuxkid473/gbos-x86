@@ -394,6 +394,8 @@ gbos_configure_kvm_trace() {
 GBOS_GRALLOC_SHA=d48536951fd0e9643e71a5c8843e90833ce3e212e182782185470e2fbbfad673
 GBOS_LIBGBM_SHA=64a0f2537a5917822cb3f538dc74229e7ccf4ca45a30265bb97f742678ba294e
 GBOS_VKINTEL_SHA=5c687450523ea9ed9e8d4d9cc98ef4fef6c8d592d46db4bf425ad571dc6f7c73
+GBOS_IHD_SHA=df201109d84aa6b66a8349a862aed4aac1fc3bc122cd2df337441088a996c68c
+GBOS_CAMCOMMON_SHA=1e3444bd4abd757e74e579a6687d86dd00d7bd770ccb1d272b68900e9b5b1d13
 # "cardN driver" per DRM card (connectors like card0-eDP-1 are skipped); driver "none" = no driver bound.
 gbos_gpu_cards() {
   for c in ${SYSFS:-/sys}/class/drm/card*; do
@@ -463,7 +465,7 @@ gbos_gpu_decide() {
         return 0
       else
         GPU_SW=1
-        log "hook: software rendering: on (auto; Intel GPU driver $intel bound, but Gen <= 8 lacks Vulkan in image; using SwiftShader)"
+        log "hook: software rendering: on (auto; Intel GPU driver $intel bound, Gen <= 8 lacks Vulkan in stock image; using HasVK/SwiftShader)"
         return 0
       fi
     fi
@@ -473,7 +475,7 @@ gbos_gpu_decide() {
         return 0
       else
         GPU_SW=1
-        log "hook: software rendering: on (auto; Intel display controller present, but Gen <= 8 lacks Vulkan in image; using SwiftShader)"
+        log "hook: software rendering: on (auto; Intel display controller present, Gen <= 8 lacks Vulkan in stock image; using HasVK/SwiftShader)"
         return 0
       fi
     fi
@@ -493,28 +495,62 @@ gbos_gpu_bind() {
   if [ "$(sha256sum "$3" | cut -d' ' -f1)" != "$4" ]; then log "hook: software rendering: $1 NOT replaced (unexpected original, new Google build?)"; return 1; fi
   mount --bind "$G/patched/$2" "$3" && log "hook: software rendering: $1 replaced" || { log "hook: software rendering: $1 bind FAILED"; return 1; }
 }
-# radv or swiftshader: which Vulkan driver to use (GPU_VULKAN=radv|swiftshader forces one; auto = RADV only if the stick has it and amdgpu is bound).
+# radv, hasvk, or swiftshader: which replacement Vulkan HAL to bind over vulkan.intel.so.
+# GPU_VULKAN=radv|hasvk|swiftshader forces one; auto = RADV on amdgpu, HasVK on Intel Gen 7/7.5/8 (Ivy Bridge,
+# Haswell, Broadwell, Bay Trail, Cherryview) when vulkan.hasvk.so is on the stick, else SwiftShader.
+gbos_gpu_intel_hasvk() {
+  gbos_gpu_cards | grep -q ' i915$' || return 1
+  for _d in ${SYSFS:-/sys}/bus/pci/devices/*; do
+    [ -e "$_d/class" ] || continue
+    case "$(cat "$_d/class" 2>/dev/null)" in 0x03*)
+      [ "$(cat "$_d/vendor" 2>/dev/null)" = 0x8086 ] || continue
+      _dev=$(cat "$_d/device" 2>/dev/null | tr '[A-Z]' '[a-z]')
+      case "$_dev" in
+        0x16*|0x22*|0x04*|0x0a*|0x0c*|0x0d*|0x0f*|0x015*|0x016*) return 0;;
+      esac
+      ;;
+    esac
+  done
+  return 1
+}
 gbos_gpu_vulkan() {
   case "${GPU_VULKAN:-auto}" in
     swiftshader) echo swiftshader; return 0;;
     radv) echo radv; return 0;;
+    hasvk) echo hasvk; return 0;;
   esac
-  if [ -f "$G/patched/vulkan.radv.so" ] && gbos_gpu_cards | grep -q ' amdgpu$'; then echo radv; else echo swiftshader; fi
+  if [ -f "$G/patched/vulkan.radv.so" ] && gbos_gpu_cards | grep -q ' amdgpu$'; then echo radv
+  elif [ -f "$G/patched/vulkan.hasvk.so" ] && gbos_gpu_intel_hasvk; then echo hasvk
+  else echo swiftshader; fi
 }
-# (a) gralloc: minigbm gets a backend for DRM driver "amdgpu" (linear dumb buffers); libgbm (camera/codec HALs) likewise.
-# (b) SwiftShader over the Intel Vulkan driver. Without (a) or (b) nothing can draw, so any failure there cancels the prop changes.
+# (a) gralloc: minigbm gets a backend for DRM driver "amdgpu" (linear dumb buffers) + clflush instead of clflushopt on Haswell;
+#     libgbm (camera/codec HALs) likewise.
+# (b) RADV (AMD), HasVK (Intel Gen 7-8 hardware GPU), or SwiftShader (CPU) over the Gen 9+ Intel Vulkan driver.
+#     Without (a) or (b) nothing can draw, so any failure there cancels the prop changes.
 gbos_gpu_enable() {
   V=${NEWROOT:-/new}/vendor
-  gbos_gpu_bind "gralloc (libminigbm_gralloc, amdgpu backend)" libminigbm_gralloc.amdgpu.so $V/lib64/libminigbm_gralloc.so $GBOS_GRALLOC_SHA || GPU_SW=0
-  gbos_gpu_bind "libgbm (amdgpu backend)" libgbm.amdgpu.so $V/lib64/libgbm.so $GBOS_LIBGBM_SHA
-  # RADV (Mesa's AMD Vulkan driver, tools/radv-android/build.sh) when it is on the stick and an amdgpu card is bound; otherwise (or when it
-  # cannot be bound) SwiftShader. GPU_VULKAN in gbos.cfg: auto (default), radv, swiftshader.
-  # GPU_VK records which one is bound: with RADV the GPU renders, so only SwiftShader counts as software rendering for the UI
-  # (ro.gbos.software_rendering below: optimize.sh turns the animations off only then; issue 53).
+  gbos_gpu_bind "gralloc (libminigbm_gralloc, amdgpu+clflush)" libminigbm_gralloc.amdgpu.so $V/lib64/libminigbm_gralloc.so $GBOS_GRALLOC_SHA || GPU_SW=0
+  gbos_gpu_bind "libgbm (amdgpu+clflush)" libgbm.amdgpu.so $V/lib64/libgbm.so $GBOS_LIBGBM_SHA
+  # RADV (AMD) or HasVK (Intel Gen 7-8) when on the stick and matching GPU driver is bound; otherwise SwiftShader.
+  # GPU_VK records which one is bound: with RADV or HasVK the GPU renders, so only SwiftShader counts as software rendering
+  # for the UI (ro.gbos.software_rendering below: optimize.sh turns the animations off only then; issue 53).
   GPU_VK=
-  if [ "$(gbos_gpu_vulkan)" = radv ] && gbos_gpu_bind "Vulkan driver (RADV, AMD GPU)" vulkan.radv.so $V/lib64/hw/vulkan.intel.so $GBOS_VKINTEL_SHA; then GPU_VK=radv
-  elif gbos_gpu_bind "Vulkan driver (SwiftShader, CPU)" vulkan.swiftshader.so $V/lib64/hw/vulkan.intel.so $GBOS_VKINTEL_SHA; then GPU_VK=swiftshader
-  else GPU_SW=0
+  GPU_VAAPI_USED=
+  _vk_want=$(gbos_gpu_vulkan)
+  if [ "$_vk_want" = radv ] && gbos_gpu_bind "Vulkan driver (RADV, AMD GPU)" vulkan.radv.so $V/lib64/hw/vulkan.intel.so $GBOS_VKINTEL_SHA; then
+    GPU_VK=radv
+  elif [ "$_vk_want" = hasvk ] && gbos_gpu_bind "Vulkan driver (HasVK, Intel Gen 7-8 GPU)" vulkan.hasvk.so $V/lib64/hw/vulkan.intel.so $GBOS_VKINTEL_SHA; then
+    GPU_VK=hasvk
+  elif gbos_gpu_bind "Vulkan driver (SwiftShader, CPU)" vulkan.swiftshader.so $V/lib64/hw/vulkan.intel.so $GBOS_VKINTEL_SHA; then
+    GPU_VK=swiftshader
+  else
+    GPU_SW=0
+  fi
+  if [ "$GPU_SW" = 1 ] && [ "${GPU_VAAPI:-auto}" != 0 ] && [ -f "$G/patched/i965_drv_video.so" ] && [ -f "$V/lib64/iHD_drv_video.so" ] && gbos_gpu_intel_hasvk; then
+    gbos_gpu_bind "VA-API driver (i965, Intel Gen 7-8 MFX)" i965_drv_video.so $V/lib64/iHD_drv_video.so $GBOS_IHD_SHA && GPU_VAAPI_USED=i965
+  fi
+  if [ "$GPU_SW" = 1 ] && [ "${CAMERA_VULKAN:-0}" != 1 ] && [ -f "$G/patched/libdesktop_camera_common.cpu.so" ] && [ -f "$V/lib64/hw/libdesktop_camera_common.dylib.so" ]; then
+    gbos_gpu_bind "USB camera common (CPU libyuv pipeline)" libdesktop_camera_common.cpu.so $V/lib64/hw/libdesktop_camera_common.dylib.so $GBOS_CAMCOMMON_SHA
   fi
 }
 # --- end software rendering ---
@@ -694,17 +730,29 @@ on property:sys.gbos86.sysupdate=*
 
 # Logcat to the stick: expose the USB volume inside Android at /postinstall, and overlay
 # /system/etc/init with a copy plus gbos.rc (a logcat service writing to this boot's log dir).
-# "vid:pid" (lower-case hex, as in Android's IDC file names) of every touchpad that is not on USB, from /proc/bus/input/devices.
-# INPUTS= is only for tests.
+# "vid:pid" (lower-case hex, as in Android's IDC file names) of every internal touchpad (PS/2, I2C, RMI4, SPI), from /proc/bus/input/devices.
+# Matches standard "*Touchpad"/"*Trackpad" names as well as Elantech ("ETPS/2 Elantech Touchpad"), ALPS ("GlidePoint"), ClickPad/SmartPad
+# and Synaptics RMI4 ("Synaptics TMxxxx-xxx", Bus=001d, which omits "TouchPad" in its name). INPUTS= is only for tests.
+if dmesg 2>/dev/null | grep -q 'Your touchpad .* says it can support a different bus' \
+   && [ -w /sys/module/psmouse/parameters/synaptics_intertouch ]; then
+  modprobe -a -q i2c-i801 i2c-smbus rmi_smbus 2>/dev/null || true
+  echo 1 > /sys/module/psmouse/parameters/synaptics_intertouch 2>/dev/null || true
+  for _s in /sys/bus/serio/devices/serio*; do
+    [ -w "$_s/drvctl" ] && grep -qi 'psmouse' "$_s/uevent" 2>/dev/null && echo -n reconnect > "$_s/drvctl" 2>/dev/null || true
+  done
+  sleep 1; mdev -s 2>/dev/null || true
+  log "hook: enabled psmouse.synaptics_intertouch=1 for RMI4 SMBus touchpad"
+fi
 gbos_touchpads() {
   awk -v RS= -F'\n' '{
     bus = ""; v = ""; p = ""; name = ""
     for (i = 1; i <= NF; i++) {
       if ($i ~ /^I: /) { n = split($i, a, " "); for (j = 1; j <= n; j++) {
-        if (a[j] ~ /^Bus=/) bus = substr(a[j], 5); if (a[j] ~ /^Vendor=/) v = substr(a[j], 8); if (a[j] ~ /^Product=/) p = substr(a[j], 9) } }
+        if (a[j] ~ /^Bus=/) bus = tolower(substr(a[j], 5)); if (a[j] ~ /^Vendor=/) v = substr(a[j], 8); if (a[j] ~ /^Product=/) p = substr(a[j], 9) } }
       if ($i ~ /^N: Name=/) name = tolower($i)
     }
-    if (name ~ /touchpad|trackpad/ && bus != "0003" && v != "" && p != "") print tolower(v) ":" tolower(p)
+    if ((name ~ /touchpad|trackpad|glidepoint|clickpad|smartpad|etps|elantech|synaptics tm/ || bus == "001d") && bus != "0003" && v != "" && p != "")
+      print tolower(v) ":" tolower(p)
   }' ${INPUTS:-/proc/bus/input/devices} 2>/dev/null | sort -u
 }
 
@@ -821,21 +869,37 @@ fi
   # The Trusty security VM never answers here (software KeyMint/Gatekeeper replace it) but spins one CPU core at 100%: stopped once
   # booted. TRUSTY_VM=1 in gbos.cfg keeps it running (for debugging).
   if [ "${TRUSTY_VM:-0}" = 1 ]; then TRUSTYSTOP="# gbos: Trusty VM kept (TRUSTY_VM=1)"; else TRUSTYSTOP="stop trusty_security_protected_vm_launcher"; fi
-  # The Surface sleep guard is a daemon and must not be restarted on other laptops. The Latitude camera bridge is opt-in.
+  # Surface Laptop 7 camera bridge runs on Surface; Latitude 7320 camera bridge is opt-in; gbos_sleep_guard runs on Surface AND when SUSPEND_MODE=guard (default).
   if grep -qi 'Surface' /sys/class/dmi/id/product_name 2>/dev/null; then
     SURFACESTART="start gbos_camera
     start gbos_sleep_guard"
   elif grep -qx 'Latitude 7320 Detachable' /sys/class/dmi/id/product_name 2>/dev/null &&
        [ "${CAMERA_BRIDGE:-0}" = 1 ]; then
-    SURFACESTART="start gbos_camera"
+    if [ "${SUSPEND_MODE:-guard}" = guard ]; then
+      SURFACESTART="start gbos_camera
+    start gbos_sleep_guard"
+    else
+      SURFACESTART="start gbos_camera"
+    fi
+  elif [ "${SUSPEND_MODE:-guard}" = guard ]; then
+    SURFACESTART="start gbos_sleep_guard"
   else
-    SURFACESTART="# gbos: no DMI-approved camera bridge or Surface sleep guard"
+    SURFACESTART="# gbos: sleep_guard disabled (SUSPEND_MODE=${SUSPEND_MODE})"
   fi
   IDCRC=
   if [ "${TOUCHPAD_FLICK:-1}" != 0 ]; then
     for tp in $(gbos_touchpads); do
       IDCN=Vendor_${tp%:*}_Product_${tp#*:}.idc
-      printf 'device.internal = 1\ntouch.deviceType = touchPad\ngestureProp.Drumroll_Suppression_Enable = 0\ngestureProp.Change_Timeout = 0.02\n' > $L/$IDCN \
+      {
+        printf 'device.internal = 1\ntouch.deviceType = touchPad\ngestureProp.Drumroll_Suppression_Enable = 0\ngestureProp.Change_Timeout = 0.02\n'
+        # PS/2 (0002:*), Elan (04f3:*), Synaptics (06cb:*) and PixArt (093a:*) touchpads report raw ABS_MT_PRESSURE ~8-25 on light
+        # 2-finger glides while libgestures defaults Tap_Minimum_Pressure to 25.0: apply Google's Elan_Touchpad.idc pressure scale.
+        case "${tp%:*}" in
+          0002|04f3|06cb|093a)
+            printf 'gestureProp.Tap_Minimum_Pressure = 10.0\ngestureProp.Pressure_Calibration_Offset = 0.0\ngestureProp.Pressure_Calibration_Slope = 3.1416\ngestureProp.Palm_Pressure = 220.0\n'
+            ;;
+        esac
+      } > $L/$IDCN \
         && IDCRC="$IDCRC
     copy /postinstall/gbos/logs/boot-$N/$IDCN /data/system/devices/idc/$IDCN
     chown system system /data/system/devices/idc/$IDCN
@@ -1302,7 +1366,7 @@ if [ "$DEVICE_MODEL" = "auto" ]; then
     DEVICE_MODEL=""
   fi
 fi
-DROP='^ro.boot.hypervisor.protected_vm.supported=|^ro.surface_flinger.has_wide_color_display=|^ro.surface_flinger.has_HDR_display='
+DROP='^ro.boot.hypervisor.protected_vm.supported=|^ro.surface_flinger.has_wide_color_display=|^ro.surface_flinger.has_HDR_display=|^vendor.camera.hal_usb.face_detection.override_enable='
 [ "$GPU_SW" = 1 ] && DROP="$DROP|^ro.surface_flinger.supports_background_blur=|^persist.sys.sf.disable_blurs=|^ro.launcher.blur.appLaunch=|^ro.vendor.hwc.use_overlay_planes=|^vendor.hwc.drm.use_overlay_planes=|^vendor.hwc.drm.scale_with_gpu=|^vendor.hwc.drm.enable_color_pipeline=|^ro.hwui.use_vulkan=|^ro.surface_flinger.default_composition_pixel_format=|^debug.renderengine.backend=|^debug.renderengine.graphite=|^debug.renderengine.graphite_desktop_optin=|^debug.renderengine.vulkan=|^ro.hwui.render_ahead=|^ro.surface_flinger.max_frame_buffer_acquired_buffers=|^debug.sf.enable_gl_backpressure="   # blur on the CPU is far too slow
 # drm_hwcomposer logs at VERBOSE on every frame on i915 ("Missing optional LOG_GAMMA_LUT property, falling back to
 # GAMMA_LUT": 5,745 lines in two minutes on the Latitude 7320, the largest logcat source). WARN keeps its real warnings,
@@ -1321,12 +1385,14 @@ DROP='^ro.boot.hypervisor.protected_vm.supported=|^ro.surface_flinger.has_wide_c
   # (2,142 of boot-5's logcat lines, 2026-11-22, pushing real logs out of the rotated files). It must keep running: it is what
   # inhibits the touchpad when the keyboard is attached and folded. ERROR keeps its real failures.
   echo "log.tag.touchpad-inhibitor=ERROR"
+  # USB camera HAL face detection calls libcamera_internal.so (23,570 AVX-512 + 405 AMX ops -> SIGILL on non-AVX512 CPUs)
+  echo "vendor.camera.hal_usb.face_detection.override_enable=false"
   if [ "$GPU_SW" = 1 ]; then
     echo "ro.surface_flinger.supports_background_blur=0"
     # Read by optimize.sh: animations and window blur are only switched off while the CPU composites (hardware GPUs keep Google's defaults).
-    # Not with RADV: GPU_SW=1 also covers amdgpu with a hardware Vulkan driver (gralloc, HWC props), and setting this there zeroed the
-    # animation scales on every boot (issue 53, Ryzen AI 7 350 / Radeon 860M).
-    [ "$GPU_VK" = radv ] || echo "ro.gbos.software_rendering=1"
+    # Not with RADV or HasVK: GPU_SW=1 also covers amdgpu / Intel Gen 7-8 with a hardware Vulkan driver (gralloc, HWC props), and setting
+    # this there zeroed the animation scales on every boot (issue 53).
+    [ "$GPU_VK" = radv ] || [ "$GPU_VK" = hasvk ] || echo "ro.gbos.software_rendering=1"
     echo "persist.sys.sf.disable_blurs=1"
     echo "ro.launcher.blur.appLaunch=0"
     # Hardware cursor & overlay planes:
@@ -1394,34 +1460,130 @@ if grep -q 'AuthenticAMD' /proc/cpuinfo 2>/dev/null && [ -f /new/system/lib64/li
   for _nb_f in /new/system/build.prop /new/system/etc/prop.default /new/system_ext/etc/build.prop /new/product/etc/build.prop /new/vendor/default.prop /new/vendor/build.prop /new/odm/etc/build.prop; do
     if [ -f "$_nb_f" ] && grep -q '^ro\.dalvik\.vm\.native\.bridge=libhoudini\.so$' "$_nb_f" 2>/dev/null; then
       _nb_i=$((_nb_i + 1))
-      sed 's/^ro\.dalvik\.vm\.native\.bridge=libhoudini\.so$/ro.dalvik.vm.native.bridge=libndk_translation.so/' "$_nb_f" > "/tmp/nb_prop_${_nb_i}.prop" \
-        && mount --bind "/tmp/nb_prop_${_nb_i}.prop" "$_nb_f" \
+      sed 's/^ro\.dalvik\.vm\.native\.bridge=libhoudini\.so$/ro.dalvik.vm.native.bridge=libndk_translation.so/' "$_nb_f" > "/dev/.gbos_nb_prop_${_nb_i}.prop" \
+        && mount --bind "/dev/.gbos_nb_prop_${_nb_i}.prop" "$_nb_f" \
         && log "hook: AMD CPU: switched native.bridge to libndk_translation.so in $_nb_f"
     fi
   done
-  [ "$_nb_i" = 0 ] && log "hook: AMD CPU: ro.dalvik.vm.native.bridge=libhoudini.so not found in checked prop files"
+  [ "$_nb_i" = 0 ] && log "hook: AMD CPU: ro.dalvik.vm.native.bridge=libhoudini\.so not found in checked prop files"
 fi
-# On non-Intel GPUs (GPU_SW=1, e.g. amdgpu), Intel VA-API (iHD_drv_video.so) cannot open the
-# DRM render node and libdesktop_camera_common panics with Option::unwrap() on None in
-# HardwareJpegDecoderVaapi. Disable hardware JPEG decoding so the USB camera HAL falls back
-# to software MJPEG decoding (mjpg_to_nv12).
-if [ "$GPU_SW" = 1 ] && [ -f /new/vendor/etc/camera/internal_usb_camera_info.txtpb ]; then
-  sed 's/^use_hardware_jpeg_decoder: true$/use_hardware_jpeg_decoder: false/' /new/vendor/etc/camera/internal_usb_camera_info.txtpb > /tmp/internal_usb_camera_info.txtpb \
-    && mount --bind /tmp/internal_usb_camera_info.txtpb /new/vendor/etc/camera/internal_usb_camera_info.txtpb \
-    && log "hook: USB camera: disabled VA-API hardware JPEG decoder (non-Intel GPU)"
-fi
-# Vulkan stream manipulators (VcEffects, StreamAdapter, CropRotate) fail on non-Intel Vulkan
-# (RADV/SwiftShader reporting Vulkan 1.1) because vulkano requires Vulkan 1.2 or
-# khr_image_format_list for ext_image_drm_format_modifier, aborting camera open (-38).
-# Disable stream_manipulators when GPU_SW=1 for direct USB camera passthrough.
-if [ "$GPU_SW" = 1 ] && [ -f /new/vendor/etc/camera/effect_config_usb.json ]; then
-  cat > /tmp/effect_config_usb.json << 'EOF'
-{
-    "stream_manipulators": []
-}
-EOF
-  mount --bind /tmp/effect_config_usb.json /new/vendor/etc/camera/effect_config_usb.json \
-    && log "hook: USB camera: disabled Vulkan stream_manipulators in effect_config_usb.json (non-Intel GPU)"
+# Video codecs on GPUs without Intel Gen 9+ iHD VA-API support (Haswell/Broadwell/IvyBridge i915, AMD):
+# 1. Google's vendor image only ships iHD_drv_video.so (Gen 9+). When i965_drv_video.so is bound over iHD_drv_video.so on
+#    Intel Gen 7/7.5/8 (above), expose only the clear VA-API decoders supported by that MFX generation (H.264 on Gen 7/7.5/8,
+#    plus VP8 on Gen 8 Broadwell/Cherryview; never .secure, which requires Intel PXP/ME TEE not present on generic PCs so
+#    Widevine L3 decrypts in software and feeds clear c2.cros-codecs.vaapi.avc.decoder). Otherwise hide the VA-API XML.
+# 2. Cap software video decode advertisements to 1080p (2048x2048 / 8192 macroblocks, matching portrait & landscape FHD)
+#    and disable slow libgav1 (c2.android.av1.decoder) in favour of AVX2 dav1d (c2.android.av1-dav1d.decoder), so VP9/AV1/HEVC
+#    streams use native-AVX2 software decoders at smooth 1080p instead of 4K60.
+if [ "$GPU_SW" = 1 ]; then
+  if [ "$GPU_VAAPI_USED" = i965 ] && [ -f /new/vendor/etc/media_codecs_cros_codecs_codec2.xml ]; then
+    _va_vp8=0
+    for _d in /sys/bus/pci/devices/*; do
+      [ -e "$_d/class" ] || continue
+      case "$(cat "$_d/class" 2>/dev/null)" in 0x03*)
+        [ "$(cat "$_d/vendor" 2>/dev/null)" = 0x8086 ] || continue
+        case "$(cat "$_d/device" 2>/dev/null | tr '[A-Z]' '[a-z]')" in 0x16*|0x22*) _va_vp8=1;; esac
+        ;;
+      esac
+    done
+    {
+      cat <<'VAXML1'
+<?xml version="1.0" encoding="utf-8" ?>
+<MediaCodecs>
+  <Decoders>
+    <MediaCodec name="c2.cros-codecs.vaapi.avc.decoder" type="video/avc">
+      <Limit name="size" min="96x96" max="4096x4096" />
+      <Limit name="alignment" value="2x2" />
+      <Limit name="block-size" value="16x16" />
+      <Limit name="blocks-per-second" min="36" max="983040" />
+      <Limit name="bitrate" range="1-100000000" />
+      <Limit name="concurrent-instances" max="8" />
+      <Limit name="performance-point-1920x1080" range="60-60" />
+      <Limit name="measured-frame-rate-320x240" range="960-2100" />
+      <Limit name="measured-frame-rate-720x480" range="900-1930" />
+      <Limit name="measured-frame-rate-1280x720" range="480-927" />
+      <Limit name="measured-frame-rate-1920x1080" range="240-480" />
+      <Feature name="adaptive-playback" />
+      <Feature name="dynamic-color-aspects" />
+    </MediaCodec>
+VAXML1
+      if [ "$_va_vp8" = 1 ]; then
+        cat <<'VAXML2'
+    <MediaCodec name="c2.cros-codecs.vaapi.vp8.decoder" type="video/x-vnd.on2.vp8">
+      <Limit name="size" min="96x96" max="4096x4096" />
+      <Limit name="alignment" value="1x1" />
+      <Limit name="block-size" value="16x16" />
+      <Limit name="blocks-per-second" min="36" max="491520" />
+      <Limit name="bitrate" range="1-100000000" />
+      <Limit name="concurrent-instances" max="8" />
+      <Limit name="performance-point-1920x1080" range="60-60" />
+      <Limit name="measured-frame-rate-320x180" range="900-1800" />
+      <Limit name="measured-frame-rate-640x360" range="600-1200" />
+      <Limit name="measured-frame-rate-1280x720" range="300-600" />
+      <Limit name="measured-frame-rate-1920x1080" range="120-240" />
+      <Feature name="adaptive-playback" />
+      <Feature name="dynamic-color-aspects" />
+    </MediaCodec>
+VAXML2
+      fi
+      printf '  </Decoders>\n  <Encoders />\n</MediaCodecs>\n'
+    } > /dev/.gbos_media_codecs_cros.xml \
+      && mount --bind /dev/.gbos_media_codecs_cros.xml /new/vendor/etc/media_codecs_cros_codecs_codec2.xml \
+      && log "hook: i965 hardware VA-API media_codecs active (avc=1, vp8=$_va_vp8, .secure hidden)"
+  elif [ ! -f /new/vendor/lib64/i965_drv_video.so ] && [ ! -f /new/vendor/lib64/dri/i965_drv_video.so ] \
+     && [ ! -f /new/vendor/lib64/radeonsi_drv_video.so ] && [ ! -f /new/vendor/lib64/dri/radeonsi_drv_video.so ] \
+     && [ -f /new/vendor/etc/media_codecs_cros_codecs_codec2.xml ]; then
+    printf '<?xml version="1.0" encoding="utf-8" ?>\n<MediaCodecs>\n  <Decoders />\n  <Encoders />\n</MediaCodecs>\n' > /dev/.gbos_media_codecs_cros.xml \
+      && mount --bind /dev/.gbos_media_codecs_cros.xml /new/vendor/etc/media_codecs_cros_codecs_codec2.xml \
+      && log "hook: VA-API media_codecs hidden (no Gen <= 8 / AMD VA-API driver in vendor)"
+  fi
+  if [ -f /new/vendor/etc/media_codecs_sw_overwrite_desktop.xml ]; then
+    cat > /dev/.gbos_media_codecs_sw_overwrite.xml <<'MCXML'
+<?xml version="1.0" encoding="utf-8" ?>
+<MediaCodecs>
+    <Decoders>
+        <MediaCodec name="c2.android.avc.decoder" type="video/avc" update="true">
+            <Limit name="size" min="2x2" max="2048x2048" />
+            <Limit name="block-count" range="1-8192" />
+            <Limit name="blocks-per-second" range="1-491520" />
+            <Limit name="performance-point-1920x1080" range="60-60" />
+        </MediaCodec>
+        <MediaCodec name="c2.android.hevc.decoder" type="video/hevc" update="true">
+            <Limit name="size" min="2x2" max="2048x2048" />
+            <Limit name="block-count" range="1-32768" />
+            <Limit name="blocks-per-second" range="1-983040" />
+            <Limit name="performance-point-1920x1080" range="30-30" />
+        </MediaCodec>
+        <MediaCodec name="c2.android.vp8.decoder" type="video/x-vnd.on2.vp8" update="true">
+            <Limit name="size" min="2x2" max="2048x2048" />
+            <Limit name="block-count" range="1-8192" />
+            <Limit name="blocks-per-second" range="1-245760" />
+            <Limit name="performance-point-1920x1080" range="30-30" />
+        </MediaCodec>
+        <MediaCodec name="c2.android.vp9.decoder" type="video/x-vnd.on2.vp9" update="true">
+            <Limit name="size" min="2x2" max="2048x2048" />
+            <Limit name="block-count" range="1-8192" />
+            <Limit name="blocks-per-second" range="1-245760" />
+            <Limit name="performance-point-1920x1080" range="30-30" />
+        </MediaCodec>
+        <MediaCodec name="c2.android.av1-dav1d.decoder" type="video/av01" update="true">
+            <Limit name="size" min="2x2" max="2048x2048" />
+            <Limit name="block-count" range="1-8192" />
+            <Limit name="blocks-per-second" range="1-245760" />
+            <Limit name="performance-point-1920x1080" range="30-30" />
+        </MediaCodec>
+        <MediaCodec name="c2.android.av1.decoder" type="video/av01" update="true" enabled="false" />
+    </Decoders>
+</MediaCodecs>
+MCXML
+    mount --bind /dev/.gbos_media_codecs_sw_overwrite.xml /new/vendor/etc/media_codecs_sw_overwrite_desktop.xml \
+      && log "hook: software media_codecs tuned for 1080p AVX2 (dav1d enabled, gav1 disabled)"
+  fi
+  if [ -f /new/vendor/etc/media_codecs_performance.xml ]; then
+    grep -v 'measured-frame-rate-3840x2160' /new/vendor/etc/media_codecs_performance.xml > /dev/.gbos_media_codecs_perf.xml \
+      && mount --bind /dev/.gbos_media_codecs_perf.xml /new/vendor/etc/media_codecs_performance.xml \
+      && log "hook: 4K measured-frame-rate removed from media_codecs_performance.xml"
+  fi
 fi
 # Only one Trusty VM may own CID 200: drop the plain launcher's auto-start so the on-demand
 # (accessor-registering) launcher runs it, falling back to non-protected by itself.
@@ -1647,7 +1809,20 @@ if [ -f $G/audio/gbos-hda-pch/audio_config.xml ]; then
     log "hook: no ALSA card; leaving vendor audio configuration untouched"
   else
   mkdir -p /tmp/gbos-audio
-  if [ -n "$CID" ] && [ "$CID" != PCH ]; then
+  # Latitude 5300-style PCH keeps the static shipped template directly when its combo jack and 3 HDMI PCMs (3/7/8) are actually on card PCH.
+  # Haswell/Broadwell (e.g. Sony VAIO Flip 13) put HDMI audio on a separate PCI controller (card 0 "HDMI") so card "PCH" has NO HDMI PCMs,
+  # and many Intel laptops expose separate "HDA Intel PCH Headphone" / "Mic" jacks: run gen_config.sh for those so dras never gets
+  # non-existent PCMs or jack input names.
+  PCH_STATIC=0
+  if [ "$CID" = PCH ]; then
+    _pcno=$(sed -n 's/^ *\([0-9][0-9]*\) \[PCH *\].*/\1/p' /proc/asound/cards 2>/dev/null | head -n 1)
+    _ppfx=$(printf '%02d-' "${_pcno:-0}")
+    if grep -qxF 'N: Name="HDA Intel PCH Headphone Mic"' /proc/bus/input/devices 2>/dev/null \
+       && grep -q "^${_ppfx}03:.*HDMI" /proc/asound/pcm 2>/dev/null; then
+      PCH_STATIC=1
+    fi
+  fi
+  if [ -n "$CID" ] && [ "$PCH_STATIC" = 0 ]; then
     AC=gbos-gen
     # gen_config.sh also remaps PCM numbers, the internal mic (SOF: the DMIC PCM) and the jack input devices to what this card has
     if [ -f $G/audio/gen_config.sh ] && AMSG=$(sh $G/audio/gen_config.sh $G/audio/gbos-hda-pch $G/audio/audio_default.xml /tmp/gbos-audio $AC "$CID" "$CNAME" 2>&1); then
@@ -1700,11 +1875,247 @@ if [ -f $G/audio/gbos-hda-pch/audio_config.xml ]; then
     && log "hook: audio config $AC (card id ${CID:-none}, name ${CNAME:-none}) active"
   fi
 fi
+# --- UVC camera, power button, powerhint cpuset & suspend/resume setup ---
+# Keep generated bind-mount backing files in /dev/.gbos (/dev is moved to /new/dev, never unlinked by switch_root).
+GBOS_RUN=${GBOS_RUN:-/dev/.gbos}
+mkdir -p -m 0755 "$GBOS_RUN"
+
+# Parse maximum UVC VideoStreaming frame WxH from a sysfs USB binary descriptors file (fallback 1920x1080).
+gbos_uvc_max_res() {
+  [ -r "$1" ] || { echo 1920x1080; return 0; }
+  _uvc_res=$(od -A n -t u1 -v "$1" 2>/dev/null | awk '
+    BEGIN { n = 0 }
+    { for (k = 1; k <= NF; k++) { b[n] = $k + 0; n++ } }
+    END {
+      mw = 0; mh = 0; i = 0; isc = 0
+      while (i < n) {
+        if (b[i] < 2 || i + b[i] > n) { i++; continue }
+        L = b[i]; dt = b[i+1]
+        if (dt == 4 && L >= 7 && b[i+5] == 14) isc = b[i+6]
+        else if (isc == 2 && dt == 36 && (b[i+2] == 5 || b[i+2] == 7 || b[i+2] == 17) && L >= 9) {
+          w = b[i+5] + 256 * b[i+6]
+          h = b[i+7] + 256 * b[i+8]
+          if (w >= 160 && h >= 120 && w <= 8192 && h <= 8192 && w * h > mw * mh) { mw = w; mh = h }
+        }
+        i += L
+      }
+      if (mw > 0 && mh > 0) print mw "x" mh
+    }')
+  echo "${_uvc_res:-1920x1080}"
+}
+
+gbos_camera_setup() {
+  _v=${NEWROOT:-/new}/vendor
+  _sys=${SYSFS:-/sys}
+  _dev=${DEVROOT:-/dev}
+  chmod 0666 "$_dev"/video* "$_dev"/media* "$_dev"/v4l-subdev* 2>/dev/null || true
+  if [ -f "$_v/etc/ueventd.rc" ] && ! grep -q '^/dev/video\*' "$_v/etc/ueventd.rc" 2>/dev/null; then
+    { cat "$_v/etc/ueventd.rc"
+      printf '\n/dev/video* 0666 system camera\n/dev/media* 0666 system camera\n/dev/v4l-subdev* 0666 system camera\n'
+    } > "$GBOS_RUN/ueventd.vendor.rc" \
+      && mount --bind "$GBOS_RUN/ueventd.vendor.rc" "$_v/etc/ueventd.rc" \
+      && log "hook: camera: added /dev/video* 0666 rules to vendor ueventd.rc"
+  fi
+  _txtpb="$_v/etc/camera/internal_usb_camera_info.txtpb"
+  if [ -f "$_txtpb" ]; then
+    _hw_jpeg=false
+    [ "${CAMERA_HW_JPEG:-0}" = 1 ] && _hw_jpeg=true
+    sed -e "s/use_hardware_jpeg_decoder: *true/use_hardware_jpeg_decoder: $_hw_jpeg/g" \
+        -e 's/enable_face_detection: *true/enable_face_detection: false/g' \
+        "$_txtpb" > "$GBOS_RUN/internal_usb_camera_info.txtpb"
+    _front_cam=; _back_cam=; _unassigned=
+    for _ud in "$_sys"/bus/usb/devices/[0-9]*-[0-9.]*; do
+      [ -f "$_ud/idVendor" ] && [ -f "$_ud/idProduct" ] || continue
+      case "$_ud" in *:*) continue;; esac
+      _is_uvc=0
+      for _if in "$_ud":*; do
+        [ -f "$_if/bInterfaceClass" ] || continue
+        case "$(cat "$_if/bInterfaceClass" 2>/dev/null | tr '[A-Z]' '[a-z]')" in 0e) _is_uvc=1; break;; esac
+      done
+      [ "$_is_uvc" = 1 ] || continue
+      _vid=$(cat "$_ud/idVendor" 2>/dev/null | tr '[A-Z]' '[a-z]' | tr -d ' \r\n')
+      _pid=$(cat "$_ud/idProduct" 2>/dev/null | tr '[A-Z]' '[a-z]' | tr -d ' \r\n')
+      [ -n "$_vid" ] && [ -n "$_pid" ] || continue
+      _vp="${_vid}:${_pid}"
+      _pname=$(cat "$_ud/product" 2>/dev/null | tr '[A-Z]' '[a-z]')
+      _wh=$(gbos_uvc_max_res "$_ud/descriptors")
+      case "$_pname" in
+        *rear*|*back*|*world*) [ -z "$_back_cam" ] && _back_cam="$_vp|$_wh" || _unassigned="$_unassigned $_vp|$_wh";;
+        *front*|*user*|*face*) [ -z "$_front_cam" ] && _front_cam="$_vp|$_wh" || _unassigned="$_unassigned $_vp|$_wh";;
+        *) _unassigned="$_unassigned $_vp|$_wh";;
+      esac
+    done
+    for _item in $_unassigned; do
+      if [ -z "$_front_cam" ]; then _front_cam="$_item"
+      elif [ -z "$_back_cam" ] && [ "${_item%%|*}" != "${_front_cam%%|*}" ]; then _back_cam="$_item"
+      fi
+    done
+    _has_rear=0
+    for _role in "FACING_FRONT:$_front_cam" "FACING_BACK:$_back_cam"; do
+      _facing=${_role%%:*}; _spec=${_role#*:}
+      [ -n "$_spec" ] || continue
+      [ "$_facing" = FACING_BACK ] && _has_rear=1
+      _vp=${_spec%%|*}; _wh=${_spec#*|}
+      grep -qi "key: *\"$_vp\"" "$GBOS_RUN/internal_usb_camera_info.txtpb" && continue
+      _cw=${_wh%x*}; _ch=${_wh#*x}
+      case "$_cw:$_ch" in *[!0-9:]*|:*) _cw=1920; _ch=1080;; esac
+      cat >> "$GBOS_RUN/internal_usb_camera_info.txtpb" <<CAM_EOF
+
+  camera_modules {
+    key: "$_vp"
+    value {
+      lens_info {
+        available_focal_lengths: 1.8
+        minimum_focus_distance: 0.25
+        optimal_focus_distance: 0.5
+        available_apertures: 2.0
+      }
+      sensor_info {
+        physical_size {
+          width: 2.92
+          height: 2.19
+        }
+        pixel_array_size {
+          width: $((_cw + 8))
+          height: $((_ch + 8))
+        }
+        active_array {
+          left: 4
+          top: 4
+          right: $((_cw + 4))
+          bottom: $((_ch + 4))
+        }
+      }
+      enable_face_detection: false
+      facing: $_facing
+    }
+  }
+CAM_EOF
+      log "hook: camera: registered $_vp (${_cw}x${_ch}) as $_facing"
+    done
+    mount --bind "$GBOS_RUN/internal_usb_camera_info.txtpb" "$_txtpb" \
+      && log "hook: camera: internal_usb_camera_info.txtpb active (hw_jpeg=$_hw_jpeg, face_detect=false)"
+    if [ -f "$_v/etc/permissions/features.xml" ]; then
+      { grep -v '</permissions>' "$_v/etc/permissions/features.xml"
+        grep -q 'android.hardware.camera.external' "$_v/etc/permissions/features.xml" || echo '  <feature name="android.hardware.camera.external"/>'
+        if [ "$_has_rear" = 1 ] && ! grep -q '"android.hardware.camera"' "$_v/etc/permissions/features.xml"; then
+          echo '  <feature name="android.hardware.camera"/>'
+        fi
+        echo '</permissions>'
+      } > "$GBOS_RUN/features.xml" \
+        && mount --bind "$GBOS_RUN/features.xml" "$_v/etc/permissions/features.xml" \
+        && log "hook: camera: permissions updated (rear=$_has_rear, external=1)"
+    fi
+  fi
+  if [ ! -e "$_dev/accel/accel0" ] && [ -f "$_v/etc/camera/effect_config_usb.json" ]; then
+    cat > "$GBOS_RUN/effect_config_usb.json" <<'EFF_EOF'
+  {
+      "stream_manipulators": [
+          {
+              "name": "Include",
+              "config": "/vendor/etc/camera/common_post_process.json"
+          }
+      ]
+  }
+EFF_EOF
+    mount --bind "$GBOS_RUN/effect_config_usb.json" "$_v/etc/camera/effect_config_usb.json" \
+      && log "hook: camera: NPU VcEffects/AutoFraming disabled (no /dev/accel/accel0)"
+  fi
+}
+
+gbos_power_setup() {
+  _v=${NEWROOT:-/new}/vendor
+  _sys=${SYSFS:-/sys}
+  _dev=${DEVROOT:-/dev}
+  # Google's excluded-input-devices.xml ignores "Power Button" (expecting cros_ec_buttons on Chromebooks), so pressing the
+  # physical power button on a standard PC laptop neither sleeps nor wakes the screen. Re-enable it when /dev/cros_ec is absent.
+  if [ ! -e "$_dev/cros_ec" ] && [ -f "$_v/etc/excluded-input-devices.xml" ]; then
+    printf '<devices/>\n' > "$GBOS_RUN/excluded-input-devices.xml" \
+      && mount --bind "$GBOS_RUN/excluded-input-devices.xml" "$_v/etc/excluded-input-devices.xml" \
+      && log "hook: power: ACPI Power Button re-enabled (no /dev/cros_ec)"
+  fi
+  # Clamp powerhint.json cpusets ("0-7", "4-7", "ff", "f0") to the actual CPU thread count AND deduplicate each Node's
+  # "Values" array: libperfmgr's HintManager::ParseNodes rejects duplicate strings in "Values" ("Duplicate value parsed in Node[i]"),
+  # which otherwise aborts android.hardware.power-service.pixel-libperfmgr and stalls system_server at the boot animation.
+  _ncpu=$(grep -c '^processor[[:space:]]*:' ${CPUINFO:-/proc/cpuinfo} 2>/dev/null || echo 4)
+  if [ "$_ncpu" -ge 1 ] 2>/dev/null && [ "$_ncpu" -lt 8 ] 2>/dev/null && [ -f "$_v/etc/powerhint.json" ]; then
+    _maxc=$((_ncpu - 1))
+    _hex=$(printf '%x' $(( (1 << _ncpu) - 1 )))
+    awk -v maxc="$_maxc" -v hex="$_hex" '
+      function clamp(s) {
+        gsub(/"0-7"|"[4-7]-7"/, "\"0-" maxc "\"", s)
+        if (maxc < 3) gsub(/"0-3"/, "\"0-" maxc "\"", s)
+        gsub(/"ff"|"f0"/, "\"" hex "\"", s)
+        return s
+      }
+      /"Values"[[:space:]]*:[[:space:]]*\[.*\]/ {
+        $0 = clamp($0)
+        pre = $0; sub(/\[.*$/, "[", pre)
+        post = $0; sub(/^.*\]/, "]", post)
+        mid = $0; sub(/^[^[]*\[/, "", mid); sub(/\][^\]]*$/, "", mid)
+        m = split(mid, a, ","); split("", seen); out = ""
+        for (i = 1; i <= m; i++) {
+          k = a[i]; gsub(/^[[:space:]]+|[[:space:]]+$/, "", k)
+          if (k != "" && !(k in seen)) { seen[k] = 1; out = (out == "" ? k : out ", " k) }
+        }
+        print pre out post; next
+      }
+      /"Values"[[:space:]]*:[[:space:]]*\[/ { inv=1; n=0; split("", seen); print; next }
+      inv && /^[[:space:]]*\],?[[:space:]]*$/ {
+        for (i = 1; i <= n; i++) printf "%s%s\n", vals[i], (i < n ? "," : "")
+        inv=0; print; next
+      }
+      {
+        $0 = clamp($0)
+        if (inv) {
+          k = $0; sub(/,[[:space:]]*$/, "", k); gsub(/^[[:space:]]+|[[:space:]]+$/, "", k)
+          if (k != "" && !(k in seen)) { seen[k] = 1; sub(/,[[:space:]]*$/, "", $0); vals[++n] = $0 }
+          next
+        }
+        print
+      }
+    ' "$_v/etc/powerhint.json" > "$GBOS_RUN/powerhint.json" \
+      && chmod 0644 "$GBOS_RUN/powerhint.json" \
+      && mount --bind "$GBOS_RUN/powerhint.json" "$_v/etc/powerhint.json" \
+      && log "hook: power: powerhint.json cpusets clamped & deduplicated to 0-$_maxc ($_ncpu threads)"
+  fi
+  # Sleep state: guard (default) holds a kernel wake_lock so Android sleeps/Dozes cleanly (DPMS Off + 0 backlight + min CPU freq via
+  # sleep-guard.sh) without entering raw kernel s2idle / ACPI S3, which freezes loop-mounted super.img and older BIOS/EC firmware.
+  case "${SUSPEND_MODE:-guard}" in
+    deep)
+      [ -w "$_sys/power/mem_sleep" ] && echo deep > "$_sys/power/mem_sleep" 2>/dev/null && log "hook: suspend mode: deep (ACPI S3)"
+      ;;
+    s2idle)
+      [ -w "$_sys/power/mem_sleep" ] && echo s2idle > "$_sys/power/mem_sleep" 2>/dev/null && log "hook: suspend mode: s2idle"
+      ;;
+    none|0|off)
+      [ -w "$_sys/power/wake_lock" ] && echo gbos_nosleep > "$_sys/power/wake_lock" 2>/dev/null && log "hook: suspend mode: none (wake_lock held)"
+      ;;
+    *)
+      [ -w "$_sys/power/mem_sleep" ] && echo s2idle > "$_sys/power/mem_sleep" 2>/dev/null
+      [ -w "$_sys/power/wake_lock" ] && echo gbos_nos2idle > "$_sys/power/wake_lock" 2>/dev/null && log "hook: suspend mode: guard (wake_lock held, sleep-guard active)"
+      ;;
+  esac
+  # Enable wakeup on ACPI Power Button, Lid Switch, PS/2 keyboard & touchpad, and Sony VAIO lid resume.
+  for _w in "$_sys"/bus/acpi/devices/PNP0C0C:*/power/wakeup \
+            "$_sys"/bus/acpi/devices/PNP0C0D:*/power/wakeup \
+            "$_sys"/bus/acpi/devices/LNXPWRBN:*/power/wakeup \
+            "$_sys"/bus/acpi/devices/LNXSLPBN:*/power/wakeup \
+            "$_sys"/devices/platform/i8042/serio*/power/wakeup; do
+    [ -w "$_w" ] && echo enabled > "$_w" 2>/dev/null || true
+  done
+  [ -w "$_sys/devices/platform/sony-laptop/lid_resume_S3" ] && echo 1 > "$_sys/devices/platform/sony-laptop/lid_resume_S3" 2>/dev/null || true
+}
+
+gbos_camera_setup
+gbos_power_setup
+chmod 0644 "$GBOS_RUN"/* 2>/dev/null || true
+
 # apgetty (UART shell) has no UART configured here and crash-loops
-: > /tmp/empty.rc && mount --bind /tmp/empty.rc /new/system_ext/etc/init/apgetty.rc && log "hook: apgetty disabled"
-mount --bind /tmp/empty.rc /new/vendor/etc/init/hal_desktop_charge_control_default.rc 2>/dev/null && log "hook: charge_control disabled"
-mount --bind /tmp/empty.rc /new/vendor/etc/init/suspend_notification_service.rc 2>/dev/null && log "hook: suspend_notification disabled"
-mount --bind /tmp/empty.rc /new/vendor/etc/init/suspend_diagnostics.rc 2>/dev/null && log "hook: suspend_diagnostics disabled"
+: > "$GBOS_RUN/empty.rc" && chmod 0644 "$GBOS_RUN/empty.rc" && mount --bind "$GBOS_RUN/empty.rc" /new/system_ext/etc/init/apgetty.rc && log "hook: apgetty disabled"
+mount --bind "$GBOS_RUN/empty.rc" /new/vendor/etc/init/hal_desktop_charge_control_default.rc 2>/dev/null && log "hook: charge_control disabled"
+mount --bind "$GBOS_RUN/empty.rc" /new/vendor/etc/init/suspend_notification_service.rc 2>/dev/null && log "hook: suspend_notification disabled"
+mount --bind "$GBOS_RUN/empty.rc" /new/vendor/etc/init/suspend_diagnostics.rc 2>/dev/null && log "hook: suspend_diagnostics disabled"
 log "hook: kvm: $(ls /sys/class/misc | grep -E 'kvm|vhost' | tr '\n' ' ')"
 
 # KVM trace -> kvmtrace.txt is opt-in; it can write tens of megabytes while Trusty starts.

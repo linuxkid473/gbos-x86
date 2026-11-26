@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Userspace emulation of x86 instructions that Skylake-family CPUs lack
- * (GFNI, AVX-VNNI(-INT8), SHA-NI, 256-bit VAES/VPCLMULQDQ, AVX-IFMA), and the ADX
- * instructions (ADCX/ADOX) that Haswell lacks.
+ * Userspace emulation of x86 instructions that Haswell / Skylake-family CPUs lack
+ * (GFNI, AVX-VNNI(-INT8), SHA-NI, 256-bit VAES/VPCLMULQDQ, AVX-IFMA, plus ADX,
+ * RDSEED and CLFLUSHOPT/CLWB for 4th Gen Haswell).
  * Entered from the #UD handler for user-mode faults. AVX-512 and AMX are not handled.
  */
 #include <linux/sched.h>
@@ -12,6 +12,8 @@
 #include <linux/init.h>
 #include <linux/atomic.h>
 #include <linux/mm.h>
+#include <linux/highmem.h>
+#include <linux/random.h>
 #include <linux/fs.h>
 #include <linux/path.h>
 #include <linux/dcache.h>
@@ -22,6 +24,8 @@
 #include <asm/insn.h>
 #include <asm/insn-eval.h>
 #include <asm/ptrace.h>
+#include <asm/processor-flags.h>
+#include <asm/special_insns.h>
 #include <asm/traps.h>
 #include <asm/fpu/api.h>
 #include <asm/fpu/types.h>
@@ -49,17 +53,40 @@ enum op_kind {
 	K_NONE, K_GF2P8MUL, K_GF2P8AFF, K_GF2P8AFFINV, K_VNNI_BUSD, K_VNNI_WSSD, K_VNNI8,
 	K_IFMA_L, K_IFMA_H, K_VAES, K_CLMUL,
 	K_SHA1NEXTE, K_SHA1MSG1, K_SHA1MSG2, K_SHA256RNDS2, K_SHA256MSG1, K_SHA256MSG2, K_SHA1RNDS4,
-	K_ADCX, K_ADOX,		/* general-purpose registers, handled by try_adx() */
+	K_ADCX, K_ADOX, K_RDSEED, K_CLFLUSHOPT, K_CLWB,
 };
 
 struct op {
 	enum op_kind kind;
-	bool vex, has_imm, three_op;
-	int len;            /* 16 or 32 */
-	int dst, src1, rm;  /* vector register numbers; rm < 0 means memory */
+	bool vex, has_imm, three_op, gpr_op;
+	int len;            /* 16 or 32 for vector ops; 1/4/8 for GPR/cache ops */
+	int dst, src1, rm;  /* register numbers; rm < 0 means memory */
+	int is_64, is_16;
 	int sat, a_signed, b_signed, aes_op;
 	u8 imm;
 };
+
+static unsigned long *gpr_ptr(struct pt_regs *regs, int n)
+{
+	switch (n) {
+	case 0:  return &regs->ax;
+	case 1:  return &regs->cx;
+	case 2:  return &regs->dx;
+	case 3:  return &regs->bx;
+	case 4:  return &regs->sp;
+	case 5:  return &regs->bp;
+	case 6:  return &regs->si;
+	case 7:  return &regs->di;
+	case 8:  return &regs->r8;
+	case 9:  return &regs->r9;
+	case 10: return &regs->r10;
+	case 11: return &regs->r11;
+	case 12: return &regs->r12;
+	case 13: return &regs->r13;
+	case 14: return &regs->r14;
+	default: return &regs->r15;
+	}
+}
 
 /* Classify a decoded instruction; returns false if not one we emulate. */
 static bool classify(struct insn *insn, struct op *o)
@@ -91,27 +118,70 @@ static bool classify(struct insn *insn, struct op *o)
 			return false;
 		opc = insn->opcode.bytes[0];
 	} else {
-		/* legacy SSE encodings: 0F 38 xx / 0F 3A xx, with optional 66 */
+		bool has_66 = false, has_f2 = false, has_f3 = false, has_lock = false;
+
+		pp = 0;
+		for (i = 0; i < insn->prefixes.nbytes; i++) {
+			if (insn->prefixes.bytes[i] == 0x66) {
+				has_66 = true;
+				pp = 1;
+			} else if (insn->prefixes.bytes[i] == 0xf3) {
+				has_f3 = true;
+				pp = 2;
+			} else if (insn->prefixes.bytes[i] == 0xf2) {
+				has_f2 = true;
+				pp = 3;
+			} else if (insn->prefixes.bytes[i] == 0xf0) {
+				has_lock = true;
+			}
+		}
+		if (insn->rex_prefix.nbytes) {
+			w = !!X86_REX_W(insn->rex_prefix.value);
+			if (X86_REX_R(insn->rex_prefix.value))
+				reg += 8;
+			if (X86_REX_B(insn->rex_prefix.value))
+				rm += 8;
+		}
+		/* 2-byte opcodes Haswell (4th Gen) lacks: RDSEED (0F C7 /7), CLFLUSHOPT/CLWB (66 0F AE /7,/6) */
+		if (insn->opcode.nbytes == 2 && insn->opcode.bytes[0] == 0x0f) {
+			opc = insn->opcode.bytes[1];
+			if (opc == 0xc7 && X86_MODRM_MOD(modrm) == 3 && X86_MODRM_REG(modrm) == 7 &&
+			    !has_lock && !has_f2 && !has_f3) {
+				o->kind = K_RDSEED;
+				o->gpr_op = true;
+				o->dst = rm;
+				o->rm = rm;
+				o->is_64 = w;
+				o->is_16 = !w && has_66;
+				return true;
+			}
+			if (opc == 0xae && X86_MODRM_MOD(modrm) != 3 &&
+			    (X86_MODRM_REG(modrm) == 7 || X86_MODRM_REG(modrm) == 6) &&
+			    !has_lock && has_66 && !has_f2 && !has_f3) {
+				o->kind = X86_MODRM_REG(modrm) == 7 ? K_CLFLUSHOPT : K_CLWB;
+				o->gpr_op = true;
+				o->rm = -1;
+				o->len = 1;
+				return true;
+			}
+			return false;
+		}
+		/* legacy SSE / 3-byte encodings: 0F 38 xx / 0F 3A xx, with optional 66/F3 */
 		if (insn->opcode.nbytes != 3 || insn->opcode.bytes[0] != 0x0f)
 			return false;
 		m = insn->opcode.bytes[1] == 0x38 ? 2 : insn->opcode.bytes[1] == 0x3a ? 3 : 0;
 		if (!m)
 			return false;
 		opc = insn->opcode.bytes[2];
-		pp = 0;
-		for (i = 0; i < insn->prefixes.nbytes; i++) {
-			if (insn->prefixes.bytes[i] == 0x66)
-				pp = 1;
-			else if (insn->prefixes.bytes[i] == 0xf3)
-				pp = 2;
-			else if (insn->prefixes.bytes[i] == 0xf2)
-				pp = 3;
-		}
-		if (insn->rex_prefix.nbytes) {
-			if (X86_REX_R(insn->rex_prefix.value))
-				reg += 8;
-			if (X86_REX_B(insn->rex_prefix.value))
-				rm += 8;
+		/* ADX (ADCX: 66 0F 38 F6 /r, ADOX: F3 0F 38 F6 /r): used unconditionally by BoringSSL */
+		if (m == 2 && opc == 0xf6 && !has_lock && !has_f2 && (has_66 ^ has_f3)) {
+			o->kind = has_66 ? K_ADCX : K_ADOX;
+			o->gpr_op = true;
+			o->dst = reg;
+			o->rm = X86_MODRM_MOD(modrm) == 3 ? rm : -1;
+			o->is_64 = w;
+			o->len = w ? 8 : 4;
+			return true;
 		}
 		/* register-form r/m below; memory form is flagged by mod != 3 */
 	}
@@ -365,7 +435,7 @@ static void prof_hit(unsigned long ip, int kind)
 		struct prof_ent *e = &prof[(h + i) % PROF_SLOTS];
 
 		if (READ_ONCE(e->key) == key) {
-			atomic64_inc(&e->count);
+			atomic64_add(1024, &e->count);
 			goto out;
 		}
 		if (!READ_ONCE(e->key)) {
@@ -382,7 +452,7 @@ static void prof_hit(unsigned long ip, int kind)
 				memcpy(e->path, name, sizeof(name));
 				e->off = off;
 				e->kind = kind;
-				atomic64_set(&e->count, 1);
+				atomic64_set(&e->count, 1024);
 				smp_wmb();
 				WRITE_ONCE(e->key, key);
 				spin_unlock(&prof_lock);
@@ -426,8 +496,10 @@ static void count_hit(unsigned long ip, int kind)
 	static atomic64_t total;
 	long n = atomic64_inc_return(&total);
 
-	prof_hit(ip, kind);
-	if (!(n & 0xfffff)) {
+	/* Sample 1-in-1024 traps so multi-threaded media/crypto workers do not contend on current->mm->mmap_lock */
+	if (!(n & 0x3ff))
+		prof_hit(ip, kind);
+	if (!(n & 0x3fffff)) {
 		pr_info("isa_emu: %ld instructions emulated (last: %s[%d] kind=%d)\n",
 			n, current->comm, task_pid_nr(current), kind);
 		prof_dump();
@@ -440,6 +512,7 @@ bool isa_emu_handle_ud(struct pt_regs *regs)
 	struct insn insn;
 	struct op o;
 	u8 mem[32];
+	void __user *addr = NULL;
 	struct xregs_state *xs;
 	unsigned long ip = regs->ip;
 	int nbuf, kind;
@@ -458,8 +531,6 @@ bool isa_emu_handle_ud(struct pt_regs *regs)
 		return false;
 
 	if (o.rm < 0) {
-		void __user *addr;
-
 		/* the decoder does not fold VEX.X/B into the REX bits it uses for addressing */
 		if (o.vex) {
 			u8 *vp = insn.vex_prefix.bytes;
@@ -483,11 +554,49 @@ bool isa_emu_handle_ud(struct pt_regs *regs)
 		}
 	}
 
-	xs = fpu_emu_begin();
-	do_emulate(&o, xs, mem);
-	fpu_emu_end();
+	if (o.gpr_op) {
+		switch (o.kind) {
+		case K_RDSEED: {
+			unsigned long *dstp = gpr_ptr(regs, o.dst);
+			u64 rnd = 0;
+
+			get_random_bytes(&rnd, sizeof(rnd));
+			if (o.is_64)
+				*dstp = (unsigned long)rnd;
+			else if (o.is_16)
+				*dstp = (*dstp & ~0xffffUL) | (unsigned long)(rnd & 0xffffU);
+			else
+				*dstp = (unsigned long)(u32)rnd;
+			regs->flags = (regs->flags & ~(X86_EFLAGS_OF | X86_EFLAGS_SF |
+				       X86_EFLAGS_ZF | X86_EFLAGS_AF | X86_EFLAGS_PF)) | X86_EFLAGS_CF;
+			break;
+		}
+		case K_CLFLUSHOPT:
+		case K_CLWB: {
+			struct page *page = NULL;
+			unsigned long uaddr = (unsigned long)addr;
+
+			if (get_user_pages_fast(uaddr & PAGE_MASK, 1, 0, &page) == 1) {
+				void *kv = kmap_local_page(page);
+
+				clflush((char *)kv + (uaddr & ~PAGE_MASK));
+				kunmap_local(kv);
+				put_page(page);
+			} else {
+				mb();
+			}
+			break;
+		}
+		default:
+			return false;
+		}
+	} else {
+		xs = fpu_emu_begin();
+		do_emulate(&o, xs, mem);
+		fpu_emu_end();
+	}
 
 	regs->ip += insn.length;
-	count_hit(regs->ip - insn.length, o.kind);
+	count_hit(ip, o.kind);
 	return true;
 }

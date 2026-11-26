@@ -17,6 +17,7 @@ import hashlib, struct, sys
 ORIG_SHA = '64a0f2537a5917822cb3f538dc74229e7ccf4ca45a30265bb97f742678ba294e'
 NAME_PTR_OFF = 0x2c740   # backend_vkms.name
 VKMS, AMDGPU = 0x66dd, 0x6b63   # addresses of the strings "vkms" and "amdgpu" in .rodata
+CLFLUSHOPT_SITES = (0x14940, 0x19c20)   # i915_bo_flush, xe_bo_flush: 66 0f ae 39 -> 90 0f ae 39 (Haswell/Broadwell lack CLFLUSHOPT)
 
 
 def main():
@@ -28,8 +29,11 @@ def main():
     (cur,) = struct.unpack_from('<Q', d, NAME_PTR_OFF)
     assert cur == VKMS, hex(cur)
     struct.pack_into('<Q', d, NAME_PTR_OFF, AMDGPU)
+    for off in CLFLUSHOPT_SITES:
+        assert d[off:off + 4] == b'\x66\x0f\xae\x39', hex(off)
+        d[off] = 0x90
     open(dst, 'wb').write(d)
-    print('patched: backend "vkms" now matches DRM driver "amdgpu"')
+    print('patched: backend "vkms" now matches DRM driver "amdgpu"; clflushopt -> clflush')
 
 
 if __name__ == '__main__':

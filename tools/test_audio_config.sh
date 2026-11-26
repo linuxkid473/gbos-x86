@@ -248,6 +248,36 @@ gen acp gbos-gen Generic_1 "HD-Audio Generic" >/dev/null
 chk "acp: no ACP card -> internal mic on analog capture" "$C" "<CapturePCM>hw:Generic_1,0</CapturePCM>"
 nochk "acp: no ACP card -> the HDA card's DMIC PCM is not used" "$C" "hw:Other"
 
+# ---- 3d. Intel 4th Gen Haswell (Sony VAIO Flip 13): HDMI audio is a separate PCI HDA controller (card 0 "HDMI", 00:03.0), while
+# internal analog audio is card 1 "PCH" (00:1b.0, Realtek ALC286) with NO HDMI PCMs on PCH and separate Headphone / Mic jacks
+D=$(mk hsw)
+cat > $D/cards <<'EOF'
+ 0 [HDMI           ]: HDA-Intel - HDA Intel HDMI
+                      HDA Intel HDMI at 0xf7e34000 irq 50
+ 1 [PCH            ]: HDA-Intel - HDA Intel PCH
+                      HDA Intel PCH at 0xf7e30000 irq 51
+EOF
+cat > $D/pcm <<'EOF'
+00-03: HDMI 0 : HDMI 0 : playback 1
+00-07: HDMI 1 : HDMI 1 : playback 1
+00-08: HDMI 2 : HDMI 2 : playback 1
+01-00: ALC286 Analog : ALC286 Analog : playback 1 : capture 1
+EOF
+cat > $D/input <<'EOF'
+N: Name="HDA Intel HDMI HDMI/DP,pcm=3"
+N: Name="HDA Intel HDMI HDMI/DP,pcm=7"
+N: Name="HDA Intel HDMI HDMI/DP,pcm=8"
+N: Name="HDA Intel PCH Headphone"
+N: Name="HDA Intel PCH Mic"
+EOF
+gen hsw gbos-gen PCH "HDA Intel PCH" >/dev/null
+C=$W/out-hsw/gbos-gen/audio_config.xml
+wellformed "$C"
+chk "haswell: playback on card PCH" "$C" "<PlaybackPCM>hw:PCH,0</PlaybackPCM>"
+chk "haswell: headphone jack = PCH Headphone" "$C" "<JackDev>HDA Intel PCH Headphone</JackDev>"
+chk "haswell: mic jack = PCH Mic" "$C" "<JackDev>HDA Intel PCH Mic</JackDev>"
+nochk "haswell: no HDMI sections on PCH (HDMI is on card 0)" "$C" "<HDMI1>"
+
 # ---- 4. SOF, combo jack, one HDMI, only DMIC16kHz ---------------------------------------------------------------------------
 gen sofcombo gbos-gen sofrt5682 sof-rt5682 >/dev/null
 C=$W/out-sofcombo/gbos-gen/audio_config.xml
@@ -447,10 +477,10 @@ cmp -s "$W/pchcp/mixer_paths.xml" "$TPL/mixer_paths.xml" && ok "volmax: file unt
 H=$ROOT/usb/hook.sh
 chk "hook: PCH path runs volmax.sh on a copy" "$H" 'VMSG=$(sh $G/audio/volmax.sh /proc/asound/card$CNO /tmp/gbos-audio/$AC/mixer_paths.xml) && ASRC=/tmp/gbos-audio/$AC'
 
-# ---- 6. hook.sh: card id PCH still takes the static files, and generation is guarded -------------------------------------
+# ---- 6. hook.sh: Latitude 5300 PCH still takes static files; non-combo/Haswell PCH and non-PCH cards use gen_config.sh ------
 H=$ROOT/usb/hook.sh
-chk "hook: PCH uses the shipped config"   "$H" 'ASRC=$G/audio/gbos-hda-pch; ADEF=$G/audio/audio_default.xml'
-chk "hook: generation only for non-PCH"   "$H" 'if [ -n "$CID" ] && [ "$CID" != PCH ]; then'
+chk "hook: PCH uses the shipped config when combo+HDMI match" "$H" 'ASRC=$G/audio/gbos-hda-pch; ADEF=$G/audio/audio_default.xml'
+chk "hook: generation guarded by PCH_STATIC"                  "$H" 'if [ -n "$CID" ] && [ "$PCH_STATIC" = 0 ]; then'
 chk "hook: no-card path leaves vendor audio configuration untouched" "$H" 'hook: no ALSA card; leaving vendor audio configuration untouched'
 chk "hook: calls the generator"           "$H" 'sh $G/audio/gen_config.sh'
 chk "hook: clears stale sound nodes after HDA re-probe" "$H" 'rm -f /dev/snd/*'

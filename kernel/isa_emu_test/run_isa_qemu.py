@@ -40,10 +40,12 @@ def expected_checks() -> int:
 
 
 def main() -> int:
-    kernel = sys.argv[1] if len(sys.argv) > 1 else str(ROOT / "usb/out/BOOTX64.EFI")
-    # QEMU CPU model. Skylake-Client lacks the AVX-512-era instructions the emulator covers, but it has ADX; Haswell does not,
-    # so `run_isa_qemu.py KERNEL Haswell` also exercises the ADCX/ADOX emulation.
-    cpu = sys.argv[2] if len(sys.argv) > 2 else "Skylake-Client"
+    args = [a for a in sys.argv[1:] if not a.startswith("--cpu=")]
+    kernel = args[0] if args else str(ROOT / "usb/out/BOOTX64.EFI")
+    # QEMU CPU model(s). Skylake-Client lacks the AVX-512-era instructions the emulator covers, while Haswell also exercises
+    # ADCX/ADOX, RDSEED and CLFLUSHOPT/CLWB. Supports `run_isa_qemu.py [KERNEL] [CPU]` or `--cpu=CPU` (defaults to both).
+    flag_cpus = [a.split("=", 1)[1] for a in sys.argv[1:] if a.startswith("--cpu=")]
+    cpus = flag_cpus if flag_cpus else ([args[1]] if len(args) > 1 else ["Haswell", "Skylake-Client"])
     test = HERE / "t"
     if not test.exists():
         print("no test program (kernel/isa_emu_test/t): run kernel/isa_emu_test/build_test.sh in gbos-kbuild")
@@ -53,24 +55,29 @@ def main() -> int:
         ("dev/console", 0o20600, b""),
         ("init", 0o100755, test.read_bytes()),
     ]
-    with tempfile.TemporaryDirectory() as tmp:
-        rd = pathlib.Path(tmp) / "rd.cpio"
-        rd.write_bytes(cpio(files))
-        cmd = ["qemu-system-x86_64", "-machine", "q35", "-cpu", cpu, "-m", "1024",
-               "-smp", "2", "-nographic", "-no-reboot", "-nic", "none", "-kernel", kernel,
-               "-initrd", str(rd), "-append",
-               "console=ttyS0 8250.nr_uarts=1 panic=-1 loglevel=4 rdinit=/init"]
-        r = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=300)
-    out = r.stdout + r.stderr
-    (HERE / "last_isa.log").write_text(out)
-    passes = out.count("PASS ")
-    fails = out.count("FAIL ")
     want = expected_checks()
-    print("%d PASS, %d FAIL (of %d in t.c, -cpu %s)" % (passes, fails, want, cpu))
-    for line in out.splitlines():
-        if line.startswith(("PASS ", "FAIL ")):
-            print(" ", line)
-    if passes == want and fails == 0:
+    all_ok = True
+    for cpu in cpus:
+        with tempfile.TemporaryDirectory() as tmp:
+            rd = pathlib.Path(tmp) / "rd.cpio"
+            rd.write_bytes(cpio(files))
+            cmd = ["qemu-system-x86_64", "-machine", "q35", "-cpu", cpu, "-m", "1024",
+                   "-smp", "2", "-nographic", "-no-reboot", "-nic", "none", "-kernel", kernel,
+                   "-initrd", str(rd), "-append",
+                   "console=ttyS0 8250.nr_uarts=1 panic=-1 loglevel=4 rdinit=/init"]
+            r = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=300)
+        out = r.stdout + r.stderr
+        (HERE / f"last_isa_{cpu}.log").write_text(out)
+        (HERE / "last_isa.log").write_text(out)
+        passes = out.count("PASS ")
+        fails = out.count("FAIL ")
+        print("%d PASS, %d FAIL (of %d in t.c, -cpu %s)" % (passes, fails, want, cpu))
+        for line in out.splitlines():
+            if line.startswith(("PASS ", "FAIL ")):
+                print(" ", line)
+        if passes != want or fails != 0 or "ISA_EMU_TEST_PASS" not in out:
+            all_ok = False
+    if all_ok:
         print("ISA_EMU_TEST_PASS")
         return 0
     print("ISA_EMU_TEST_FAIL")

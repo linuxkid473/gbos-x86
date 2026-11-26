@@ -58,6 +58,7 @@ detect_host_hardware() {
       HP) _vclean="HP" ;;
       ASUS) _vclean="ASUS" ;;
       ACER) _vclean="Acer" ;;
+      SONY) _vclean="Sony" ;;
     esac
     case "$DETECTED_PRODUCT" in
       *"$_vclean"*) DETECTED_DEVICE_MODEL="$DETECTED_PRODUCT" ;;
@@ -259,11 +260,12 @@ detect_host_hardware() {
 apply_hardware_config() {
   _cfg="$1"
   [ -f "$_cfg" ] || { echo "apply_hardware_config: $_cfg not found" >&2; return 1; }
+  _sedi() { sed "$1" "$_cfg" > "$_cfg.tmp" && mv "$_cfg.tmp" "$_cfg"; }
 
   # Set DEVICE_MODEL
   if [ -n "$DETECTED_DEVICE_MODEL" ]; then
     if grep -q '^#*DEVICE_MODEL=' "$_cfg"; then
-      sed -i "s|^#*DEVICE_MODEL=.*|DEVICE_MODEL=\"$DETECTED_DEVICE_MODEL\"|" "$_cfg"
+      _sedi "s|^#*DEVICE_MODEL=.*|DEVICE_MODEL=\"$DETECTED_DEVICE_MODEL\"|"
     else
       echo "DEVICE_MODEL=\"$DETECTED_DEVICE_MODEL\"" >> "$_cfg"
     fi
@@ -272,7 +274,7 @@ apply_hardware_config() {
   # Set DENSITY
   if [ -n "$DETECTED_DENSITY" ]; then
     if grep -q '^#*DENSITY=' "$_cfg"; then
-      sed -i "s|^#*DENSITY=.*|DENSITY=$DETECTED_DENSITY|" "$_cfg"
+      _sedi "s|^#*DENSITY=.*|DENSITY=$DETECTED_DENSITY|"
     else
       echo "DENSITY=$DETECTED_DENSITY" >> "$_cfg"
     fi
@@ -281,7 +283,7 @@ apply_hardware_config() {
   # Set RESOLUTION
   if [ -n "$DETECTED_RESOLUTION" ]; then
     if grep -q '^#*RESOLUTION=' "$_cfg"; then
-      sed -i "s|^#*RESOLUTION=.*|RESOLUTION=\"$DETECTED_RESOLUTION\"|" "$_cfg"
+      _sedi "s|^#*RESOLUTION=.*|RESOLUTION=\"$DETECTED_RESOLUTION\"|"
     else
       echo "RESOLUTION=\"$DETECTED_RESOLUTION\"" >> "$_cfg"
     fi
@@ -290,7 +292,7 @@ apply_hardware_config() {
   # Set GPU_SOFTWARE
   if [ -n "$DETECTED_GPU_SW" ]; then
     if grep -q '^#*GPU_SOFTWARE=' "$_cfg"; then
-      sed -i "s|^#*GPU_SOFTWARE=.*|GPU_SOFTWARE=$DETECTED_GPU_SW|" "$_cfg"
+      _sedi "s|^#*GPU_SOFTWARE=.*|GPU_SOFTWARE=$DETECTED_GPU_SW|"
     else
       echo "GPU_SOFTWARE=$DETECTED_GPU_SW" >> "$_cfg"
     fi
@@ -299,7 +301,7 @@ apply_hardware_config() {
   # Set GPU_VULKAN
   if [ -n "$DETECTED_GPU_VK" ]; then
     if grep -q '^#*GPU_VULKAN=' "$_cfg"; then
-      sed -i "s|^#*GPU_VULKAN=.*|GPU_VULKAN=$DETECTED_GPU_VK|" "$_cfg"
+      _sedi "s|^#*GPU_VULKAN=.*|GPU_VULKAN=$DETECTED_GPU_VK|"
     else
       echo "GPU_VULKAN=$DETECTED_GPU_VK" >> "$_cfg"
     fi
@@ -308,7 +310,7 @@ apply_hardware_config() {
   # Set LOAD_I915
   if [ -n "$DETECTED_LOAD_I915" ]; then
     if grep -q '^#*LOAD_I915=' "$_cfg"; then
-      sed -i "s|^#*LOAD_I915=.*|LOAD_I915=$DETECTED_LOAD_I915|" "$_cfg"
+      _sedi "s|^#*LOAD_I915=.*|LOAD_I915=$DETECTED_LOAD_I915|"
     else
       echo "LOAD_I915=$DETECTED_LOAD_I915" >> "$_cfg"
     fi
@@ -317,7 +319,7 @@ apply_hardware_config() {
   # Set XE_PARAMS if needed
   if [ -n "$DETECTED_XE_PARAMS" ]; then
     if grep -q '^#*XE_PARAMS=' "$_cfg"; then
-      sed -i "s|^#*XE_PARAMS=.*|XE_PARAMS=\"$DETECTED_XE_PARAMS\"|" "$_cfg"
+      _sedi "s|^#*XE_PARAMS=.*|XE_PARAMS=\"$DETECTED_XE_PARAMS\"|"
     else
       echo "XE_PARAMS=\"$DETECTED_XE_PARAMS\"" >> "$_cfg"
     fi
@@ -326,7 +328,7 @@ apply_hardware_config() {
   # Set EXTRA_SLEEP if needed
   if [ "${DETECTED_EXTRA_SLEEP:-0}" -gt 0 ]; then
     if grep -q '^#*EXTRA_SLEEP=' "$_cfg"; then
-      sed -i "s|^#*EXTRA_SLEEP=.*|EXTRA_SLEEP=$DETECTED_EXTRA_SLEEP|" "$_cfg"
+      _sedi "s|^#*EXTRA_SLEEP=.*|EXTRA_SLEEP=$DETECTED_EXTRA_SLEEP|"
     else
       echo "EXTRA_SLEEP=$DETECTED_EXTRA_SLEEP" >> "$_cfg"
     fi

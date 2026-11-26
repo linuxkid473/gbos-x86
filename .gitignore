@@ -70,6 +70,22 @@ __pycache__/
 /usb/patched/vulkan.swiftshader.so
 # RADV Android HAL (13 MB): built by tools/radv-android/build.sh, copied to usb/patched/ by hand
 /usb/patched/vulkan.radv.so
+# HasVK Android HAL (21 MB): built by tools/hasvk-android/build.sh, copied to usb/patched/
+/usb/patched/vulkan.hasvk.so
+# Intel Gen 7-8 VA-API driver (8 MB): built by tools/i965-vaapi-android/build.sh, copied to usb/patched/
+/usb/patched/i965_drv_video.so
+# Haswell/AVX2 & UVC camera patches generated locally from Google's OS image by build.sh / tools/port_build.sh --write
+/usb/patched/swcodec.*.so
+/usb/patched/system.libaudioprocessing.so
+/usb/patched/system.libsfplugin_ccodec_utils.so
+/usb/patched/system.libstagefright.so
+/usb/patched/system.libyuv.so
+/usb/patched/vendor.libcodec2_soft_common.so
+/usb/patched/vendor.libsfplugin_ccodec_utils.so
+/usb/patched/vendor.libyuv.so
+/usb/patched/widevine.libcrypto.so
+/usb/patched/clearkey.libcrypto.so
+/usb/patched/libdesktop_camera_common.cpu.so
 
 
 # KernelSU's userspace (19 MB): fetched by build.sh from the KernelSU release on GitHub
