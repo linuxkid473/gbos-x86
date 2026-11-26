@@ -71,6 +71,10 @@ g() { grep "$@" $W/all.txt || true; }
   g -E '^qca/(rampatch_usb|nvm_usb|rampatch_0|nvm_0|htbtfw|crbtfw|crnv|QCA|rampatch_|nvm_)'
   # Broadcom Bluetooth + brcmfmac PCIe
   g -E '^brcm/(BCM|brcmfmac4(3602|350|356|358|3455|371))'
+  # Marvell 88W8897 Wi-Fi + Bluetooth (Surface Pro 4/5/6, Book 1/2, Laptop 1/2; mwifiex_pcie). Without it the Surface Pro 5 had
+  # "Direct firmware load for mrvl/pcie8897_uapsta.bin failed with error -2": no Wi-Fi, and no Bluetooth either (the same firmware
+  # starts the chip's USB Bluetooth function).
+  g -E '^mrvl/pcie8897_uapsta\.bin$'
   # Cirrus amps found on some laptops
   g -E '^cirrus/cs35l(41|56)-[^/]*$'
   # Texas Instruments TAS2781/TAS2563 smart amps (Lenovo ThinkBook/Yoga/Legion, Meteor Lake+; I2C amps behind an HDA codec). The HDA driver

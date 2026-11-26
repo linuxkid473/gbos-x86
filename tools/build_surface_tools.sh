@@ -15,7 +15,8 @@ docker run --rm -i --platform linux/amd64 -v "$REPO:/repo" -e HOSTUID=$(id -u) -
 set -e
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq --no-install-recommends g++ cmake meson ninja-build pkg-config libeigen3-dev libcli11-dev libmsgsl-dev git ca-certificates patch binutils file >/dev/null
+# make: cmake's default generator for fmt/spdlog (--no-install-recommends does not pull it in with g++)
+apt-get install -y -qq --no-install-recommends g++ make cmake meson ninja-build pkg-config libeigen3-dev libcli11-dev libmsgsl-dev git ca-certificates patch binutils file >/dev/null
 W=/tmp/iw; rm -rf $W; mkdir -p $W; cd $W; P=$W/prefix
 git clone -q --depth 1 -b 10.2.1 https://github.com/fmtlib/fmt
 git clone -q --depth 1 -b v1.14.1 https://github.com/gabime/spdlog
