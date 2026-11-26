@@ -199,7 +199,7 @@ public class MainActivity extends Activity {
 
         // ---------------------------------------------------------------- Card: Googlebook OS (Google's system image)
         LinearLayout googleCard = M3.card(this, 20);
-        googleCard.addView(M3.eyebrow(this, "GOOGLEBOOK OS"));
+        googleCard.addView(M3.eyebrow(this, "GOOGLEBOOK OS UPDATE"));
         googleTitle = M3.titleLarge(this, "Googlebook OS");
         googleTitle.setPadding(0, M3.dp(this, 4), 0, M3.dp(this, 2));
         googleCard.addView(googleTitle);
