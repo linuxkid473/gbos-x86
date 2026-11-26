@@ -28,7 +28,21 @@ final class Report {
 
     static final class Made {
         String id, fileName, issueUrl;
+        Uri uri;
         long size;
+    }
+
+    /** The system share sheet with the encrypted .zip (e-mail, chat, Drive ...): only the maintainer's key opens it. */
+    static android.content.Intent shareIntent(Made m) {
+        android.content.Intent i = new android.content.Intent(android.content.Intent.ACTION_SEND);
+        i.setType("application/zip");
+        i.putExtra(android.content.Intent.EXTRA_STREAM, m.uri);
+        i.putExtra(android.content.Intent.EXTRA_SUBJECT, "gbOS86 bug report " + m.id);
+        i.putExtra(android.content.Intent.EXTRA_TEXT, "gbOS86 bug report " + m.id + " (encrypted for the gbOS86 maintainer: "
+                + "tools/open_report.sh open " + m.fileName + " --key report-private.pem).");
+        i.setClipData(android.content.ClipData.newRawUri(m.fileName, m.uri));
+        i.addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        return android.content.Intent.createChooser(i, "Share the bug report");
     }
 
     static Made make(Context c, Updater.Info info, String description, Root.Listener l) throws Exception {
@@ -82,6 +96,7 @@ final class Report {
         v.clear();
         v.put(MediaStore.MediaColumns.IS_PENDING, 0);
         cr.update(uri, v, null, null);
+        made.uri = uri;
         try (android.database.Cursor q = cr.query(uri, new String[] {MediaStore.MediaColumns.SIZE, MediaStore.MediaColumns.DISPLAY_NAME}, null, null, null)) {
             if (q != null && q.moveToFirst()) { made.size = q.getLong(0); String dn = q.getString(1); if (dn != null) made.fileName = dn; }
         }

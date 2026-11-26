@@ -1,7 +1,7 @@
 # Bug report card (built 2026-11-26)
 
 **Decided (user, 2026-11-26):** the report is encrypted for the maintainer and attached to a GitHub issue on the update source repo.
-Built as: `sysupdate.sh report` (root: collect, redact, REPORT.md, .tar.gz), `core/ReportCrypto.java` (RSA-OAEP + AES-CTR + HMAC),
+Built as (Share button added 2026-11-26: the system share sheet with the same encrypted .zip): `sysupdate.sh report` (root: collect, redact, REPORT.md, .tar.gz), `core/ReportCrypto.java` (RSA-OAEP + AES-CTR + HMAC),
 `Report.java` (saves `Download/gbOS86/gbos86-report-ID-TIME.zip`), the card in `MainActivity`, the key file `usb/report.pub`
 (placeholder until the maintainer runs `tools/open_report.sh keygen`), and `tools/open_report.sh open` for the maintainer. The issue
 page is pre-filled with the report id, the update number and the Googlebook OS version only; the user's text is inside the encrypted file.
