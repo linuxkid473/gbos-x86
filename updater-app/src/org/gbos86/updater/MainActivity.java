@@ -46,7 +46,11 @@ public class MainActivity extends Activity {
     private final Handler ui = new Handler(Looper.getMainLooper());
     private TextView updateStatusTitle, updateStatusSubtitle, notesView, progressView;
     private TextView laptopView, integrityView, integrityBadge, folderView, folderSummaryView;
-    private TextView googleTitle, googleDetail, googleStatus;
+    private TextView googleTitle, googleDetail, googleStatus, reportStatus;
+    private android.widget.EditText reportText;
+    private Button reportButton, reportIssueButton, reportShareButton;
+    private String reportIssueUrl;
+    private Report.Made reportMade;
     private Button googleCheckButton, googleInstallButton;
     private long finishingSince;
     private Button checkButton, installButton, stopButton, rebootButton;
@@ -88,7 +92,7 @@ public class MainActivity extends Activity {
 
         // ---------------------------------------------------------------- Hero Card: Updates
         LinearLayout updateCard = M3.card(this, 20);
-        updateCard.addView(M3.eyebrow(this, "UPDATE STATUS"));
+        updateCard.addView(M3.eyebrow(this, "GBOS X86 UPDATES"));
 
         updateStatusTitle = M3.titleLarge(this, "Checking for updates ...");
         updateStatusTitle.setPadding(0, M3.dp(this, 4), 0, M3.dp(this, 2));
@@ -196,7 +200,7 @@ public class MainActivity extends Activity {
 
         // ---------------------------------------------------------------- Card: Googlebook OS (Google's system image)
         LinearLayout googleCard = M3.card(this, 20);
-        googleCard.addView(M3.eyebrow(this, "GOOGLEBOOK OS"));
+        googleCard.addView(M3.eyebrow(this, "GOOGLEBOOK OS UPDATE"));
         googleTitle = M3.titleLarge(this, "Googlebook OS");
         googleTitle.setPadding(0, M3.dp(this, 4), 0, M3.dp(this, 2));
         googleCard.addView(googleTitle);
@@ -217,6 +221,53 @@ public class MainActivity extends Activity {
         addMarginEnd(googleCheckButton, 10);
         googleActions.addView(googleInstallButton);
         googleCard.addView(googleActions);
+
+        // ---------------------------------------------------------------- Card: Bug report (docs/bug-report-plan.md)
+        LinearLayout reportCard = M3.card(this, 20);
+        reportCard.addView(M3.eyebrow(this, "BUG REPORT"));
+        TextView reportTitle = M3.titleLarge(this, "Report a problem");
+        reportTitle.setPadding(0, M3.dp(this, 4), 0, M3.dp(this, 4));
+        reportCard.addView(reportTitle);
+        reportCard.addView(M3.bodySmall(this, "Describe what goes wrong and when. The report holds your text, this laptop's model and specs, "
+                + "and the logs of this start and the one before (serial numbers, network names and accounts removed). It is "
+                + "encrypted so only the gbOS86 maintainer can read it, then you attach it to a GitHub issue."));
+        reportText = new android.widget.EditText(this);
+        reportText.setHint("What happens, what you expected, and since when");
+        reportText.setMinLines(4);
+        reportText.setMaxLines(10);
+        reportText.setGravity(Gravity.TOP | Gravity.START);
+        reportText.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                | android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
+        reportText.setFilters(new android.text.InputFilter[] {new android.text.InputFilter.LengthFilter(4000)});
+        reportText.setTextSize(14);
+        reportText.setTextColor(M3Theme.onSurface(this));
+        reportText.setHintTextColor(M3Theme.onSurfaceVariant(this));
+        reportText.setBackground(M3.roundRectBorder(M3Theme.surfaceContainerHigh(this), M3Theme.outlineVariant(this), M3.dp(this, 1), M3.dp(this, 12)));
+        reportText.setPadding(M3.dp(this, 12), M3.dp(this, 10), M3.dp(this, 12), M3.dp(this, 10));
+        LinearLayout.LayoutParams rtlp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        rtlp.setMargins(0, M3.dp(this, 10), 0, M3.dp(this, 4));
+        reportCard.addView(reportText, rtlp);
+        reportStatus = M3.bodySmall(this, "");
+        reportStatus.setTextIsSelectable(true);
+        reportCard.addView(reportStatus);
+        LinearLayout reportActions = new LinearLayout(this);
+        reportActions.setOrientation(LinearLayout.HORIZONTAL);
+        reportActions.setPadding(0, M3.dp(this, 10), 0, 0);
+        reportButton = M3.filledButton(this, "Generate report", v -> generateReport());
+        reportIssueButton = M3.tonalButton(this, "Open GitHub issue", v -> {
+            if (reportIssueUrl != null) startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(reportIssueUrl)));
+        });
+        reportIssueButton.setVisibility(View.GONE);
+        reportShareButton = M3.tonalButton(this, "Share", v -> {
+            if (reportMade != null && reportMade.uri != null) startActivity(Report.shareIntent(reportMade));
+        });
+        reportShareButton.setVisibility(View.GONE);
+        reportActions.addView(reportButton);
+        addMarginEnd(reportButton, 10);
+        reportActions.addView(reportIssueButton);
+        addMarginEnd(reportIssueButton, 10);
+        reportActions.addView(reportShareButton);
+        reportCard.addView(reportActions);
 
         // ---------------------------------------------------------------- Card 3: Install from Folder
         LinearLayout localCard = M3.card(this, 20);
@@ -267,7 +318,7 @@ public class MainActivity extends Activity {
         actionCard = M3.card(this, 20);
         actionCard.addView(M3.eyebrow(this, "MAINTENANCE"));
 
-        TextView actionTitle = M3.titleLarge(this, "Pending Updates");
+        TextView actionTitle = M3.titleLarge(this, "Remove Pending Updates");
         actionTitle.setPadding(0, M3.dp(this, 4), 0, M3.dp(this, 4));
         actionCard.addView(actionTitle);
 
@@ -282,20 +333,20 @@ public class MainActivity extends Activity {
         actionCard.addView(cancelRow);
 
         // ---------------------------------------------------------------- Layout: two columns on a laptop screen, one on a narrow window
-        // Left: what changes the system (gbOS86 update, Googlebook OS version, local folder). Right: what is installed now (laptop,
-        // integrity, waiting files).
+        // Left: this laptop (installed system, integrity), local folder, bug report. Right: the gbOS86 update, the Googlebook OS
+        // version, waiting files (the user's layout, 2026-11-26).
         if (wide) {
             LinearLayout cols = new LinearLayout(this);
             cols.setOrientation(LinearLayout.HORIZONTAL);
             cols.setBaselineAligned(false);
-            LinearLayout left = column(updateCard, googleCard, localCard), right = column(deviceCard, actionCard);
+            LinearLayout left = column(deviceCard, localCard, reportCard), right = column(updateCard, googleCard, actionCard);
             LinearLayout.LayoutParams llp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f);
             llp.setMarginEnd(M3.dp(this, 16));
             cols.addView(left, llp);
             cols.addView(right, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f));
             root.addView(cols);
         } else {
-            for (View card : new View[] {updateCard, googleCard, deviceCard, localCard, actionCard}) {
+            for (View card : new View[] {updateCard, googleCard, actionCard, deviceCard, localCard, reportCard}) {
                 root.addView(card);
                 addMarginBottom(card, 16);
             }
@@ -372,7 +423,7 @@ public class MainActivity extends Activity {
         installButton.setVisibility(!run && decision != null && decision.kind == Updater.Kind.AVAILABLE && !UpdateService.State.done ? View.VISIBLE : View.GONE);
         googleInstallButton.setVisibility(!run && decision != null && decision.kind == Updater.Kind.AVAILABLE && decision.needsSuper
                 && !UpdateService.State.done ? View.VISIBLE : View.GONE);
-        for (Button b : new Button[] {checkButton, googleCheckButton, auditButton, deepButton, pickButton, cancelButton}) b.setEnabled(!busy && !run);
+        for (Button b : new Button[] {checkButton, googleCheckButton, auditButton, deepButton, pickButton, cancelButton, reportButton}) b.setEnabled(!busy && !run);
         // the update is being confirmed in this start (sysupdate.sh boot-ok, a minute after boot_completed): look again until it is
         if (decision != null && decision.kind == Updater.Kind.FINISHING && !busy && System.currentTimeMillis() - finishingSince > 15000) {
             finishingSince = System.currentTimeMillis();
@@ -571,6 +622,50 @@ public class MainActivity extends Activity {
             } finally {
                 busy = false;
             }
+        }).start();
+    }
+
+    // -------------------------------------------------------------------------------- Bug report
+    private void generateReport() {
+        if (busy) return;
+        final String text = reportText.getText().toString().trim();
+        if (text.length() < 10) {
+            reportStatus.setText("Describe the problem first (a sentence or two).");
+            return;
+        }
+        busy = true;
+        reportIssueButton.setVisibility(View.GONE);
+        reportShareButton.setVisibility(View.GONE);
+        reportStatus.setText("Collecting the logs (up to a minute) ...");
+        new Thread(() -> {
+            String msg;
+            Report.Made made = null;
+            try {
+                Updater.Info i = Updater.info(this);
+                info = i;
+                made = Report.make(this, i, text, body -> ui.post(() -> reportStatus.setText(body)));
+                msg = "Saved Download/gbOS86/" + made.fileName + " (" + Util.size(made.size) + ", encrypted).\n"
+                        + (made.issueUrl != null ? "Tap Open GitHub issue, sign in, and attach this file before you submit, or Share it "
+                                + "with any app (e-mail, chat, Drive)." : "No update source is set (Settings), so there is no issue page: "
+                                + "Share it with the maintainer.");
+            } catch (Exception e) {
+                msg = "The report failed: " + e.getMessage();
+            } finally {
+                busy = false;
+            }
+            final String m = msg;
+            final Report.Made md = made;
+            ui.post(() -> {
+                reportStatus.setText(m);
+                if (md != null && md.issueUrl != null) {
+                    reportIssueUrl = md.issueUrl;
+                    reportIssueButton.setVisibility(View.VISIBLE);
+                }
+                if (md != null && md.uri != null) {
+                    reportMade = md;
+                    reportShareButton.setVisibility(View.VISIBLE);
+                }
+            });
         }).start();
     }
 

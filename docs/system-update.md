@@ -183,6 +183,13 @@ The app's default update source is the project's main repository (`REPO` in `too
   Google build only comes inside a signed gbOS86 update, with patches for it): first the **Large download** dialog (sizes from GitHub
   and Google, free space, time, metered-network warning; Continue/Cancel), then the usual confirmation. A newer build that cannot be
   downloaded (no Google lines, the setting is off, not enough space) is shown with the reason.
+* **In Settings.** Settings > System > Software update > **gbOS86 updates** opens the app: Google's Settings keeps an "additional
+  system update" entry for device makers, which a static overlay (`usb/display/gbos-updater-settings.apk`,
+  `tools/build_settings_updater_overlay.sh`) turns on and points at the app; `hook.sh` (`gbos_settings_updater_entry`) puts it in
+  `/vendor/overlay` when the updater is installed (`SETTINGS_UPDATER=0` in gbos.cfg: not). With that entry present, the app's
+  Settings > App access > **Hide from the app list** disables its launcher alias (`.LauncherEntry`); the root service sets
+  `show_hidden_icon_apps_enabled` to 0 so Android shows no "App info" placeholder instead (1 again when shown). Without the entry the
+  box is disabled, and at each start a hidden icon comes back if the entry has gone.
 * **One restart.** After **Restart now** the update is installed during the start and confirmed about a minute after Android has
   started (`boot-ok`, below); meanwhile the app says **Finishing the update ...** and looks again every 15 s.
 * **The modification check.** The app asks the root service for `sysupdate.sh audit`: every file of the installed set against

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Static overlay of Google's Settings (target com.android.settings), built by tools/build_settings_updater_overlay.sh into
+     usb/display/gbos-updater-settings.apk and placed in /vendor/overlay by hook.sh (gbos_settings_updater_entry).
+     Settings > System > Software update has an "additional system update" entry for device makers
+     (system_dashboard_fragment.xml, key additional_system_update_settings, AdditionalSystemUpdatePreferenceController):
+     hidden while config_additional_system_update_setting_enable is false (Google's value), and its intent opens
+     additional_system_update / additional_system_update_menu (both empty in Google's build). This overlay turns it on and
+     points it at the gbOS86 Updater's main screen. Only the default title is set: other languages keep Google's
+     translation of "Additional system updates". -->
+<resources>
+    <bool name="config_additional_system_update_setting_enable">true</bool>
+    <string name="additional_system_update">org.gbos86.updater</string>
+    <string name="additional_system_update_menu">org.gbos86.updater.MainActivity</string>
+    <string name="additional_system_update_settings_list_item_title">gbOS86 updates</string>
+</resources>

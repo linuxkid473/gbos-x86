@@ -13,6 +13,10 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- Launcher.settingsEntry() reads Google's Settings resources (is "gbOS86 updates" shown there?) -->
+    <queries>
+        <package android:name="com.android.settings" />
+    </queries>
     <application
         android:label="gbOS86 Updater"
         android:icon="@mipmap/ic_launcher"
@@ -20,16 +24,23 @@
         android:allowBackup="false"
         android:usesCleartextTraffic="false"
         android:theme="@android:style/Theme.DeviceDefault.DayNight">
+        <!-- exported: Settings > System > Software update > "gbOS86 updates" opens it (usb/display/gbos-updater-settings.apk) -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTop"
+            android:label="gbOS86 Updater" />
+        <!-- The launcher icon. Settings > "Hide from the app list" disables this alias (Launcher.java); MainActivity stays. -->
+        <activity-alias
+            android:name=".LauncherEntry"
+            android:targetActivity=".MainActivity"
+            android:exported="true"
             android:label="gbOS86 Updater">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-        </activity>
+        </activity-alias>
         <activity
             android:name=".SettingsActivity"
             android:exported="false"

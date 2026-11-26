@@ -9,8 +9,8 @@ The unsigned aapt2 output used for the rotation overlay was never listed by `cmd
   build_static_rro.py verify APK [--package PKG --priority N --values VALUES.xml [--target android]]
   build_static_rro.py dump   APK
 
-VALUES.xml is an Android res/values file with <bool> and <integer> items (the only kinds a value-only overlay
-of framework config needs here). The manifest and resources.arsc are laid out exactly as aapt2 2.19 does
+VALUES.xml is an Android res/values file with <bool>, <integer> and <string> items (plain text strings, default
+configuration only: what a value-only overlay of framework or Settings config needs here). The manifest and resources.arsc are laid out exactly as aapt2 2.19 does
 (verified byte for byte against aapt2's build of sensors/trogdor/display-policy). Entries are stored, with
 resources.arsc 4-byte aligned. Without --key a throwaway RSA-2048 key signs the APK and is discarded: no key
 is ever written. `verify` checks the v2 signature (signature, certificate/public-key match, content digest),
@@ -29,7 +29,7 @@ ATTR_ID = {
     'compileSdkVersionCodename': 0x01010573,
 }
 T_STRING, T_INT_DEC, T_INT_BOOLEAN = 0x03, 0x10, 0x12
-TYPE_ORDER = ['bool', 'integer']          # aapt2 assigns type ids in its ResourceType order
+TYPE_ORDER = ['bool', 'integer', 'string']   # aapt2 assigns type ids in its ResourceType order
 V2_BLOCK_ID = 0x7109871a
 SIG_RSA_PKCS1_SHA256 = 0x0103
 MAGIC = b'APK Sig Block 42'
@@ -60,6 +60,10 @@ def load_values(path):
             if text not in ('true', 'false'):
                 raise SystemExit('%s: bool %s must be true or false' % (path, name))
             val = (T_INT_BOOLEAN, 0xffffffff if text == 'true' else 0)
+        elif el.tag == 'string':
+            if len(el):
+                raise SystemExit('%s: string %s must be plain text' % (path, name))
+            val = (T_STRING, text)          # data: the index of text in the global string pool (build_arsc)
         else:
             val = (T_INT_DEC, parse_int(text) & 0xffffffff)
         if name in values.setdefault(el.tag, {}):
@@ -96,6 +100,12 @@ def build_arsc(package, values):
     keys = [n for t in types for n in sorted(values[t])]
     type_pool = string_pool(types, utf8=False)
     key_pool = string_pool(keys, utf8=True)
+    gstrings = []                            # the global pool: string values in entry order
+    for t in types:
+        for n in sorted(values[t]):
+            dtype, data = values[t][n]
+            if dtype == T_STRING and data not in gstrings:
+                gstrings.append(data)
     body = b''
     for tid, t in enumerate(types, 1):
         names = sorted(values[t])
@@ -106,6 +116,8 @@ def build_arsc(package, values):
         offsets = []
         for n in names:
             dtype, data = values[t][n]
+            if dtype == T_STRING:
+                data = gstrings.index(data)
             offsets.append(len(entries))
             entries += u16(8) + u16(0) + u32(keys.index(n)) + u16(8) + b'\0' + bytes([dtype]) + u32(data)
         start = header_size + 4 * len(names)
@@ -118,7 +130,7 @@ def build_arsc(package, values):
     pkg = u16(0x0200) + u16(pkg_hdr_size) + u32(pkg_hdr_size + len(type_pool) + len(key_pool) + len(body)) + \
         u32(0x7f) + name + b'\0' * (256 - len(name)) + u32(pkg_hdr_size) + u32(0) + \
         u32(pkg_hdr_size + len(type_pool)) + u32(0) + u32(0) + type_pool + key_pool + body
-    glob = string_pool([], utf8=True)
+    glob = string_pool(gstrings, utf8=True)
     return u16(0x0002) + u16(12) + u32(12 + len(glob) + len(pkg)) + u32(1) + glob + pkg
 
 

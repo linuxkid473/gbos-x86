@@ -130,6 +130,20 @@ public class CoreTest {
         check("rsaVerify: openssl's signature checks out", Util.rsaVerify(read("msg.bin"), text("msg.sig"), mod));
         check("rsaVerify: not with another key", !Util.rsaVerify(read("msg.bin"), text("msg.sig"), other));
 
+        // ---- bug report encryption (tools/open_report.sh decrypts it after this program: test_updater_core.sh)
+        try (java.io.InputStream in = new java.io.FileInputStream(new File(T, "report.tar.gz"));
+             java.io.OutputStream o = new java.io.FileOutputStream(new File(T, "report.enc"))) {
+            ReportCrypto.encrypt(in, o, mod);
+        }
+        byte[] enc = read("report.enc");
+        check("report: header and size (header + 384 + 16 + data + 32)", new String(enc, 0, 26, "US-ASCII").equals(ReportCrypto.HEADER)
+                && enc.length == 26 + 384 + 16 + read("report.tar.gz").length + 32);
+        throwsWith("report: a 2048-bit key is refused", "RSA-3072", () -> ReportCrypto.encrypt(new java.io.ByteArrayInputStream(new byte[1]),
+                new java.io.ByteArrayOutputStream(), mod.substring(256)));
+        String url = ReportCrypto.issueUrl("owner/repo", "gbos86-0123abcd", 202611241104L, "R5", "gbos86-report-0123abcd-202611261200.zip");
+        check("report: issue link names the report and the file, URL-encoded, no spaces", url.startsWith("https://github.com/owner/repo/issues/new?title=Bug%20report%20gbos86-0123abcd")
+                && url.contains("gbos86-report-0123abcd-202611261200.zip") && !url.contains(" ") && !url.contains("\n"));
+
         if (fails == 0) System.out.println("CORE_JAVA_PASS");
         else System.out.println(fails + " FAILED");
         System.exit(fails == 0 ? 0 : 1);

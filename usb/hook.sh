@@ -308,6 +308,35 @@ gbos_enable_latitude7320_brightness() {
 }
 gbos_enable_latitude7320_brightness
 
+# Settings > System > Software update > "gbOS86 updates": a static overlay of Google's Settings (usb/display/
+# gbos-updater-settings.apk, tools/build_settings_updater_overlay.sh) turns on the "additional system update" entry Settings
+# keeps for device makers and points it at the gbOS86 Updater. Only with the updater installed; SETTINGS_UPDATER=0 skips it.
+# /vendor/overlay is writable when the Latitude sensor step overlaid /vendor (above); otherwise a tmpfs takes its place with
+# Google's overlays bound back in (as /vendor/apex below). Runs after the sensor step: its overlayfs would hide this tmpfs.
+gbos_settings_updater_entry() {
+  _su_dir=${NEWROOT:-/new}/vendor/overlay
+  _su_apk=gbos-updater-settings.apk
+  _su_src=$G/display/$_su_apk
+  [ "${SETTINGS_UPDATER:-1}" = 0 ] && { log "hook: Settings updater entry disabled (SETTINGS_UPDATER=0)"; return 0; }
+  [ -s "$G/gbos86-updater.apk" ] && [ -s "$_su_src" ] || return 0
+  cmp -s "$_su_src" "$_su_dir/$_su_apk" && { log "hook: Settings updater entry in place"; return 0; }
+  if ! { cp "$_su_src" "$_su_dir/$_su_apk.part" 2>/dev/null && mv -f "$_su_dir/$_su_apk.part" "$_su_dir/$_su_apk"; }; then
+    rm -f "$_su_dir/$_su_apk.part" 2>/dev/null
+    if ! { mkdir -p /tmp/vovl && mount --bind "$_su_dir" /tmp/vovl && mount -t tmpfs -o mode=0755 tmpfs "$_su_dir"; }; then
+      log "hook: Settings updater entry NOT added (cannot make /vendor/overlay writable)"; return 1
+    fi
+    for _su_f in /tmp/vovl/*; do
+      [ -f "$_su_f" ] || continue
+      touch "$_su_dir/${_su_f##*/}" && mount --bind "$_su_f" "$_su_dir/${_su_f##*/}" \
+        || log "hook: Settings updater entry: could not keep Google's overlay ${_su_f##*/}"
+    done
+    cp "$_su_src" "$_su_dir/$_su_apk" || { log "hook: Settings updater entry NOT added (copy failed)"; return 1; }
+  fi
+  chmod 0644 "$_su_dir/$_su_apk"
+  log "hook: Settings updater entry added (Settings > System > Software update > gbOS86 updates; $_su_apk in /vendor/overlay)"
+}
+gbos_settings_updater_entry
+
 gbos_sensor_ueventd
 
 # Google's vendor modules are built for Google's kernel and cannot be loaded by the gbOS86 kernel.

@@ -20,6 +20,7 @@
 #   audit [G] [--deep]                     does the installed system match its system.manifest? (the app's modification check)
 #   cleanup [G]                            Android, root (the app's request): delete the folder the installed update was staged from
 #   info [G]                               machine-readable set/key/space facts for the app
+#   report G OUTDIR [--desc FILE] [--boots N]   root: the app's bug report (logs, specs, redacted) as OUTDIR/gbos86-report-*.tar.gz
 #   setinfo DIR                            id/seq/google_build/commit of the set in a gbos folder (install.sh)
 #   menu1-check STICKG NVMEG / menu1-finish STICKG NVMEG    the stick's menu 1 (install.sh)
 #
@@ -84,8 +85,8 @@ su_crashpoint() { # tests: simulate a power cut after N journal steps
 
 # ---------------------------------------------------------------------------------------------------------------- signature
 # gbos/sysupdate.pub: "gbos86-sysupdate-key 1" then "rsa3072 <modulus, 768 hex digits>" (e = 65537). The repo ships one with no key.
-su_pub_modulus() {
-  [ -f "$1" ] && [ "$(head -n 1 "$1")" = "gbos86-sysupdate-key 1" ] || return 1
+su_pub_modulus() { # FILE [HEADER]: the key's modulus (upper-case hex); HEADER gbos86-sysupdate-key (default) or gbos86-report-key
+  [ -f "$1" ] && [ "$(head -n 1 "$1")" = "${2:-gbos86-sysupdate-key} 1" ] || return 1
   _n=$(sed -n '2s/^rsa3072 \([0-9A-Fa-f]\{768\}\)$/\1/p' "$1" | tr a-f A-F)
   case "$_n" in [89A-F]*) echo "$_n";; *) return 1;; esac
 }
@@ -857,6 +858,7 @@ cmd_info() {
   [ -n "$_ib" ] || _ib=$(su_fp_build "$(sed -n 's/^# build //p' "$G/patched/MANIFEST" 2>/dev/null | head -n 1)")
   echo "google_build=${_ib:-0}"
   _k=$(su_pub_modulus "$G/sysupdate.pub" 2>/dev/null) && echo "pub=$_k" || echo "pub=none"
+  _k=$(su_pub_modulus "$G/report.pub" gbos86-report-key 2>/dev/null) && echo "report_pub=$_k" || echo "report_pub=none"
   echo "free_kb=$(su_free_kb "$G")"
   echo "logs_kb=$(du -sk "$G/logs" 2>/dev/null | cut -f1)"
   if [ -f "$U/state" ]; then echo "pending=$(su_st phase)"; echo "pending_seq=$(su_st seq)"; else echo "pending=none"; fi
@@ -901,6 +903,7 @@ cmd_request() {
   _pr=$(sed -n 's/^prune_logs \([01]\)$/\1/p' "$W/req" | head -n 1)
   _wh=$(sed -En 's/^where (app|shared)$/\1/p' "$W/req" | head -n 1)
   _dp=$(sed -n 's/^deep \([01]\)$/\1/p' "$W/req" | head -n 1)
+  _hd=$(sed -n 's/^hide \([01]\)$/\1/p' "$W/req" | head -n 1)
   # the app's modification warning the user accepted with "Install anyway" (codes: Updater.warningCodes), kept in update/history.txt
   _aw=$(sed -n 's/^accepted_warning \([a-z,]\{1,100\}\)$/\1/p' "$W/req" | head -n 1)
   SU_STATUSF=$W/progress
@@ -931,6 +934,21 @@ cmd_request() {
       fi
       [ $_r = 0 ] && su_record_source "$_real" "$_base"
       if [ $_r = 0 ]; then echo "$_o" | tail -n 3 | respond done; else echo "$_o" | tail -n 5 | respond failed; fi;;
+    report)
+      # the user's text in files/report-desc.txt (the app's own, owner checked); the result in files/report/ (old ones deleted)
+      _rdf=$_ad/files/report-desc.txt
+      if [ -f "$_rdf" ] && [ ! -L "$_rdf" ] && [ "$(stat -c %u "$_rdf")" = "$_uid" ]; then head -c 8192 "$_rdf" > "$W/desc"; else : > "$W/desc"; fi
+      _rod=$_ad/files/report; rm -rf "$_rod"; mkdir -p "$_rod"; chown "$_uid:$_uid" "$_rod"; chmod 700 "$_rod"
+      echo "collecting the logs ..." | respond running
+      _o=$( ( set -- report "$G" "$_rod" --desc "$W/desc"; if [ -n "${SU_BB:-}" ]; then "$SU_BB" sh "$0" "$@"; else sh "$0" "$@"; fi ) 2>&1); _r=$?
+      for _f in "$_rod"/*; do [ -f "$_f" ] && chown "$_uid:$_uid" "$_f" && chmod 600 "$_f"; done
+      if [ $_r = 0 ]; then echo "$_o" | grep -E '^[a-z_]+=' | respond done; else echo "$_o" | tail -n 5 | respond failed; fi;;
+    launcher)
+      # the app hid (1) or showed (0) its launcher icon: Android 10+ otherwise lists a hidden app that requests permissions as an
+      # "App info" placeholder (LauncherAppsService, global show_hidden_icon_apps_enabled, default 1). Only this one setting.
+      case "$_hd" in 1) _sv=0;; 0) _sv=1;; *) echo "bad hide value" | respond failed; exit 1;; esac
+      if settings put global show_hidden_icon_apps_enabled "$_sv" 2>"$W/se"; then echo "show_hidden_icon_apps_enabled=$_sv" | respond done
+      else respond failed < "$W/se"; fi;;
     cleanup) ( set -- cleanup "$G"; if [ -n "${SU_BB:-}" ]; then "$SU_BB" sh "$0" "$@"; else sh "$0" "$@"; fi ) 2>&1 | respond done;;
     *) echo "unknown action '$_act'" | respond failed;;
   esac
@@ -1023,6 +1041,179 @@ cmd_boot_ok() {
   su_commit
   [ -n "$SU_TEST" ] || am broadcast -a org.gbos86.updater.BOOT_CHECK -n "$SU_PKG/.BootReceiver" -f 0x20 >/dev/null 2>&1   # the app: show it, clean up
   return 0
+}
+
+# ---------------------------------------------------------------------------------------------------------------- bug report
+# report G OUTDIR [--desc FILE] [--boots N] [--id-file FILE]: the app's "Bug report" card (docs/bug-report-plan.md). Collects the
+# user's text, this laptop's model and specs, the update state and the newest N boots' logs (default 2: this start so far, the one
+# before), redacts serial numbers, MAC addresses, Wi-Fi names, e-mail addresses and account names (each value becomes a stable token,
+# MAC-1, SERIAL-2 ...), writes REPORT.md (the entry point, for a person or Claude Code) and packs OUTDIR/gbos86-report-ID-TIME.tar.gz.
+# The app encrypts that file for the maintainer before it leaves the app's private folder. Root only: the logs are root-only.
+SU_REPORT_ID=${SU_REPORT_ID:-/data/misc/gbos86/report-id}
+SU_REPORT_MAXFILE=4194304        # a log file's last 4 MiB at most (logcat rotates at 1 MiB, kmsg.log of a long session can be bigger)
+su_report_id() { # FILE: a random id made once (not a serial: it only tells reports of one laptop apart)
+  _rf=$1
+  if ! grep -qE '^gbos86-[0-9a-f]{8}$' "$_rf" 2>/dev/null; then
+    mkdir -p "${_rf%/*}" 2>/dev/null && chmod 700 "${_rf%/*}" 2>/dev/null
+    echo "gbos86-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')" > "$_rf" 2>/dev/null; chmod 600 "$_rf" 2>/dev/null
+  fi
+  _ri=$(head -n 1 "$_rf" 2>/dev/null); case "$_ri" in gbos86-????????) echo "$_ri";; *) echo "gbos86-unknown";; esac
+}
+su_report_redact() { # stdin -> stdout; one awk process per report so the tokens stay the same in every file (MAP keeps them)
+  ${SU_AWK:-awk} -v mapf="$1" '
+    BEGIN { while ((getline l < mapf) > 0) { split(l, a, "\t"); map[a[1] SUBSEP a[2]] = a[3]; n = a[3]; sub(/.*-/, "", n); if (n + 0 > cnt[a[1]]) cnt[a[1]] = n + 0 }; close(mapf) }
+    function tok(kind, val,   k) { k = kind SUBSEP val; if (!(k in map)) { cnt[kind]++; map[k] = kind "-" cnt[kind]; print kind "\t" val "\t" map[k] > (mapf ".new") }; return map[k] }
+    function red(re, pre, kind,   out, s, v, rs, rl, p) {
+      out = ""; s = $0
+      while (match(s, re)) {
+        rs = RSTART; rl = RLENGTH; v = substr(s, rs, rl); p = 0
+        if (pre != "" && match(v, "^" pre)) p = RLENGTH
+        if (rl - p < 1 || substr(v, p + 1) ~ /^(MAC|SERIAL|SSID|ACCOUNT|EMAIL)-[0-9]+$/) { out = out substr(s, 1, rs + rl - 1); s = substr(s, rs + rl); continue }
+        out = out substr(s, 1, rs - 1) substr(v, 1, p) tok(kind, substr(v, p + 1)); s = substr(s, rs + rl)
+      }
+      $0 = out s
+    }
+    {
+      red("[0-9A-Fa-f][0-9A-Fa-f](:[0-9A-Fa-f][0-9A-Fa-f])(:[0-9A-Fa-f][0-9A-Fa-f])(:[0-9A-Fa-f][0-9A-Fa-f])(:[0-9A-Fa-f][0-9A-Fa-f])(:[0-9A-Fa-f][0-9A-Fa-f])", "", "MAC")
+      red("[Ss]erial[Nn]umber[:=] *[^ ,;)]+", "[Ss]erial[Nn]umber[:=] *", "SERIAL")
+      red("serialno[]]?[:=] *[[]?[A-Za-z0-9]+", "serialno[]]?[:=] *[[]?", "SERIAL")
+      red("[Ss][Ss][Ii][Dd][:=] *\"[^\"]+", "[Ss][Ss][Ii][Dd][:=] *\"", "SSID")
+      red("[Ss][Ss][Ii][Dd][:=] *[^ \",;)]+", "[Ss][Ss][Ii][Dd][:=] *", "SSID")
+      red("Account [{]name=[^,}]+", "Account [{]name=", "ACCOUNT")
+      red("[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+([.][A-Za-z0-9-]+)*[.](com|net|org|edu|gov|io|me|co|uk|pt|br|de|fr|es|it|nl|eu|us|ca|au|in|info|biz)", "", "EMAIL")
+      print
+    }'
+  [ -f "$1.new" ] && { cat "$1.new" >> "$1"; rm -f "$1.new"; }
+  return 0
+}
+su_report_copy() { # SRC DST: a log file, damage-tolerant (FAT: a damaged chain must not stop the report), NULs stripped, last 4 MiB
+  _sz=$(su_size "$1"); _sz=${_sz:-0}
+  if [ "$_sz" -gt $SU_REPORT_MAXFILE ]; then
+    dd if="$1" bs=65536 skip=$(( (_sz - SU_REPORT_MAXFILE) / 65536 )) conv=noerror,sync 2>/dev/null
+  else
+    dd if="$1" bs=65536 conv=noerror,sync 2>/dev/null
+  fi | tr -d '\000' | su_report_redact "$W/redact.map" > "$2"
+  return 0
+}
+# the signals HANDOFF.md readers look for first: label|ERE
+SU_REPORT_SIGNALS='PATCH-STATUS|PATCH-STATUS
+NOT patched|NOT patched
+FAT-CHECK|FAT-CHECK
+FAT-fs error|FAT-fs \(.*\): error|Filesystem has been set read-only
+I/O error|I/O error
+USB disconnect|USB disconnect|usb .*: reset
+kernel BUG/Oops|BUG:|Oops|Call Trace:
+FATAL EXCEPTION|FATAL EXCEPTION
+ANR|ANR in
+native crash|>>> .* <<<|Fatal signal
+Trusty wait|Waited one second for
+BOOT FAILURE|BOOT FAILURE
+sysupdate|gbos-sysupdate:'
+cmd_report() {
+  _rg=; _ro=; _rd=; _rb=2; _rid=$SU_REPORT_ID
+  while [ $# -gt 0 ]; do case "$1" in --desc) _rd=$2; shift 2;; --boots) _rb=$2; shift 2;; --id-file) _rid=$2; shift 2;;
+    -*) su_die "report: unknown option $1";; *) if [ -z "$_rg" ]; then _rg=$1; else _ro=$1; fi; shift;; esac; done
+  su_gbos "$_rg"; su_tmp
+  [ -n "$_ro" ] && [ -d "$_ro" ] || su_die "report: no output folder"
+  case "$_rb" in [1-5]) ;; *) _rb=2;; esac
+  _id=$(su_report_id "$_rid"); _ts=$(date -u +%Y%m%d%H%M 2>/dev/null)
+  _name=gbos86-report-${_id#gbos86-}-$_ts; R=$W/$_name; mkdir -p "$R/logs" "$R/system"; : > "$W/redact.map"
+  # newest boots first; the newest is this start (still being written)
+  _boots=$(ls "$G/logs" 2>/dev/null | grep '^boot-[0-9]*$' | sort -t- -k2 -n | tail -n "$_rb" | sort -t- -k2 -rn)
+  _cur=$(echo "$_boots" | head -n 1)
+  # a previous boot that ended without a clean unmount can have log files longer than their cluster chain; reading past it is a FAT
+  # error that makes the kernel set the volume read-only (su_booted_ok). On a volume mounted dirty, leave the previous boots' big logs.
+  _dirty=0; [ -z "$SU_DEV" ] && SU_DEV=$(awk -v m="$SU_PI" '$2 == m { print $1; exit }' /proc/mounts 2>/dev/null)
+  su_fat_mounted_dirty && _dirty=1
+  _skipped=
+  for _b in $_boots; do
+    mkdir -p "$R/logs/$_b"
+    for _f in "$G/logs/$_b"/*; do
+      [ -f "$_f" ] || continue; _fn=${_f##*/}
+      case "$_fn" in *.gz|*.zip|*.img|*.bin) continue;; esac
+      if [ $_dirty = 1 ] && [ "$_b" != "$_cur" ]; then
+        case "$_fn" in kmsg.log|logcat.txt*|fat-heartbeat.txt) _skipped="$_skipped $_b/$_fn"; continue;; esac
+      fi
+      su_report_copy "$_f" "$R/logs/$_b/$_fn"
+    done
+  done
+  # the system: what is installed and what the updater did
+  cmd_info "$G" 2>&1 | grep -v '^pub=' | su_report_redact "$W/redact.map" > "$R/system/info.txt"
+  ( cmd_audit "$G" ) 2>&1 | head -n 80 > "$R/system/audit.txt"
+  for _f in update/status.txt update/history.txt update/state gbos.cfg; do
+    [ -f "$G/$_f" ] && tail -n 60 "$G/$_f" | su_report_redact "$W/redact.map" > "$R/system/$(echo "$_f" | tr / -)"
+  done
+  [ -f "$G/system.manifest" ] && sed -n '1,12p' "$G/system.manifest" | grep -v '^f ' > "$R/system/manifest-head.txt"
+  [ -n "$SU_TEST" ] || getprop 2>/dev/null | grep -E '^\[(ro\.(build|product|system|vendor|boot|hardware|kernel)|sys\.boot|persist\.sys\.(timezone|locale))' \
+    | su_report_redact "$W/redact.map" > "$R/system/getprop.txt"
+  [ -n "$SU_TEST" ] || { cat /proc/meminfo 2>/dev/null | head -n 5; echo; uptime 2>/dev/null; echo; df -k "$G" /data 2>/dev/null; } > "$R/system/now.txt"
+  # REPORT.md: front matter (facts), the user's words verbatim, the signals with their first file:line, the file list
+  _k=$R/logs/$_cur/kmsg.log
+  _dmi=$(grep -a -m1 -o 'DMI: .*' "$_k" 2>/dev/null | sed 's/^DMI: //')
+  _kv=$(grep -a -m1 -o 'Linux version [^ ]* ([^)]*)' "$_k" 2>/dev/null | sed 's/ (.*//; s/^Linux version //')
+  _kn=$(grep -a -m1 -o 'Linux version .*' "$_k" 2>/dev/null | grep -o '#[0-9][0-9]*' | head -n 1)
+  _cpu=$(grep -a -m1 '^model name' "$R/logs/$_cur/hw.txt" 2>/dev/null | sed 's/^[^:]*: *//')
+  _mem=$(grep -a -m1 '^MemTotal' "$R/logs/$_cur/hw.txt" 2>/dev/null | awk '{ print $2 }')
+  _iv() { sed -n "s/^$1=//p" "$R/system/info.txt" | head -n 1; }
+  {
+    echo "---"
+    echo "gbos86_report: 1"
+    echo "id: $_id"
+    echo "created: $(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"
+    echo "laptop: \"${_dmi:-unknown}\""
+    echo "cpu: \"${_cpu:-unknown}\""
+    echo "ram_kb: ${_mem:-unknown}"
+    echo "kernel: \"${_kv:-unknown} ${_kn}\""
+    echo "set: {seq: $(_iv seq), id: $(_iv set), commit: $(_iv commit), google_build: $(_iv google_build)}"
+    echo "update: {pending: $(_iv pending), last: \"$(_iv last | tr -d '"')\"}"
+    echo "modified: $(sed -n 's/^modified=//p' "$R/system/audit.txt" | head -n 1)"
+    echo "boots: [$(echo "$_boots" | awk -v c="$_cur" '{ printf "%s%s%s", (NR > 1 ? ", " : ""), $0, ($0 == c ? " (current, still running)" : " (previous)") }')]"
+    echo "redacted: [MAC, SERIAL, SSID, ACCOUNT, EMAIL]  # stable tokens: the same value is the same token in every file"
+    [ -n "$_skipped" ] && echo "skipped:$_skipped  # the volume was mounted dirty: a previous boot's open logs could be damaged"
+    echo "---"
+    echo
+    echo "## What the user says"
+    echo
+    if [ -n "$_rd" ] && [ -f "$_rd" ]; then head -c 8192 "$_rd" | tr -d '\000-\010\013-\037\177'; echo; else echo "(no description)"; fi
+    echo
+    echo "## Signals found automatically"
+    echo
+    echo "Count over the included boots, then the first place it appears (open that file at that line first)."
+    echo
+    echo "$SU_REPORT_SIGNALS" | while IFS='|' read -r _lab _re; do
+      [ -n "$_lab" ] || continue
+      _c=0; _first=
+      for _b in $_boots; do
+        for _f in "$R/logs/$_b"/*; do
+          [ -f "$_f" ] || continue
+          _n=$(grep -a -c -E "$_re" "$_f" 2>/dev/null); _n=${_n:-0}
+          [ "$_n" -gt 0 ] || continue
+          _c=$((_c + _n))
+          [ -z "$_first" ] && _first="logs/$_b/${_f##*/}:$(grep -a -n -m1 -E "$_re" "$_f" | cut -d: -f1)"
+        done
+      done
+      if [ $_c -gt 0 ]; then echo "- $_lab: $_c, first at $_first"; else echo "- $_lab: 0"; fi
+    done
+    _cs=$(su_size "$R/logs/$_cur/crash.txt"); echo "- crash.txt (this start): ${_cs:-missing} bytes"
+    echo
+    echo "## Files"
+    echo
+    echo "- logs/boot-N/: the boot's folder exactly as on GBOSSYS (gbos/logs/boot-N), the newest first above. Long logs keep their last 4 MiB."
+    echo "- system/info.txt, audit.txt: sysupdate.sh info and audit (installed set, update state, modifications)."
+    echo "- system/update-status.txt, update-history.txt, update-state: the updater's own records. gbos.cfg: this laptop's settings."
+    echo "- system/manifest-head.txt: the installed set's header (seq, Google build, commit). getprop.txt, now.txt: build properties, memory, disk."
+    echo
+    echo "## Reading it"
+    echo
+    echo "Start with the user's words, then the signals, then the boot folders. In the gbos-x86 repository, AGENTS.md \"Traps\" and"
+    echo "HANDOFF.md use these file names (kmsg.log, stage0-dmesg.txt, logcat.txt*, fat-check.txt ...). The newest boot was still running"
+    echo "when the report was made, so its logs stop at that moment, not at a failure."
+  } > "$R/REPORT.md"
+  ( cd "$R" && find . -type f ! -name SHA256SUMS | sort | xargs sha256sum ) > "$R/SHA256SUMS" 2>/dev/null
+  tar -C "$W" -czf "$_ro/$_name.tar.gz.part" "$_name" || su_die "report: packing failed"
+  mv -f "$_ro/$_name.tar.gz.part" "$_ro/$_name.tar.gz"
+  echo "file=$_name.tar.gz"; echo "id=$_id"; echo "size=$(su_size "$_ro/$_name.tar.gz")"
+  echo "seq=$(_iv seq)"; echo "google_build=$(_iv google_build)"
 }
 
 # ---------------------------------------------------------------------------------------------------------------- menu 1 (install.sh)
@@ -1134,6 +1325,7 @@ case "$_cmd" in
   boot-ok) cmd_boot_ok "$@";;
   install-app) su_tmp; cmd_install_app "$@";;
   cleanup) cmd_cleanup "$@";;
+  report) cmd_report "$@";;
   audit) cmd_audit "$@";;
   info) su_tmp; cmd_info "$@";;
   setinfo) su_tmp; cmd_setinfo "$@";;
