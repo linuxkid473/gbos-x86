@@ -19,6 +19,7 @@
 #   2. The Google build: lapis/BUILD (BUILD_ID, VERSION, URL) and usb/patched/MANIFEST's "# build" line name the same build, so the
 #      patches were made for it (tools/port_build.sh --write). The stick tree's super.img is that build (dump.erofs, gbos-erofs image).
 #   3. The key: usb/sysupdate.pub is a real key (not the placeholder) and, with a key, the private key's own public half.
+#      usb/report.pub (bug reports) is a report public key; the placeholder is allowed (reports are then off) and noted.
 #   3b. The app: the tree's gbos86-updater.apk checks REPO's feed (not a lab or fork build) and was built from this commit's
 #      updater-app/ (its build stamp, tools/apk_stamp.py).
 #   4. Tests: sh -n on the boot scripts, tools/test_system_update.sh, tools/test_updater_core.sh and tools/test_release_app_check.sh.
@@ -268,6 +269,11 @@ if [ -n "$KEY" ]; then
     || die "the signing key ($KEY) is not the key of usb/sysupdate.pub: laptops would refuse this update"
   ok "the private key matches usb/sysupdate.pub"
 else ok "usb/sysupdate.pub holds a key (no --key given to compare)"; fi
+# the bug report key (the Updater app's Bug report card encrypts for it; tools/open_report.sh keygen makes it)
+[ "$(head -n 1 usb/report.pub 2>/dev/null)" = "gbos86-report-key 1" ] && ! grep -q PRIVATE usb/report.pub \
+  || die "usb/report.pub is missing or not a report public key (tools/open_report.sh pubkey KEY.pem)"
+if grep -qE '^rsa3072 [0-9A-Fa-f]{768}$' usb/report.pub; then ok "usb/report.pub holds the bug report key"
+else echo "  note: usb/report.pub is the placeholder: the app's Bug report card says reports cannot be encrypted (tools/open_report.sh keygen)"; fi
 
 # ------------------------------------------------------------------------------------------------ 3b. Updater app
 # The release ships the tree's gbos86-updater.apk to every laptop. It must check this repository's feed (a lab or fork build
