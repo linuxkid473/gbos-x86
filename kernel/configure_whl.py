@@ -43,6 +43,9 @@ OVERRIDES = {
     # mic is on the codec (pin 0x12), so it works with this driver too.
     'SND_HDA_INTEL': 'y', 'SND_HDA_GENERIC': 'y', 'SND_HDA_CODEC_REALTEK': 'y', 'SND_HDA_CODEC_ALC269': 'y',
     'SND_HDA_CODEC_HDMI': 'y', 'SND_HDA_CODEC_HDMI_INTEL': 'y', 'SND_HDA_I915': 'y',
+    # Pin overrides from gbos.cfg (HDA_PINS, usb/hwdetect.sh): /sys/class/sound/hwCxDy/{user_pin_configs,reconfig}.
+    # The driver is built in, so its patch= / model= module options cannot be given through MODOPTS.
+    'SND_HDA_RECONFIG': 'y', 'SND_HDA_HWDEP': 'y',
     # Bluetooth: the 9560's Bluetooth is USB (8087:0aaa); Google's kernel only has PCIe Bluetooth.
     'BT_HCIBTUSB': 'm', 'BT_HCIBTUSB_AUTOSUSPEND': 'y',
     # KernelSU (tiann/KernelSU, GPL-2.0) built into the kernel: root for apps, driven by the

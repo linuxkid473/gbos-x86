@@ -530,6 +530,9 @@ gbos_hw_report() {
     # (no machine driver, DSP firmware or topology not found, codec probe errors).
     echo "== sound codecs"
     for c in /proc/asound/card*/codec#*; do [ -f "$c" ] && { echo "--- $c"; grep -E '^(Codec|Address|Vendor Id|Subsystem Id|Revision Id|Default PCM|Node 0x[0-9a-f]+ \[Pin Complex\]|  Pin Default)' "$c" | head -n 40; }; done
+    # "Pin Default" above is the BIOS value read from the codec; overrides from HDA_PINS and kernel quirks are only here.
+    echo "== HDA pin overrides (HDA_PINS=${HDA_PINS:-unset})"
+    for c in /sys/class/sound/hwC*D*; do [ -e $c/user_pin_configs ] && echo "${c##*/} user: $(tr '\n' ' ' < $c/user_pin_configs) driver: $(tr '\n' ' ' < $c/driver_pin_configs)"; done
     # PCM numbers + jack input devices are what usb/audio/gen_config.sh maps the audio HAL config from; the speaker/DAC nodes show
     # whether a codec fixup connected the second speaker pin (0x14) to the same DAC as 0x17.
     echo "== sound pcm"; cat /proc/asound/pcm 2>&1
@@ -558,6 +561,48 @@ gbos_hw_report() {
   log "hwdetect: report written (hwdetect.txt)"
 }
 
+# HDA_PINS in gbos.cfg: override HD-audio pin defaults, as hdajackretask or a kernel HDA_FIXUP_PINS quirk does on Linux (issue 56).
+# Entries are "[hwCxDy:]NID=CONFIG", space separated, e.g. HDA_PINS="0x14=0x411111f0 0x1b=0x90170110" (0x14 unused, 0x1b internal
+# speaker). Without a hwCxDy: prefix an entry applies to every codec that is not an HDMI/DP one (Intel, AMD, NVIDIA vendor ids).
+# The pins go to the codec's user_pin_configs and the codec is re-probed ("reconfig"), which only works while nothing has the card
+# open: stage0, before Android's audio HAL starts. Needs CONFIG_SND_HDA_RECONFIG + CONFIG_SND_HDA_HWDEP (kernel/configure_whl.py).
+# Tests: GBOS_HDA_SYS replaces /sys/class/sound, GBOS_HDA_STATE the marker directory; gbos_hda_write is the only sysfs write.
+gbos_hda_write() { echo "$2" > "$1"; }
+gbos_hda_entry_ok() { # NID=CONFIG, both numbers (CONFIG as 0x + 1-8 hex digits)
+  _hn=${1%%=*}; _hc=${1#*=}
+  [ "$_hn" != "$1" ] && [ -n "$_hn" ] || return 1
+  case "$_hn" in *[!0-9a-fA-Fx]*) return 1 ;; esac
+  case "$_hc" in 0x?*) ;; *) return 1 ;; esac
+  case "${_hc#0x}" in *[!0-9a-fA-F]*|?????????*) return 1 ;; esac
+}
+gbos_hda_pins() {
+  [ -n "$HDA_PINS" ] || return 0
+  _hs=${GBOS_HDA_SYS:-/sys/class/sound}; _hm=${GBOS_HDA_STATE:-/dev}
+  # The card probes asynchronously (SOF loads its DSP firmware first): wait up to 10 s for a codec node.
+  _i=0; while [ $_i -lt 10 ] && ! ls -d $_hs/hwC*D* >/dev/null 2>&1; do sleep 1; _i=$((_i+1)); done
+  ls -d $_hs/hwC*D* >/dev/null 2>&1 || { log "hwdetect: HDA_PINS set, but no HD-audio codec (hwC*D*) appeared"; return 0; }
+  for _c in $_hs/hwC*D*; do
+    _cn=${_c##*/}; _v=$(cat $_c/vendor_id 2>/dev/null); _n=0
+    [ -e $_c/user_pin_configs ] || { log "hwdetect: HDA_PINS: $_cn has no user_pin_configs (kernel without SND_HDA_RECONFIG)"; continue; }
+    # hwdetect runs twice per boot (stage0, then hook.sh): once is enough.
+    [ "$(cat $_hm/.gbos_hda_pins.$_cn 2>/dev/null)" = "$HDA_PINS" ] && continue
+    for _e in $HDA_PINS; do
+      case "$_e" in
+        hw*:*) [ "${_e%%:*}" = "$_cn" ] || continue; _e=${_e#*:} ;;
+        *) case "$_v" in 0x8086*|0x1002*|0x10de*) continue ;; esac ;;
+      esac
+      gbos_hda_entry_ok "$_e" || { log "hwdetect: HDA_PINS: ignored '$_e' (want NID=CONFIG, e.g. 0x1b=0x90170110)"; continue; }
+      if gbos_hda_write $_c/user_pin_configs "${_e%%=*} ${_e#*=}"; then _n=$((_n+1))
+      else log "hwdetect: HDA_PINS: $_cn rejected pin ${_e%%=*} ${_e#*=}"; fi
+    done
+    [ $_n -gt 0 ] || continue
+    if gbos_hda_write $_c/reconfig 1; then
+      log "hwdetect: HDA_PINS: $_cn ($_v) reconfigured with $_n pin(s): $(tr '\n' ' ' < $_c/user_pin_configs 2>/dev/null)"
+      echo "$HDA_PINS" > $_hm/.gbos_hda_pins.$_cn 2>/dev/null
+    else log "hwdetect: HDA_PINS: $_cn reconfig FAILED (codec in use?)"; fi
+  done
+}
+
 # Whole thing; $1 = seconds to wait for devices (default 15).
 gbos_hwdetect() {
   [ -f $G/gbos.cfg ] && [ "$HWDETECT" = 0 ] && { log "hwdetect: disabled (HWDETECT=0)"; return 0; }
@@ -568,5 +613,6 @@ gbos_hwdetect() {
   fi
   # The brightness keys/backlight need acpi_video when the panel has no native backlight.
   [ -d /sys/class/backlight ] && [ -z "$(ls /sys/class/backlight 2>/dev/null)" ] && modprobe -q video 2>/dev/null
+  gbos_hda_pins
   gbos_hw_report
 }
