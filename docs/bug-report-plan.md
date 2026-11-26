@@ -1,4 +1,15 @@
-# Bug report card: investigation and plan (2026-11-26, not built yet)
+# Bug report card (built 2026-11-26)
+
+**Decided (user, 2026-11-26):** the report is encrypted for the maintainer and attached to a GitHub issue on the update source repo.
+Built as: `sysupdate.sh report` (root: collect, redact, REPORT.md, .tar.gz), `core/ReportCrypto.java` (RSA-OAEP + AES-CTR + HMAC),
+`Report.java` (saves `Download/gbOS86/gbos86-report-ID-TIME.zip`), the card in `MainActivity`, the key file `usb/report.pub`
+(placeholder until the maintainer runs `tools/open_report.sh keygen`), and `tools/open_report.sh open` for the maintainer. The issue
+page is pre-filled with the report id, the update number and the Googlebook OS version only; the user's text is inside the encrypted file.
+
+**Maintainer, reading a report:** download the .zip from the issue, then
+`tools/open_report.sh open gbos86-report-....zip --key ~/path/report-private.pem --out /tmp/reports` and read the REPORT.md it prints.
+
+The investigation that led to it follows.
 
 Goal: a sixth card in the Updater app, **Bug report**. The user describes the problem in a text field and taps **Generate report**.
 The app writes one file holding the description, this laptop's ID and specs, and the latest logs, then offers to send it.
@@ -96,11 +107,10 @@ file:line, so an agent knows where to open first without reading 10 MB.
 
 No new permission: the share sheet and MediaStore Downloads need none on Android 10+.
 
-## Open choices for the user
+## Choices (as decided)
 
-1. **Where reports go:** GitHub issues on the update source repo (public: anyone can read the attached logs, even redacted), or the
-   share sheet only (e-mail/chat to the maintainer, private). Both can be offered; the default matters.
-2. **How much log:** current + previous boot (~2.5 MB, recommended), or the last 3 boots (~4 MB).
-3. **Redaction strictness:** the list above, or also strip `logcat` lines from apps other than the system's (third-party app names
-   can be personal).
+1. **Where reports go:** a GitHub issue on the update source repo, the attachment encrypted for the maintainer (decided).
+2. **How much log:** current + previous boot (~2.5 MB) (`--boots`, default 2).
+3. **Redaction:** MAC, serial numbers, Wi-Fi names, account names, e-mail addresses (common TLDs only, so `name@com.android.x`
+   package-style names stay readable).
 4. **Channel:** build on `latitude-7320-integration`, deliver to the laptop as a lab update (cherry-pick, lab key); main untouched.
