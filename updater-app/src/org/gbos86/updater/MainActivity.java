@@ -311,7 +311,7 @@ public class MainActivity extends Activity {
         actionCard = M3.card(this, 20);
         actionCard.addView(M3.eyebrow(this, "MAINTENANCE"));
 
-        TextView actionTitle = M3.titleLarge(this, "Pending Updates");
+        TextView actionTitle = M3.titleLarge(this, "Remove Pending Updates");
         actionTitle.setPadding(0, M3.dp(this, 4), 0, M3.dp(this, 4));
         actionCard.addView(actionTitle);
 
