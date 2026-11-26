@@ -15,8 +15,8 @@
 #   1. Google's OS: downloads Google's public Googlebook recovery image (7.7 GB) and extracts only the six partitions
 #      gbOS86 needs (about 8 GB, streamed, so the 19 GB disk image inside is never written to disk).
 #   2. busybox (Debian busybox-static, ~1 MB) via docker.
-#   3. Kernel modules (14 MB), firmware (70 MB) and the SwiftShader software Vulkan driver (AMD GPUs; 6 MB) built from this
-#      repo's sources, from the GitHub release.
+#   3. Kernel modules (14 MB), firmware (70 MB), the SwiftShader software Vulkan driver (AMD GPUs; 6 MB) and, once released,
+#      the RADV AMD GPU Vulkan driver, built from this repo's sources, from the GitHub release.
 #   4. Assembles the flashable image with tools/make_gbos86_image.sh (the kernel, patched libraries and installer
 #      tools are already in this repository).
 # Needs: macOS or Linux, docker (running), python3, curl, tar, xz, ~35 GB free disk.
@@ -174,6 +174,11 @@ KSUD=ksud-x86_64-linux-android;                             KSUD_SHA=5324a1e8f2f
 # laptops without an Intel GPU (AMD, NVIDIA) or on older Intel laptops (Gen <= 8 Broadwell/Haswell) lacking hardware Vulkan in Google's image.
 REL_SWR=https://github.com/linuxkid473/gbos-x86/releases/download/v38
 SWR=gbos86-swr-r1.tar.xz;                                  SWR_SHA=7faaa84e3453523ae80d3792983e13d88324e6ce66367a93260e53541147f66a
+# RADV, Mesa's AMD Vulkan driver as an Android Vulkan HAL (tools/radv-android/build.sh, packed by tools/package_radv.sh): with
+# usb/patched/vulkan.radv.so on the stick, hook.sh renders on the AMD GPU instead of SwiftShader (GPU_VULKAN=auto in gbos.cfg).
+# Empty RADV_SHA = not released yet, so nothing is fetched. GBOS_RADV=0 ./build.sh does not fetch it (AMD laptops then use SwiftShader).
+REL_RADV=https://github.com/linuxkid473/gbos-x86/releases/download/v41
+RADV=gbos86-radv-r1.tar.xz;                                RADV_SHA=
 # The Google build comes from lapis/BUILD (one place to change when moving to a new build: see porting.md)
 . lapis/BUILD; GOOGLE=$URL
 PARTS="system_a vendor_a product_a system_ext_a system_dlkm_a vendor_dlkm_a"
@@ -192,6 +197,7 @@ have_mods() {
   }
 }
 have_swr() { [ -f usb/patched/vulkan.swiftshader.so ]; }
+want_radv() { [ -n "$RADV_SHA" ] && [ "${GBOS_RADV:-1}" != 0 ] && [ ! -f usb/patched/vulkan.radv.so ]; }
 have_ksu() { [ -f usb/ksu/manager.apk ] && [ -f usb/ksu/ksud ]; }
 have_parts() {
   [ -f build/super.img ] && [ -f build/super.layout ] && return 0
@@ -215,6 +221,7 @@ have_parts || NEED="$NEED\n  - Google's recovery image: $GOOGLE (7.7 GB, from dl
 have_mods || NEED="$NEED\n  - $MODS (14 MB, from this project's GitHub release)"
 [ -f usb/firmware/rtl_nic/rtl8168h-2.fw ] || NEED="$NEED\n  - $FW (70 MB, from this project's GitHub release)"
 have_swr || NEED="$NEED\n  - $SWR (software GPU driver for AMD graphics, 6 MB, from this project's GitHub release)"
+want_radv && NEED="$NEED\n  - $RADV (AMD GPU Vulkan driver RADV, from this project's GitHub release; GBOS_RADV=0 to skip)"
 have_ksu || NEED="$NEED\n  - $KSU_APK + $KSUD (19 MB, from the KernelSU release on GitHub)"
 if [ -z "$NEED" ]; then say "everything is already downloaded"; else
   printf 'This will download:%b\n' "$NEED"
@@ -273,6 +280,11 @@ if ! have_swr; then
   if ( fetch "$REL_SWR/$SWR" "build/dl/$SWR" "$SWR_SHA" ) && tar -xJf "build/dl/$SWR" -C usb; then :
   else printf '\nWARNING: no software GPU driver in this image; it will not render on AMD graphics (Intel laptops are unaffected).\n'; fi
 else say "    software GPU driver (SwiftShader): present"; fi
+if want_radv; then
+  # Only AMD laptops use it, and SwiftShader stays on the stick as the fallback: a failed download is a warning.
+  if ( fetch "$REL_RADV/$RADV" "build/dl/$RADV" "$RADV_SHA" ) && tar -xJf "build/dl/$RADV" -C usb && [ -f usb/patched/vulkan.radv.so ]; then :
+  else rm -f usb/patched/vulkan.radv.so; printf '\nWARNING: no RADV in this image; AMD graphics will render on the CPU (SwiftShader).\n'; fi
+elif [ -f usb/patched/vulkan.radv.so ]; then say "    AMD GPU driver (RADV): present"; fi
 if ! have_ksu; then
   # KernelSU's userspace: the manager app (the kernel only accepts the official signature) and the daemon.
   mkdir -p usb/ksu

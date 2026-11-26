@@ -278,7 +278,9 @@ shipped), `hook.sh` switches to **software rendering**, logged as `hook: softwar
 
 **RADV (real GPU rendering, experimental).** `tools/radv-android/build.sh` cross-builds Mesa main (b888682c)'s AMD Vulkan driver (RADV, no LLVM) for Android with the
 NDK r30 in Docker (about 10 minutes after the downloads) and writes `build/radv/vulkan.radv.so` (18 MB; an Android Vulkan HAL: exports `HMI`, needs only
-`libcutils/liblog/libnativewindow/libsync/libz` + bionic). Copy it to `usb/patched/`; with `GPU_VULKAN=auto` (default) `hook.sh` then binds it over
+`libcutils/liblog/libnativewindow/libsync/libz` + bionic). Copy it to `usb/patched/` (or to `gbos/patched/` on a stick). Once it is released
+(`tools/package_radv.sh` packs it, `RADV_SHA` in `build.sh` names it), `build.sh` fetches it like SwiftShader; `GBOS_RADV=0 ./build.sh` skips that.
+With `GPU_VULKAN=auto` (default) `hook.sh` then binds it over
 `vulkan.intel.so` instead of SwiftShader when `amdgpu` is bound (`GPU_VULKAN=swiftshader` goes back). It reaches the desktop on an
 MSI Modern 15 B7M (Ryzen 5 7530U, Barcelo, RADV RENOIR), and video previews in Play Store and Photos play. Known problems on that machine: Photos cannot open
 HEVC clips (the software HEVC decoder fails), the pointer renders as a red square, and the built-in touchpad is absent; AMD pinctrl/GPIO is now enabled in the generic kernel profile, but that touchpad change still needs hardware verification. See `HANDOFF.md`.
