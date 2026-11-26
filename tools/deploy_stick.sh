@@ -28,7 +28,7 @@ put() {  # put SRC DST(relative to gbos/): copy when different (DRY=1: only list
 }
 
 put_all() {
-for f in hook.sh stick_fat.sh optimize.sh install.sh aidiag.sh native_zygote.sh early_patch.sh sensor_vendor_overlay.sh sensor_trial_diag.sh tablet_mode.sh sensordiag.sh hwdetect.sh mask_vendor_modules.sh apex_patch.sh crossystem libkm_compat.so system_ext_manifest.xml soft_gk gbos_fp sysupdate.sh sysupdate.pub gbos86-updater.apk; do put "$U/$f" "$f"; done
+for f in hook.sh stick_fat.sh optimize.sh install.sh aidiag.sh native_zygote.sh early_patch.sh sensor_vendor_overlay.sh sensor_trial_diag.sh tablet_mode.sh sensordiag.sh hwdetect.sh mask_vendor_modules.sh apex_patch.sh crossystem libkm_compat.so system_ext_manifest.xml soft_gk gbos_fp sysupdate.sh sysupdate.pub report.pub gbos86-updater.apk; do put "$U/$f" "$f"; done
 for d in patched audio installer kmod ksu a11y surface thermal camera display; do
   [ -d "$U/$d" ] || continue
   (cd "$U" && find "$d" -type f ! -name '.DS_Store') | while read -r f; do put "$U/$f" "$f"; done

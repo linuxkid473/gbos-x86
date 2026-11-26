@@ -35,7 +35,8 @@ _l1=$(grep -n '^\[ \$FROM = nvme \] && MODE=boot$' "$ROOT/usb/stage0_init.sh" | 
 _l2=$(grep -n 'GBOS_SYSUPDATE_RAN' "$ROOT/usb/stage0_init.sh" | tail -n 1 | cut -d: -f1)
 _l3=$(grep -n '^if \[ "\$HWDETECT" != 0 \]' "$ROOT/usb/stage0_init.sh" | cut -d: -f1)
 check "stage0_init.sh fallback hook sits after FROM/MODE and before hwdetect" "[ -n '$_l1' ] && [ -n '$_l2' ] && [ -n '$_l3' ] && [ $_l1 -lt ${_l2:-0} ] && [ ${_l2:-0} -lt ${_l3:-0} ]"
-check "install.sh ships sysupdate.sh and sysupdate.pub" "grep -q '^FILES=\".* sysupdate.sh sysupdate.pub\"' '$ROOT/usb/install.sh'"
+check "install.sh ships sysupdate.sh, sysupdate.pub and report.pub" "grep -q '^FILES=\".* sysupdate.sh sysupdate.pub report.pub\"' '$ROOT/usb/install.sh'"
+check "the repo's report.pub is the placeholder or a public key, never a private key" "! grep -q PRIVATE '$ROOT/usb/report.pub' && head -n 1 '$ROOT/usb/report.pub' | grep -qx 'gbos86-report-key 1'"
 for t in deploy_stick.sh make_gbos86_image.sh install_dualboot.sh; do check "tools/$t ships sysupdate.sh" "grep -q 'sysupdate.sh sysupdate.pub' '$ROOT/tools/$t'"; done
 check "the repo's sysupdate.pub is the placeholder or a public key, never a private key" "! grep -q PRIVATE '$ROOT/usb/sysupdate.pub'"
 # hook.sh's gbos.rc part: explicit seclabels, no "$" left for init
@@ -59,7 +60,7 @@ mk_src() { # DIR BUILD TAG: a usb/-like source with install.sh's FILES/DIRS
   cp "$ROOT/usb/install.sh" "$ROOT/usb/sysupdate.sh" "$ROOT/usb/early_patch.sh" "$ROOT/usb/hook.sh" "$_s/"
   for f in stick_fat.sh optimize.sh aidiag.sh native_zygote.sh sensor_vendor_overlay.sh sensor_trial_diag.sh tablet_mode.sh hwdetect.sh sensordiag.sh mask_vendor_modules.sh apex_patch.sh; do echo "true # $3" > "$_s/$f"; done
   for f in crossystem bootdisk.img libkm_compat.so system_ext_manifest.xml soft_gk; do echo "$f $3" > "$_s/$f"; done
-  cp "$PUB" "$_s/sysupdate.pub"
+  cp "$PUB" "$_s/sysupdate.pub"; cp "$ROOT/usb/report.pub" "$_s/report.pub"
   printf '# gbOS86 patch manifest\n# build %s\n' "$(FP "$2")" > "$_s/patched/MANIFEST"
   echo "lib $3" > "$_s/patched/system.libz.so"
   echo fw-a > "$_s/firmware/a.bin"; echo fw-b > "$_s/firmware/intel/b.bin"; echo "fw-c $3" > "$_s/firmware/c.bin"
@@ -435,6 +436,31 @@ check "cleanup: installed set, nothing pending: folder deleted, record dropped" 
 rec "$CB/Download/gbos86-update-5-abc"
 check "cleanup: already gone: says so" "CL cleanup '$CG' | grep -q 'already gone' && [ ! -f '$CR' ]"
 check "request: a successful stage records its folder, cleanup is a request action" "grep -q 'su_record_source \"\$_real\" \"\$_base\"' '$ROOT/usb/sysupdate.sh' && grep -q '^    cleanup) ' '$ROOT/usb/sysupdate.sh'"
+
+# --- bug report (the app's Bug report card): collection, redaction, REPORT.md, packing
+RG=$T/rg/gbos; RO=$T/rg/out; mkdir -p "$RG/logs/boot-7" "$RG/logs/boot-8" "$RG/logs/boot-9" "$RG/update" "$RO"
+echo 'gbos86-sysupdate-key 1' > "$RG/sysupdate.pub"; echo 'none' >> "$RG/sysupdate.pub"
+printf '6,29,0,-,caller=T0;DMI: Dell Inc. Latitude 7320 Detachable/0TNW0H, BIOS 1.49.0\n5,0,0,-,caller=T0;Linux version 6.18.21-gbos-whl (root@x) (clang) #64 SMP\nhook: PATCH-STATUS 6 applied, 0 not applied\nusb 2-2: SerialNumber: STICKSERIAL1\nwlan0: associated with 12:34:56:78:9a:bc\n' > "$RG/logs/boot-9/kmsg.log"
+printf 'model name\t: Test CPU\nMemTotal:       16000000 kB\n' > "$RG/logs/boot-9/hw.txt"
+printf 'I wifi: SSID: "Casa Silva" BSSID: 12:34:56:78:9a:bc\nI acct: Account {name=jane.doe@gmail.com, type=com.google}\nE AndroidRuntime: FATAL EXCEPTION: main\nI x: ro.serialno]: [SN0001] mail joe@example.pt resource-cache@com.android.systemui\n' > "$RG/logs/boot-9/logcat.txt"
+printf 'old boot 12:34:56:78:9a:bc\n' > "$RG/logs/boot-8/kmsg.log"; printf 'oldest\n' > "$RG/logs/boot-7/kmsg.log"
+printf 'the screen goes black after resume\n' > "$T/rg/desc"
+RP() { SYSUPDATE_TEST=1 SU_PI=$T/rg SU_DMESG=true "$BB" sh "$ROOT/usb/sysupdate.sh" report "$RG" "$RO" --desc "$T/rg/desc" --id-file "$T/rg/rid" "$@"; }
+check "report: packs gbos86-report-<id>-<time>.tar.gz and says file/id" "RP > '$T/rg/r1' && grep -qE '^file=gbos86-report-[0-9a-f]{8}-[0-9]{12}\.tar\.gz$' '$T/rg/r1' && grep -qE '^id=gbos86-[0-9a-f]{8}$' '$T/rg/r1' && [ -f \"$RO/\$(sed -n 's/^file=//p' '$T/rg/r1')\" ]"
+rm -rf "$T/rg/x"; mkdir -p "$T/rg/x"; tar -C "$T/rg/x" -xzf "$RO"/*.tar.gz; RX=$(ls -d "$T/rg/x"/gbos86-report-*)
+check "report: the newest 2 boots, newest first in REPORT.md" "[ -d '$RX/logs/boot-9' ] && [ -d '$RX/logs/boot-8' ] && [ ! -e '$RX/logs/boot-7' ] && grep -q 'boots: \[boot-9 (current, still running), boot-8 (previous)\]' '$RX/REPORT.md'"
+check "report: the user's words, model, kernel and signals in REPORT.md" "grep -qx 'the screen goes black after resume' '$RX/REPORT.md' && grep -q 'Latitude 7320 Detachable' '$RX/REPORT.md' && grep -q '#64' '$RX/REPORT.md' && grep -q '^- FATAL EXCEPTION: 1, first at logs/boot-9/logcat.txt:3' '$RX/REPORT.md' && grep -q '^- PATCH-STATUS: 1' '$RX/REPORT.md'"
+check "report: no serial, MAC, Wi-Fi name, account or e-mail left" "! grep -rqE 'STICKSERIAL1|12:34:56:78:9a:bc|Casa Silva|jane.doe|SN0001|joe@example.pt' '$RX'"
+check "report: package-style names with @ are kept (not e-mails)" "grep -q 'resource-cache@com.android.systemui' '$RX/logs/boot-9/logcat.txt'"
+check "report: one value is one token in every file (MAC in kmsg and logcat of two boots)" "_t=\$(grep -o 'MAC-[0-9]*' '$RX/logs/boot-9/kmsg.log'); [ -n \"\$_t\" ] && grep -q \"BSSID: \$_t\" '$RX/logs/boot-9/logcat.txt' && grep -q \"old boot \$_t\" '$RX/logs/boot-8/kmsg.log'"
+check "report: SHA256SUMS matches" "(cd '$RX' && sha256sum -c --quiet SHA256SUMS)"
+check "report: the id stays the same next time" "RP > '$T/rg/r2' && [ \"\$(grep '^id=' '$T/rg/r1')\" = \"\$(grep '^id=' '$T/rg/r2')\" ]"
+printf '#!/bin/sh\necho "[    9.6] FAT-fs (sdq2): Volume was not properly unmounted. Some data may be corrupt. Please run fsck."\n' > "$T/rg/dmesg"; chmod +x "$T/rg/dmesg"
+rm -f "$RO"/*; SYSUPDATE_TEST=1 SU_PI=$T/rg SU_DMESG="$T/rg/dmesg" SU_DEV=/dev/sdq2 "$BB" sh "$ROOT/usb/sysupdate.sh" report "$RG" "$RO" --desc "$T/rg/desc" --id-file "$T/rg/rid" >/dev/null 2>&1
+rm -rf "$T/rg/y"; mkdir -p "$T/rg/y"; tar -C "$T/rg/y" -xzf "$RO"/*.tar.gz; RY=$(ls -d "$T/rg/y"/gbos86-report-*)
+check "report: volume mounted dirty: the previous boot's open logs are left out and listed" "[ ! -e '$RY/logs/boot-8/kmsg.log' ] && [ -f '$RY/logs/boot-9/kmsg.log' ] && grep -q '^skipped: boot-8/kmsg.log' '$RY/REPORT.md'"
+check "report: info has report_pub (none for the placeholder)" "cp '$ROOT/usb/report.pub' '$RG/report.pub' && SU info '$RG' | grep -qx 'report_pub=none'"
+check "report: is a request action, the text file owner-checked" "grep -q '^    report)' '$ROOT/usb/sysupdate.sh' && grep -q 'stat -c %u \"\$_rdf\")\" = \"\$_uid\"' '$ROOT/usb/sysupdate.sh'"
 
 [ $FAILS = 0 ] && { echo SYSTEM_UPDATE_TEST_PASS; exit 0; }
 echo "$FAILS FAILED"; exit 1
