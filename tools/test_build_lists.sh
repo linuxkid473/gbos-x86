@@ -10,6 +10,7 @@ T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 G=$T/gbos; mkdir -p "$G"
 for d in sensors camera thermal display; do mkdir -p "$G/$d"; done
 : > "$G/gbos_fp"
+: > "$G/gbos_fp_533c"
 sed -n '/^FILES="/,/^for d in \$DIRS; do \[ -d/p' "$ROOT/usb/install.sh" | grep -v -e '^for d in \$DIRS' -e '^for f in \$FILES' > "$T/lists.sh"
 FILES=; DIRS=; . "$T/lists.sh"
 [ -n "$FILES" ] && [ -n "$DIRS" ] || { echo "FAIL: could not read FILES/DIRS from usb/install.sh"; exit 1; }
