@@ -5,7 +5,7 @@ status: works | partial | pending | no
 """
 from html import escape
 
-UPDATED = '2026-11-18'
+UPDATED = '2026-11-27'
 
 STATUS = {'works': 'Works', 'partial': 'Partly works', 'pending': 'Fix pending', 'no': 'Does not work'}
 
@@ -73,6 +73,31 @@ LAPTOPS = [
          works='Hardware graphics, Wi-Fi, Bluetooth, USB Ethernet, keyboard, Dell hotkeys and lid switch, touchpad, sound, Widevine, Play Store installs and updates, Night Light, Magic Pointer, root adb, the Linux Terminal VM (Debian, Linux apps in their own windows)',
          broken='',
          notes='Kernel #37, installed by hand next to Fedora. GitHub issue 17 (closed): the reporter found five bugs, each with a fix (sound on Meteor Lake needing the <code>sof-ace-tplg</code> topology, Widevine, Play Store installs, the touchpad), and confirmed the list after applying them.'),
+    dict(name='HP EliteBook 830 G7', cpu='Core i5-10310U (Comet Lake), UHD graphics, 32 GB', status='works',
+         works='Boot from USB, clean install to the internal NVMe, boot from the NVMe; Wi-Fi (Intel CNVi 8086:02f0, used for wireless ADB), '
+               'Bluetooth pairing, sound playback and microphone recording, webcam, suspend and resume; display (i915, eDP 1920x1080), backlight, keyboard, '
+               'Synaptics touchpad, ELAN touchscreen',
+         broken='Fingerprint reader (Synaptics 06cb:00df: no driver), Face Unlock (not offered)',
+         notes='R5 build, kernel #66, BIOS S70 01.25.00. Issue 70. Touch gestures and Thunderbolt were not tested. '
+               'The three unbound Intel PCI functions in <code>hwdetect.txt</code> (02ef, 0284, 02a4: shared SRAM, LPC/eSPI, SPI flash) need no driver.'),
+    dict(name='Microsoft Surface Pro 5 (2017, model 1807 LTE)', cpu='Core i5-7300U (Kaby Lake), HD Graphics 620', status='works',
+         works='Display (i915, 2736x1824, density 240), touchscreen (IPTS + iptsd), Wi-Fi and Bluetooth (Marvell 88W8897), Type Cover keyboard and touchpad, '
+               'sound at full volume (ALC298), battery and AC, buttons, sleep and wake; hardware video decoding (H.264, HEVC, VP8, VP9 through VA-API) and hardware Vulkan',
+         broken='Cameras: the IPU3 sensors (OV5693 front, OV8865 rear, OV7251 IR) need drivers and a bridge that are not in the release yet',
+         notes='Live USB. Needs kernel #66 or newer with the Surface patches from #71 (<code>kernel/build_kernel.sh</code>); the release kernel #64 predates them. '
+               'The ALC298 was quiet until <code>usb/audio/volmax.sh</code> (2026-11-27). Pen and LTE were not tested. AV1 video decodes in software.'),
+    dict(name='Lenovo ThinkBook 15 G2 ARE (20VG)', cpu='Ryzen 5 4500U, Radeon Vega (Renoir, 1002:1636)', status='works',
+         works='Desktop rendered by RADV on the Radeon, Wi-Fi (Intel, iwlwifi), Bluetooth (hci0), sound (ALC257, speakers), '
+               'ELAN touchpad (04F3:3140), keyboard and Lenovo extra buttons, backlight (amdgpu_bl1), lid switch detected',
+         broken='',
+         notes='Live USB, kernel #66. Needs RADV (<code>tools/radv-android/build.sh</code>, or #79 once it is released): with SwiftShader '
+               'SystemUI stopped responding (12 ANRs, boot_completed 68 s); with RADV no ANR, boot_completed 52 s. Sleep and the camera were not tested. AMD is experimental.'),
+    dict(name='Microsoft Surface Laptop 3 (Intel)', cpu='Core i5-1035G7 (Ice Lake), Iris Plus graphics, 8 GB', status='works',
+         works='Display (i915), Wi-Fi (Intel AX201) and Bluetooth, sound (ALC274), keyboard and touchpad (Surface Aggregator), battery and AC, '
+               'backlight, front camera (USB, uvcvideo), touchscreen (IPTS 045E:0984 + iptsd)',
+         broken='',
+         notes='Live USB. The touchscreen needs the <code>mei_me</code> Ice Lake iTouch id from #89 (tested with kernel #68); with kernel #66 everything else worked '
+               'and the touchscreen did not react. No ANR or crash. Sleep and the pen were not tested.'),
     dict(name='Dell Latitude 3380', cpu='Core i5-7200U (Kaby Lake), 8 GB DDR4, 256 GB SSD', status='partial',
          works='Wi-Fi, sound, touchpad, keyboard, brightness, display, webcam (installed)',
          broken='Bluetooth',
