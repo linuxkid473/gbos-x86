@@ -2,6 +2,7 @@
 # Test of usb/surface/iptsd-run.sh against a fake /sys, fake /dev and fake iptsd binaries (nothing touches the machine):
 #   - the Surface touchpad's hidraw node (HID_ID ...045E:00000C9F) is found and iptsd is started on it, another HID device is ignored
 #   - the Surface Pro 5 touchscreen (HID_ID ...1B96:0000001F) is checked as a touchscreen and gets iptsd-surface-pro-5.conf
+#   - the Surface Laptop 3 touchscreen (HID_ID ...045E:00000984) is checked as a touchscreen and gets iptsd-surface-laptop-3.conf
 #   - a rejecting iptsd-check-device means no start
 #   - no such touchpad: gives up (exit 0) after WAIT; without the binaries it exits at once and writes no log
 #   - the service in hook.sh is oneshot (the script exits by itself on other laptops, init must not restart it)
@@ -59,6 +60,18 @@ grep -q 'config .*/surface/iptsd-surface-pro-5.conf$' $G/ran 2>/dev/null && ok "
 S=$W/sys1d; G=$W/g1d; mkdev $S hidraw0 0044:00001b96:0000001f "IPTS 1B96:001F"; mkstick $G 0
 run $G $S GBOS_ONCE=1
 grep -q 'config .*/surface/iptsd-surface-pro-5.conf$' $G/ran 2>/dev/null && ok "1B96:001F also gets the SP5 config" || bad "1B96: $(cat $G/ran 2>&1)"
+# 1e. Surface Laptop 3 (Intel): IPTS touchscreen 045E:0984, next to the Surface Aggregator keyboard and touchpad
+S=$W/sys1e; G=$W/g1e
+mkdev $S hidraw0 0000:0000045E:00000984 "IPTS 045E:0984"   # as on a real SL3 (2026-11-27 log, kernel #68)
+mkdev $S hidraw1 0019:0000045E:000009AE "Microsoft Surface 045E:09AE"
+mkdev $S hidraw2 0019:0000045E:000009AF "Microsoft Surface 045E:09AF"
+mkstick $G 0
+run $G $S GBOS_ONCE=1; rc=$?
+[ $rc = 0 ] && grep -q 'iptsd on /dev/hidraw0 ' $G/ran 2>/dev/null && ok "SL3 touchscreen: iptsd started on /dev/hidraw0" || bad "SL3: rc=$rc ran=$(cat $G/ran 2>&1)"
+grep -q -- '--type touchscreen /dev/hidraw0' $G/checked 2>/dev/null && ok "SL3 checked as --type touchscreen" || bad "SL3 check args: $(cat $G/checked 2>&1)"
+grep -q -- 'hidraw[12]' $G/checked 2>/dev/null && bad "SL3 keyboard/touchpad were checked: $(cat $G/checked)" || ok "SL3 keyboard and touchpad are not candidates"
+grep -q 'config .*/surface/iptsd-surface-laptop-3.conf$' $G/ran 2>/dev/null && ok "SL3 runs with iptsd-surface-laptop-3.conf" || bad "SL3 config: $(cat $G/ran 2>&1)"
+[ -f $ROOT/usb/surface/iptsd-surface-laptop-3.conf ] && ok "usb/surface/iptsd-surface-laptop-3.conf exists" || bad "SL3 config file missing"
 # a product id that only starts like 001F must not match
 S=$W/sys1c; G=$W/g1c; mkdev $S hidraw0 0044:00001B96:0000001F0 "not IPTS"; mkstick $G 0
 run $G $S GBOS_WAIT=0; rc=$?
