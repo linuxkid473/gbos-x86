@@ -103,7 +103,7 @@ WELCOME_POST = '''Welcome to the gbOS86 community.
 
 gbOS86 runs Google's Googlebook OS on ordinary Intel laptops. It boots from a USB stick (live), installs to the internal SSD, or updates an existing install without touching your data.
 
-**What works today:** Intel 6th gen and newer, Intel graphics, boot-time hardware detection for Wi-Fi, Bluetooth, sound, touchpad, brightness and display. Thirty-eight machines have been tried so far (Dell Latitude 5300, Acer Aspire Lite AL15-52, HP Envy 13, ThinkPad T470, Intel NUC8BEH, MSI Sword 16 HX and Dell Inspiron 14 Plus 7440 work; others partly or not yet): https://gbos86.com/hardware. Your reports matter.
+**What works today:** Intel 6th gen and newer, Intel graphics, boot-time hardware detection for Wi-Fi, Bluetooth, sound, touchpad, brightness and display. Thirty-nine machines have been tried so far (Dell Latitude 5300, Acer Aspire Lite AL15-52, HP Envy 13, ThinkPad T470, Intel NUC8BEH, MSI Sword 16 HX and Dell Inspiron 14 Plus 7440 work; others partly or not yet): https://gbos86.com/hardware. Your reports matter.
 
 **How to help**
 - Read the install guide: https://gbos86.com/docs/install
@@ -145,7 +145,7 @@ def home(req, cats, latest, news, st):
 
 <section class="card"><h2>Forums</h2><ul class="catlist">%s</ul></section>
 
-<section class="notice"><strong>Tried so far:</strong> Thirty-eight machines. Dell Latitude 5300, Acer Aspire Lite AL15-52, Lenovo ThinkPad T470, Intel NUC8BEH, MSI Sword 16 HX, Dell Inspiron 14 5440 and Dell Inspiron 14 Plus 7440 work; HP OmniBook 7 and Dell XPS 16 partly; Framework 13 Pro and the Pixelbook Go have a fix pending; HP 14-ne0013dx does not. See the <a href="/hardware#tested">full list</a>. Post your laptop in
+<section class="notice"><strong>Tried so far:</strong> Thirty-nine machines. Dell Latitude 5300, Acer Aspire Lite AL15-52, Lenovo ThinkPad T470, Intel NUC8BEH, MSI Sword 16 HX, Dell Inspiron 14 5440 and Dell Inspiron 14 Plus 7440 work; HP OmniBook 7 and Dell XPS 16 partly; Framework 13 Pro and the Pixelbook Go have a fix pending; HP 14-ne0013dx does not. See the <a href="/hardware#tested">full list</a>. Post your laptop in
 <a href="/forum/c/hardware">Hardware Compatibility</a> and attach <code>hwdetect.txt</code>.</section>''' % (lat, nw, st['members'], st['threads'], st['posts'], cat_rows)
 
 

@@ -86,6 +86,12 @@ LAPTOPS = [
          broken='Cameras: the IPU3 sensors (OV5693 front, OV8865 rear, OV7251 IR) need drivers and a bridge that are not in the release yet',
          notes='Live USB. Needs kernel #66 or newer with the Surface patches from #71 (<code>kernel/build_kernel.sh</code>); the release kernel #64 predates them. '
                'The ALC298 was quiet until <code>usb/audio/volmax.sh</code> (2026-11-27). Pen and LTE were not tested. AV1 video decodes in software.'),
+    dict(name='Lenovo ThinkBook 15 G2 ARE (20VG)', cpu='Ryzen 5 4500U, Radeon Vega (Renoir, 1002:1636)', status='works',
+         works='Desktop rendered by RADV on the Radeon, Wi-Fi (Intel, iwlwifi), Bluetooth (hci0), sound (ALC257, speakers), '
+               'ELAN touchpad (04F3:3140), keyboard and Lenovo extra buttons, backlight (amdgpu_bl1), lid switch detected',
+         broken='',
+         notes='Live USB, kernel #66. Needs RADV (<code>tools/radv-android/build.sh</code>, or #79 once it is released): with SwiftShader '
+               'SystemUI stopped responding (12 ANRs, boot_completed 68 s); with RADV no ANR, boot_completed 52 s. Sleep and the camera were not tested. AMD is experimental.'),
     dict(name='Dell Latitude 3380', cpu='Core i5-7200U (Kaby Lake), 8 GB DDR4, 256 GB SSD', status='partial',
          works='Wi-Fi, sound, touchpad, keyboard, brightness, display, webcam (installed)',
          broken='Bluetooth',
