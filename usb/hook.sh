@@ -692,6 +692,59 @@ on property:sys.gbos86.sysupdate=*
   fi
 }
 
+# Qualcomm ath11k_pci (e.g. QCA6390 on Dell XPS 13 9310): Google's wpa_supplicant config forces aggressive
+# roaming (android_force_roaming_enabled=1) and periodic bgscan, while Android's ClientModeImpl and s2idle
+# resume re-enable 802.11 power save and PCIe ASPM L1 substates, causing DISASSOC_LOW_ACK, 4WAY_HANDSHAKE_TIMEOUT,
+# and htt event stalls. Tune only when ath11k_pci is loaded.
+gbos_ath11k_wifi_tuning() {
+  _aw_root=${NEWROOT:-/new}
+  _aw_pm=${GBOS_PROC_MODULES:-/proc/modules}
+  _aw_tmp=${GBOS_TMP:-/tmp}
+  _aw_pci=${GBOS_SYS_PCI:-/sys/bus/pci}/drivers/ath11k_pci
+  GBOS_ATH11K_PS_RC=
+  grep -q '^ath11k_pci ' "$_aw_pm" 2>/dev/null || return 0
+  for _aw_d in "$_aw_pci"/*; do
+    [ -d "$_aw_d/link" ] || continue
+    echo on > "$_aw_d/power/control" 2>/dev/null || true
+    for _aw_l in l1_aspm l1_1_aspm l1_2_aspm l1_1_pcipm l1_2_pcipm; do
+      [ -w "$_aw_d/link/$_aw_l" ] && echo 0 > "$_aw_d/link/$_aw_l" 2>/dev/null || true
+    done
+    log "hook: ath11k_pci: disabled PCIe ASPM L1 substates and runtime PM on ${_aw_d##*/}"
+  done
+  _aw_conf=$_aw_root/vendor/etc/wifi/wpa_supplicant.conf
+  if [ -f "$_aw_conf" ]; then
+    sed -e 's/^android_force_roaming_enabled=1$/android_force_roaming_enabled=0/' \
+        -e 's/^bgscan_enabled=1$/bgscan_enabled=0/' "$_aw_conf" > "$_aw_tmp/wpa_supplicant.conf" \
+      && mount --bind "$_aw_tmp/wpa_supplicant.conf" "$_aw_conf" \
+      && log "hook: ath11k_pci: disabled forced roaming and bgscan in wpa_supplicant.conf"
+  fi
+  _aw_ovl=$_aw_root/vendor/etc/wifi/wpa_supplicant_overlay.conf
+  if [ -f "$_aw_ovl" ]; then
+    grep -v '^bgscan=' "$_aw_ovl" > "$_aw_tmp/wpa_supplicant_overlay.conf" \
+      && mount --bind "$_aw_tmp/wpa_supplicant_overlay.conf" "$_aw_ovl" \
+      && log "hook: ath11k_pci: removed bgscan from wpa_supplicant_overlay.conf"
+  fi
+  _aw_reg=
+  case "${WIFI_COUNTRY:-}" in
+    [A-Z][A-Z]) _aw_reg="/vendor/bin/iw reg set $WIFI_COUNTRY; " ;;
+  esac
+  _aw_cmd="/system/bin/sh -c \"${_aw_reg}/vendor/bin/iw dev wlan0 set power_save off 2>/dev/null; while true; do sleep 15; /vendor/bin/iw dev wlan0 get power_save 2>/dev/null | grep -q 'Power save: on' && /vendor/bin/iw dev wlan0 set power_save off 2>/dev/null; done\""
+  GBOS_ATH11K_PS_RC="service gbos_ath11k_ps $_aw_cmd
+    user root
+    group root net_admin
+    seclabel u:r:shell:s0
+    disabled
+
+on property:init.svc.wpa_supplicant=running
+    start gbos_ath11k_ps
+
+on property:init.svc.wpa_supplicant_mainline=running
+    start gbos_ath11k_ps
+
+on property:sys.boot_completed=1
+    exec_background - root root -- /system/bin/settings put global wifi_scan_always_enabled 0"
+}
+
 # Logcat to the stick: expose the USB volume inside Android at /postinstall, and overlay
 # /system/etc/init with a copy plus gbos.rc (a logcat service writing to this boot's log dir).
 # "vid:pid" (lower-case hex, as in Android's IDC file names) of every touchpad that is not on USB, from /proc/bus/input/devices.
@@ -881,6 +934,7 @@ fi
   fi
   gbos_tablet_mode_config
   gbos_sysupdate_rc
+  gbos_ath11k_wifi_tuning
   FPRC=
   if [ "${FINGERPRINT:-1}" != 0 ]; then
     if [ -x "$G/gbos_fp" ]; then
@@ -1194,6 +1248,8 @@ service gbos_soft_gk /postinstall/gbos/soft_gk
 
 $FPRC
 
+$GBOS_ATH11K_PS_RC
+
 # Trusty security VM (KeyMint/Gatekeeper TEE) as a plain KVM VM: no pKVM on this laptop.
 # vendor/build.prop's protected_vm.supported=1 is hidden (see below), so the launcher falls back
 # to a non-protected VM; servicemanager starts it on demand for the KeyMint accessors.
@@ -1384,22 +1440,33 @@ DROP='^ro.boot.hypervisor.protected_vm.supported=|^ro.surface_flinger.has_wide_c
     echo "ro.product.marketname=$DEVICE_MODEL"
     echo "ro.product.vendor.marketname=$DEVICE_MODEL"
   fi
+  case "${WIFI_COUNTRY:-}" in
+    [A-Z][A-Z]) echo "ro.boot.wificountrycode=$WIFI_COUNTRY" ;;
+  esac
 } > /tmp/vendor.build.prop && mount --bind /tmp/vendor.build.prop /new/vendor/build.prop \
   && log "hook: vendor build.prop: protected_vm.supported hidden, sRGB-only display, lcd_density=${DENSITY:-stock}, software GPU props=${GPU_SW:-0}"
+# Native bridge selection (NATIVE_BRIDGE=auto|berberis|houdini, default auto).
 # On AMD CPUs, Intel Houdini (libhoudini.so) fails to initialize (0x00010002), breaking all
-# arm64-only apps such as SettingsIntelligence (Settings search). Switch to Berberis
-# (libndk_translation.so), which is already present in the image and activates via berberis_arm_or_arm64.rc.
-if grep -q 'AuthenticAMD' /proc/cpuinfo 2>/dev/null && [ -f /new/system/lib64/libndk_translation.so ]; then
+# arm64-only apps such as SettingsIntelligence. Setting NATIVE_BRIDGE=berberis in gbos.cfg
+# also switches Intel CPUs to Google's Berberis (libndk_translation.so, already in the image
+# via berberis_arm_or_arm64.rc), avoiding Houdini spinlock deadlocks/ANRs on ARM64 games/apps.
+_nb_want=
+case "${NATIVE_BRIDGE:-auto}" in
+  berberis|libndk_translation.so) _nb_want=berberis ;;
+  houdini|libhoudini.so)          _nb_want=houdini ;;
+  *) grep -q 'AuthenticAMD' /proc/cpuinfo 2>/dev/null && _nb_want=berberis ;;
+esac
+if [ "$_nb_want" = berberis ] && [ -f /new/system/lib64/libndk_translation.so ]; then
   _nb_i=0
   for _nb_f in /new/system/build.prop /new/system/etc/prop.default /new/system_ext/etc/build.prop /new/product/etc/build.prop /new/vendor/default.prop /new/vendor/build.prop /new/odm/etc/build.prop; do
     if [ -f "$_nb_f" ] && grep -q '^ro\.dalvik\.vm\.native\.bridge=libhoudini\.so$' "$_nb_f" 2>/dev/null; then
       _nb_i=$((_nb_i + 1))
       sed 's/^ro\.dalvik\.vm\.native\.bridge=libhoudini\.so$/ro.dalvik.vm.native.bridge=libndk_translation.so/' "$_nb_f" > "/tmp/nb_prop_${_nb_i}.prop" \
         && mount --bind "/tmp/nb_prop_${_nb_i}.prop" "$_nb_f" \
-        && log "hook: AMD CPU: switched native.bridge to libndk_translation.so in $_nb_f"
+        && log "hook: native bridge: switched to libndk_translation.so (Berberis, mode=${NATIVE_BRIDGE:-auto}) in $_nb_f"
     fi
   done
-  [ "$_nb_i" = 0 ] && log "hook: AMD CPU: ro.dalvik.vm.native.bridge=libhoudini.so not found in checked prop files"
+  [ "$_nb_i" = 0 ] && log "hook: native bridge: ro.dalvik.vm.native.bridge=libhoudini.so not found in checked prop files"
 fi
 # On non-Intel GPUs (GPU_SW=1, e.g. amdgpu), Intel VA-API (iHD_drv_video.so) cannot open the
 # DRM render node and libdesktop_camera_common panics with Option::unwrap() on None in

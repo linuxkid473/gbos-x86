@@ -213,9 +213,42 @@ gbos_preload_phy() {
   done
 }
 
+# Qualcomm ath11k_pci/ath12k (e.g. QCA6390 on Dell XPS 13 9310, WCN6855, WCN7850) need QRTR (AF_QIPCRTR, net-pf-42)
+# and the MHI QRTR transport (qrtr_mhi, mhi:IPCR) before probing, plus michael_mic (crypto-michael_mic) for per-peer
+# RX defrag setup when adding an AP STA. request_module() is disabled in this kernel
+# (CONFIG_STATIC_USERMODEHELPER_PATH=""), and MHI devices expose MODALIAS only in uevent (no sysfs modalias file),
+# so coldplug never loads these modules on its own (QMI init fails -517 / STA insert fails -2).
+gbos_preload_qcom_wifi() {
+  _sys=${GBOS_SYSFS_ROOT:-/sys}
+  _pm=${GBOS_PROC_MODULES:-/proc/modules}
+  for _d in "$_sys"/bus/pci/devices/*; do
+    [ "$(cat "$_d/vendor" 2>/dev/null)" = 0x17cb ] || continue
+    case "$(cat "$_d/class" 2>/dev/null)" in
+      0x0280*)
+        for _m in qrtr qrtr_mhi michael_mic; do
+          grep -q "^$_m " "$_pm" 2>/dev/null && continue
+          modprobe -q "$_m" && log "hwdetect: loaded $_m (Qualcomm Wi-Fi QMI/MHI/crypto support for ${_d##*/})" \
+            || log "hwdetect: modprobe $_m FAILED (Qualcomm Wi-Fi ${_d##*/} init/connect may fail)"
+        done
+        return 0 ;;
+    esac
+  done
+}
+
+# Preload generic USB CDC Ethernet/NCM/RNDIS class drivers before switch_root so USB cellular dongles, USB Ethernet
+# adapters, or phone tethering plugged in (or mode-switched) after Android starts can bind without /lib/modules.
+gbos_preload_usb_net() {
+  _pm=${GBOS_PROC_MODULES:-/proc/modules}
+  for _m in cdc_ether cdc_ncm rndis_host; do
+    grep -q "^$_m " "$_pm" 2>/dev/null && continue
+    modprobe -q "$_m" && log "hwdetect: loaded $_m (USB network hotplug support)" || true
+  done
+}
+
 gbos_coldplug() {
   [ -f ${GBOS_MODALIAS:-/lib/modules/$(uname -r)/modules.alias} ] || { log "hwdetect: no modules.alias, skipping coldplug"; return 1; }
   gbos_preload_phy
+  gbos_preload_qcom_wifi
   # Not loaded by alias: ACPI video (brightness keys), battery already built in.
   p=1; before=$(wc -l < ${GBOS_PROC_MODULES:-/proc/modules})
   while [ $p -le 4 ]; do
@@ -570,7 +603,7 @@ gbos_hw_report() {
       [ -d /sys/module/$m/parameters ] && { echo "== $m parameters"; for p in /sys/module/$m/parameters/*; do echo "${p##*/}=$(cat $p 2>/dev/null)"; done; }
     done
     echo "== driver messages (wifi, graphics, camera, sensors, audio, bluetooth; first 250)"
-    dmesg | grep -iE 'iwlwifi|iwlmvm|iwlmld|\bxe [0-9a-f:.]+|\[drm|ipu[0-9]|intel-ipu|ivsc|camera|hid[_-]sensor|intel_ish|ishtp|iio|sof-audio|snd_sof|sof-firmware|soundwire|cs42l43|Bluetooth: hci|btintel|No config found|unsupported' | head -250
+    dmesg | grep -iE 'iwlwifi|iwlmvm|iwlmld|ath11k|ath12k|qrtr|mhi|usbnet|cdc_ether|cdc_ncm|rndis|qmi_wwan|\bxe [0-9a-f:.]+|\[drm|ipu[0-9]|intel-ipu|ivsc|camera|hid[_-]sensor|intel_ish|ishtp|iio|sof-audio|snd_sof|sof-firmware|soundwire|cs42l43|Bluetooth: hci|btintel|No config found|unsupported' | head -250
     gbos_report_input
     echo "== lsmod"; lsmod
   } > $L/hwdetect.txt 2>&1
@@ -625,7 +658,7 @@ gbos_hwdetect() {
   [ -d $G/firmware ] && echo -n $G/firmware > $GBOS_FWPATH
   if gbos_modules_mount && gbos_modopts; then
     gbos_load_soundwire_codecs "before coldplug"
-    gbos_coldplug && gbos_wait_devices ${1:-15}
+    gbos_coldplug && { gbos_preload_usb_net; gbos_wait_devices ${1:-15}; }
   fi
   # The brightness keys/backlight need acpi_video when the panel has no native backlight.
   [ -d /sys/class/backlight ] && [ -z "$(ls /sys/class/backlight 2>/dev/null)" ] && modprobe -q video 2>/dev/null
