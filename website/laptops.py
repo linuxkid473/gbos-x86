@@ -5,7 +5,7 @@ status: works | partial | pending | no
 """
 from html import escape
 
-UPDATED = '2026-11-26'
+UPDATED = '2026-11-27'
 
 STATUS = {'works': 'Works', 'partial': 'Partly works', 'pending': 'Fix pending', 'no': 'Does not work'}
 
@@ -73,6 +73,13 @@ LAPTOPS = [
          works='Hardware graphics, Wi-Fi, Bluetooth, USB Ethernet, keyboard, Dell hotkeys and lid switch, touchpad, sound, Widevine, Play Store installs and updates, Night Light, Magic Pointer, root adb, the Linux Terminal VM (Debian, Linux apps in their own windows)',
          broken='',
          notes='Kernel #37, installed by hand next to Fedora. GitHub issue 17 (closed): the reporter found five bugs, each with a fix (sound on Meteor Lake needing the <code>sof-ace-tplg</code> topology, Widevine, Play Store installs, the touchpad), and confirmed the list after applying them.'),
+    dict(name='HP EliteBook 830 G7', cpu='Core i5-10310U (Comet Lake), UHD graphics, 32 GB', status='works',
+         works='Boot from USB, clean install to the internal NVMe, boot from the NVMe; Wi-Fi (Intel CNVi 8086:02f0, used for wireless ADB), '
+               'Bluetooth pairing, sound playback and microphone recording, webcam, suspend and resume; display (i915, eDP 1920x1080), backlight, keyboard, '
+               'Synaptics touchpad, ELAN touchscreen',
+         broken='Fingerprint reader (Synaptics 06cb:00df: no driver), Face Unlock (not offered)',
+         notes='R5 build, kernel #66, BIOS S70 01.25.00. Issue 70. Touch gestures and Thunderbolt were not tested. '
+               'The three unbound Intel PCI functions in <code>hwdetect.txt</code> (02ef, 0284, 02a4: shared SRAM, LPC/eSPI, SPI flash) need no driver.'),
     dict(name='Dell Latitude 3380', cpu='Core i5-7200U (Kaby Lake), 8 GB DDR4, 256 GB SSD', status='partial',
          works='Wi-Fi, sound, touchpad, keyboard, brightness, display, webcam (installed)',
          broken='Bluetooth',
@@ -129,12 +136,6 @@ LAPTOPS = [
          works='Wi-Fi, Bluetooth, touchpad (from the post summary; the thread has the rest)',
          broken='Sound: the SoundWire codecs were not loaded (the modules were added on 2026-11-05, not confirmed)',
          notes='Live USB, kernel 6.18.21-gbos-whl. Hardware Reports thread on Discord, 9 replies.'),
-    dict(name='HP EliteBook 830 G7', cpu='Core i5-10310U (Comet Lake), UHD graphics, 32 GB', status='partial',
-         works='Boot from USB, clean install to the internal NVMe, boot from the NVMe; Wi-Fi (Intel CNVi 8086:02f0, used for wireless ADB); '
-               'detected with drivers: display (i915, eDP 1920x1080), backlight, keyboard, Synaptics touchpad, ELAN touchscreen, Bluetooth (hci0), SOF sound card, HD and IR cameras',
-         broken='Fingerprint reader (Synaptics 06cb:00df: no driver), Face Unlock (not offered)',
-         notes='R5 build, kernel #66, BIOS S70 01.25.00. Issue 70. Sound playback and recording, Bluetooth pairing, the camera, touch gestures, Thunderbolt and suspend were not tested yet. '
-               'The three unbound Intel PCI functions in <code>hwdetect.txt</code> (02ef, 0284, 02a4: shared SRAM, LPC/eSPI, SPI flash) need no driver.'),
     dict(name='Framework Laptop 13 Pro', cpu='Core Ultra 5 325 (Panther Lake), 16 GB, 1 TB NVMe', status='pending',
          works='Boots; black screen after choosing live boot on the reporter\'s stick',
          broken='Display on sticks built before firmware v35',
