@@ -80,6 +80,12 @@ LAPTOPS = [
          broken='Fingerprint reader (Synaptics 06cb:00df: no driver), Face Unlock (not offered)',
          notes='R5 build, kernel #66, BIOS S70 01.25.00. Issue 70. Touch gestures and Thunderbolt were not tested. '
                'The three unbound Intel PCI functions in <code>hwdetect.txt</code> (02ef, 0284, 02a4: shared SRAM, LPC/eSPI, SPI flash) need no driver.'),
+    dict(name='Microsoft Surface Pro 5 (2017, model 1807 LTE)', cpu='Core i5-7300U (Kaby Lake), HD Graphics 620', status='works',
+         works='Display (i915, 2736x1824, density 240), touchscreen (IPTS + iptsd), Wi-Fi and Bluetooth (Marvell 88W8897), Type Cover keyboard and touchpad, '
+               'sound at full volume (ALC298), battery and AC, buttons, sleep and wake; hardware video decoding (H.264, HEVC, VP8, VP9 through VA-API) and hardware Vulkan',
+         broken='Cameras: the IPU3 sensors (OV5693 front, OV8865 rear, OV7251 IR) need drivers and a bridge that are not in the release yet',
+         notes='Live USB. Needs kernel #66 or newer with the Surface patches from #71 (<code>kernel/build_kernel.sh</code>); the release kernel #64 predates them. '
+               'The ALC298 was quiet until <code>usb/audio/volmax.sh</code> (2026-11-27). Pen and LTE were not tested. AV1 video decodes in software.'),
     dict(name='Dell Latitude 3380', cpu='Core i5-7200U (Kaby Lake), 8 GB DDR4, 256 GB SSD', status='partial',
          works='Wi-Fi, sound, touchpad, keyboard, brightness, display, webcam (installed)',
          broken='Bluetooth',
