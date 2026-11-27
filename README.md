@@ -45,7 +45,7 @@ Boot the laptop from the stick (**F12** at the logo, Secure Boot off).
 
 `./build.sh --dry-run` shows what it would download (Google's 7.7 GB image, ~1 MB busybox, 14 MB of kernel modules and 70 MB of firmware
 from this repo's [release](https://github.com/linuxkid473/gbos-x86/releases)). It streams only the six partitions it needs out of
-Google's zip, so the 19 GB disk image inside is never unpacked. Allow 30 to 60 minutes, mostly the download. Thirty-nine machines have been
+Google's zip, so the 19 GB disk image inside is never unpacked. Allow 30 to 60 minutes, mostly the download. Forty machines have been
 tried (see [Tested laptops](#tested-laptops)); if you try another, please post its `gbos/logs/boot-N/hwdetect.txt` in an issue.
 Fedora/RHEL with SELinux enforcing: the scripts add `:z` to the docker bind mounts of this repo's own folders automatically; don't disable SELinux.
 
@@ -76,7 +76,7 @@ Fedora/RHEL with SELinux enforcing: the scripts add `:z` to the docker bind moun
 | Fingerprint reader (Latitude 7320 Detachable, Goodix `27c6:6384`) | Works on hardware (2026-11-17): the userspace AIDL HAL registers, one finger enrolled and unlocked the lock screen. Enabled by default for this exact USB ID (`FINGERPRINT=0` disables it); CrosFP is unchanged on other devices. The HAL runs from the stick's VFAT under permissive SELinux, so enforcing-mode USB access is still unverified. See [`HANDOFF.md`](HANDOFF.md) |
 | Auto-rotation (Latitude 7320 Detachable) | Experimental, DMI-scoped Sensors 2.1 sub-HAL and display-policy trial. Confirmed working by the user on the 2026-11-15 Live boot; logs show accelerometer enumeration and sensor-driven transitions through all four display rotations. The axis mapping has been validated for that test, but the physical full-scale range remains unknown and the HAL's ±2 g range is provisional. `SENSOR_HAL=0` disables both changes. Tablet mode (on-screen keyboard with the cover detached, intel_hid tablet switch) and a rotation policy that survives Google's LaptopController resets are added but hardware-unverified (`usb/tablet_mode.sh`, `TABLET_*` in `gbos.cfg`). See [`sensors/trogdor/`](sensors/trogdor/). |
 | Intel IPU6 cameras | Experimental Latitude 7320-only UVC loopback bridge is available in an opt-in test image (`GBOS_IPU6_CAMERA_BRIDGE=1`). The Latitude's V4L2 frame-size enumeration and initial format are limited to its producer mode, 1280×960 YUYV since 2026-11-20 (640×480 before). An Android-native build (`installer/bin/vulkan/ipu6-loopback`, `tools/build_ipu6_loopback_gpu.sh`, needs the Android NDK) does the per-pixel work on the GPU with Vulkan compute; the launcher uses it when `--probe-gpu` succeeds (`CAMERA_GPU=0` in gbos.cfg keeps the CPU build). The bridge keeps the sensor streaming until reboot because IPU6 stream-stop/close timed out in prior tests. A second bridge instance exposes the rear OV8856 on `/dev/video65` as the back camera (`CAMERA_REAR=0` turns it off, `CAMERA_REAR_ROTATION=180` turns its picture); it is not yet hardware-verified. See [`docs/latitude-7320-camera-test.md`](docs/latitude-7320-camera-test.md) for the image and instructions. |
-| Other laptops | Seventeen of thirty-nine tried machines work fully, fourteen partly, six have a fix pending, two do not; see [Tested laptops](#tested-laptops). The CPU-emulation kernel should help any pre-2021 Intel CPU |
+| Other laptops | Eighteen of forty tried machines work fully, fourteen partly, six have a fix pending, two do not; see [Tested laptops](#tested-laptops). The CPU-emulation kernel should help any pre-2021 Intel CPU |
 
 ## How it works
 
@@ -185,6 +185,7 @@ Reports from people who booted the stick (updated 2026-11-27). A row says what w
 | HP EliteBook 830 G7 | Core i5-10310U, 32 GB | **Works** | Wi-Fi, Bluetooth, sound and microphone, webcam, suspend, touchpad, touchscreen, install to the NVMe | Fingerprint reader (Synaptics `06cb:00df`), Face Unlock. Issue 70 |
 | Microsoft Surface Pro 5 (1807 LTE) | Core i5-7300U | **Works** | Display, touchscreen, Wi-Fi, Bluetooth, Type Cover, sound, battery, sleep, hardware video decoding | Cameras (IPU3, no driver yet). Needs kernel #66+ (Surface patches, #71); pen and LTE not tested |
 | Lenovo ThinkBook 15 G2 ARE | Ryzen 5 4500U | **Works** | Desktop (AMD, RADV build), Wi-Fi, Bluetooth, sound, touchpad (live) | Needs RADV: with SwiftShader SystemUI stops responding. Sleep, camera not tested. AMD is experimental |
+| Microsoft Surface Laptop 3 (Intel) | Core i5-1035G7 | **Works** | Display, touchscreen, Wi-Fi, Bluetooth, sound, keyboard, touchpad, battery, camera (live) | Touchscreen needs the Ice Lake `mei_me` id (#89, kernel #68+). Sleep, pen not tested |
 | Dell Latitude 3380 | Core i5-7200U, 8 GB | Partly | Wi-Fi, sound, touchpad, keyboard, brightness, display, webcam (installed) | Bluetooth (Qualcomm 0cf3:e007: firmware loads, `hci0` up, cause unknown; needs `logcat.txt`). Kernel #42 |
 | HP OmniBook 7 | Core Ultra 5 225U, 16 GB | Partly | Touchpad, keyboard, brightness, display | Wi-Fi (Intel BE201). Sound, webcam, Bluetooth not tested |
 | HP Pavilion Power 15 | Core i7-7700HQ + GTX 1050, 16 GB | Partly | Wi-Fi, Bluetooth, touchpad, brightness, display, webcam | Speakers (fixed in the next update: audio config picked the NVIDIA HDMI card); dock/DisplayLink and the NVIDIA GPU have no driver |
@@ -236,7 +237,7 @@ The kernel (#31) builds drivers for most Intel-era laptops as **modules**, and b
 | Hotkeys, fans, rfkill | Dell, HP, ThinkPad, IdeaPad, Asus, Acer, Samsung, MSI, Sony, Fujitsu, LG, Intel HID/VBTN |
 | Other | SD card readers (Realtek, SDHCI), USB webcams (UVC), Ethernet (r8169, e1000e, igc, USB r8152 and friends) |
 
-**Honest limits.** Thirty-nine machines have been booted (below); anything not on that list is built and wired but untested on
+**Honest limits.** Forty machines have been booted (below); anything not on that list is built and wired but untested on
 hardware. Sound on SOF machines needs the codec's mixer controls to match the generated config (best effort);
 suspend/resume, fingerprint readers, IPU6 cameras and NVIDIA/AMD discrete GPUs are not covered. Build the payload with
 `tools/fetch_firmware.sh` (firmware, not committed) and `kernel/isa_emu_patch/build_generic*.sh` (modules, not committed).

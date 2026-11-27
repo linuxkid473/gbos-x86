@@ -92,6 +92,12 @@ LAPTOPS = [
          broken='',
          notes='Live USB, kernel #66. Needs RADV (<code>tools/radv-android/build.sh</code>, or #79 once it is released): with SwiftShader '
                'SystemUI stopped responding (12 ANRs, boot_completed 68 s); with RADV no ANR, boot_completed 52 s. Sleep and the camera were not tested. AMD is experimental.'),
+    dict(name='Microsoft Surface Laptop 3 (Intel)', cpu='Core i5-1035G7 (Ice Lake), Iris Plus graphics, 8 GB', status='works',
+         works='Display (i915), Wi-Fi (Intel AX201) and Bluetooth, sound (ALC274), keyboard and touchpad (Surface Aggregator), battery and AC, '
+               'backlight, front camera (USB, uvcvideo), touchscreen (IPTS 045E:0984 + iptsd)',
+         broken='',
+         notes='Live USB. The touchscreen needs the <code>mei_me</code> Ice Lake iTouch id from #89 (tested with kernel #68); with kernel #66 everything else worked '
+               'and the touchscreen did not react. No ANR or crash. Sleep and the pen were not tested.'),
     dict(name='Dell Latitude 3380', cpu='Core i5-7200U (Kaby Lake), 8 GB DDR4, 256 GB SSD', status='partial',
          works='Wi-Fi, sound, touchpad, keyboard, brightness, display, webcam (installed)',
          broken='Bluetooth',
