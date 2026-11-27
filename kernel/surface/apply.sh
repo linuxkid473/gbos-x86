@@ -11,10 +11,14 @@
 #               Ported from linux-surface's "iommu: Use IOMMU passthrough mode for IPTS" (its context no longer applies to
 #               6.18.21) with one change: the quirk also requires DMI sys_vendor "Microsoft Corporation", so no other laptop's
 #               DMA mapping changes.
+#   mei         the Ice Lake iTouch HECI id 0x34E4 (MEI_DEV_ID_ICP_LP_3) in mei_me. Mainline has the iTouch ids up to Comet Lake but
+#               not this one, so on the Surface Laptop 3 (Intel) 00:16.4 gets no driver and ipts never starts (HANDOFF 2026-11-27).
+#               Ported from linux-surface's "mei: me: Add Icelake device ID for iTouch" (Dorian Stoll); its id names are newer
+#               than this tree's.
 #
 # Source: github.com/linux-surface/linux-surface patches/6.18/0003-mwifiex.patch and 0005-ipts.patch at commit 4c057ebc8f38
-# (2026-11-23), GPL-2.0, authors as in each patch. The two commits of those series this tree does not need (btusb LE scan
-# interval; MEI device id for Ice Lake iTouch) are left out.
+# (2026-11-23), GPL-2.0, authors as in each patch. The one commit of those series this tree does not need (btusb LE scan
+# interval) is left out.
 set -e
 P=${P:-/host/kernel/surface}
 SRC=${SRC:-/build/src}
@@ -105,4 +109,30 @@ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x34E4, quirk_iommu_ipts);
 ''' + anchor)
 open(path, 'w').write(s)
 print('surface: iommu IPTS quirk added')
+EOF
+
+python3 - drivers/misc/mei/hw-me-regs.h drivers/misc/mei/pci-me.c <<'EOF'
+import sys
+
+regs, tbl = sys.argv[1], sys.argv[2]
+r = open(regs).read()
+t = open(tbl).read()
+if 'MEI_DEV_ID_ICP_LP_3' in r and 'MEI_DEV_ID_ICP_LP_3' in t:
+    print('surface: mei Ice Lake iTouch id already present')
+    sys.exit(0)
+
+
+def add(s, anchor, text, name):
+    if s.count(anchor) != 1:
+        sys.exit('surface: mei anchor not found exactly once in %s: %r' % (name, anchor))
+    return s.replace(anchor, anchor + text)
+
+
+r = add(r, '#define MEI_DEV_ID_ICP_LP     0x34E0  /* Ice Lake Point LP */\n',
+        '#define MEI_DEV_ID_ICP_LP_3   0x34E4  /* Ice Lake Point LP 3 (iTouch) */\n', regs)
+t = add(t, '\t{MEI_PCI_DEVICE(MEI_DEV_ID_ICP_LP, MEI_ME_PCH12_CFG)},\n',
+        '\t{MEI_PCI_DEVICE(MEI_DEV_ID_ICP_LP_3, MEI_ME_PCH12_CFG)},\n', tbl)
+open(regs, 'w').write(r)
+open(tbl, 'w').write(t)
+print('surface: mei Ice Lake iTouch id added')
 EOF

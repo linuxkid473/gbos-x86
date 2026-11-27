@@ -5,6 +5,8 @@
 #   Surface Pro 5 (2017): the touchscreen and pen are an IPTS device of the ipts driver (kernel/surface/apply.sh). Without iptsd the
 #     screen does not react to touch at all. This driver registers it as 045E:001F (hidraw HID_ID=0000:0000045E:0000001F, seen on an
 #     SP5 on 2026-11-24); iptsd's own preset still names the older N-trig id 1B96:001F, which is kept as a second entry.
+#   Surface Laptop 3 (Intel, Ice Lake): touchscreen and pen, the same ipts driver (needs the mei_me id 0x34E4 from apply.sh), as
+#     045E:0984 (seen 2026-11-27). Its IPTS (EDS v2) reports the screen size itself, so its config file has no settings.
 # iptsd (static build of a fork, surface/iptsd) reads the raw frames from the hidraw node and creates multitouch (and pen) uinput
 # devices. Each known device has its own iptsd config in surface/ (DEVICES below). Log: logs/boot-N/iptsd.txt.
 # Exits at once without surface/iptsd on the stick, and after WAIT seconds (default 120) when no such hidraw node ever appears (every
@@ -21,7 +23,7 @@ L=$G/logs/boot-$N
 LOG=$L/iptsd.txt
 # vendor:product as in the uevent's HID_ID, iptsd-check-device --type, iptsd config file in surface/
 DEVICES="0000045E:00000C9F,touchpad,iptsd.conf 0000045E:0000001F,touchscreen,iptsd-surface-pro-5.conf
-         00001B96:0000001F,touchscreen,iptsd-surface-pro-5.conf"
+         00001B96:0000001F,touchscreen,iptsd-surface-pro-5.conf 0000045E:00000984,touchscreen,iptsd-surface-laptop-3.conf"
 [ -x $S/iptsd ] && [ -x $S/iptsd-check-device ] || exit 0
 if [ -f $S/Vendor_045e_Product_0c9f.idc ] && [ ! -f /data/system/devices/idc/Vendor_045e_Product_0c9f.idc ]; then
   mkdir -p /data/system/devices/idc 2>/dev/null
