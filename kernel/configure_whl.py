@@ -137,7 +137,8 @@ _m('AMD_PMC')
 # Storage / card reader / webcam / ethernet
 _y('MMC', 'USB_VIDEO_CLASS')
 _m('MMC_SDHCI', 'MMC_SDHCI_PCI', 'MMC_REALTEK_PCI', 'MISC_RTSX_PCI', 'MISC_RTSX_USB', 'R8169', 'E1000E', 'IGC',
-   'IGB', 'R8152', 'USB_USBNET', 'USB_NET_CDCETHER', 'USB_RTL8152', 'USB_NET_AX88179_178A', 'USB_NET_CDC_NCM')
+   'IGB', 'R8152', 'USB_USBNET', 'USB_NET_CDCETHER', 'USB_RTL8152', 'USB_NET_AX88179_178A', 'USB_NET_CDC_NCM',
+   'USB_NET_RNDIS_HOST')
 # Intel IPU6 cameras (Latitude 7320: PCI 8086:9a19; front OVTI5678 and rear OVTI8856).
 # Board data and sensor/VCM wiring are applied by isa_emu_patch/camera_7320.py.
 # Android Camera3 integration and hardware frame capture remain separate requirements.

@@ -223,6 +223,7 @@ GBOS_MODALIAS="$TMP/modules.alias"; : > "$GBOS_MODALIAS"
 GBOS_PROC_MODULES="$TMP/proc_modules"
 gbos_load_opmodes() { :; }
 gbos_preload_phy() { :; }   # #62's r8169 PHY preload: not under test here
+gbos_preload_qcom_wifi() { :; }
 mdev() { :; }
 log() { :; }
 sleep() { echo s >> "$TMP/sleeps"; }
@@ -240,7 +241,29 @@ cp_case() {
 cp_case "5 3 0" 3 2      # settles: no sleep after the empty pass
 cp_case "0" 1 0          # nothing to load (the hook's second run): no sleep at all
 cp_case "1 1 1 1 1" 4 4  # still loading: capped at 4 passes, each followed by the settle
-unset -f sleep gbos_coldplug_pass gbos_preload_phy mdev gbos_settle_devices
+unset -f sleep gbos_coldplug_pass gbos_preload_phy gbos_preload_qcom_wifi mdev gbos_settle_devices
+
+# Qualcomm Wi-Fi preload (ath11k_pci/ath12k): qrtr + qrtr_mhi + michael_mic loaded before coldplug only when PCI 0x17cb class 0x0280* exists.
+sed -n '/^gbos_preload_qcom_wifi() {/,/^}/p' "$ROOT/usb/hwdetect.sh" > "$TMP/qcom_wifi.sh"
+sed -n '/^gbos_preload_usb_net() {/,/^}/p' "$ROOT/usb/hwdetect.sh" >> "$TMP/qcom_wifi.sh"
+. "$TMP/qcom_wifi.sh"
+Q="$TMP/qcomsys/bus/pci/devices/0000:71:00.0"
+command mkdir -p "$Q"
+echo 0x8086 > "$Q/vendor"; echo 0x028000 > "$Q/class"
+: > "$TMP/qcom_mods"; : > "$TMP/qcom_proc"
+modprobe() { [ "$1" = -q ] && shift; echo "$1" >> "$TMP/qcom_mods"; }
+GBOS_SYSFS_ROOT="$TMP/qcomsys" GBOS_PROC_MODULES="$TMP/qcom_proc" gbos_preload_qcom_wifi
+[ ! -s "$TMP/qcom_mods" ] || { echo "qcom_wifi: loaded modules on non-Qualcomm PCI device" >&2; exit 1; }
+echo 0x17cb > "$Q/vendor"
+GBOS_SYSFS_ROOT="$TMP/qcomsys" GBOS_PROC_MODULES="$TMP/qcom_proc" gbos_preload_qcom_wifi
+[ "$(tr '\n' ' ' < "$TMP/qcom_mods")" = "qrtr qrtr_mhi michael_mic " ] || { echo "qcom_wifi: expected qrtr + qrtr_mhi + michael_mic, got $(cat "$TMP/qcom_mods")" >&2; exit 1; }
+echo "qrtr 53248 0 - Live 0x0" > "$TMP/qcom_proc"; : > "$TMP/qcom_mods"
+GBOS_SYSFS_ROOT="$TMP/qcomsys" GBOS_PROC_MODULES="$TMP/qcom_proc" gbos_preload_qcom_wifi
+[ "$(tr '\n' ' ' < "$TMP/qcom_mods")" = "qrtr_mhi michael_mic " ] || { echo "qcom_wifi: reloaded already-present qrtr" >&2; exit 1; }
+: > "$TMP/qcom_mods"; : > "$TMP/qcom_proc"
+GBOS_PROC_MODULES="$TMP/qcom_proc" gbos_preload_usb_net
+[ "$(tr '\n' ' ' < "$TMP/qcom_mods")" = "cdc_ether cdc_ncm rndis_host " ] || { echo "usb_net: expected cdc_ether + cdc_ncm + rndis_host, got $(cat "$TMP/qcom_mods")" >&2; exit 1; }
+unset -f modprobe
 
 # Settle after a pass: returns once the modalias count holds for two polls, at most GBOS_SETTLE_POLLS polls.
 sed -n '/^gbos_settle_devices() {/,/^}/p' "$ROOT/usb/hwdetect.sh" > "$TMP/settle.sh"
@@ -362,5 +385,36 @@ grep -qx 'log.tag.touchpad-inhibitor=ERROR' "$HOOK" 2>/dev/null || grep -q 'echo
 for _d in /dev/input /dev/dri /dev/snd; do
   sed -n '/^on early-init$/,/^on /p' "$HOOK" | grep -qx "    restorecon_recursive $_d" || { echo "early-init must relabel $_d" >&2; exit 1; }
 done
+
+# Qualcomm ath11k_pci Wi-Fi tuning: disables ASPM L1 substates, forced roaming, bgscan, and keeps 802.11 PS off only when ath11k_pci is loaded.
+sed -n '/^gbos_ath11k_wifi_tuning() {/,/^}/p' "$HOOK" > "$TMP/ath11k_wifi.sh"
+. "$TMP/ath11k_wifi.sh"
+AW_ROOT="$TMP/awroot"; AW_TMP="$TMP/awtmp"; AW_PCI="$TMP/awpci"
+command mkdir -p "$AW_ROOT/vendor/etc/wifi" "$AW_TMP" "$AW_PCI/drivers/ath11k_pci/0000:71:00.0/link" "$AW_PCI/drivers/ath11k_pci/0000:71:00.0/power"
+printf 'ctrl_interface=wlan0\nandroid_force_roaming_enabled=1\nbgscan_enabled=1\n' > "$AW_ROOT/vendor/etc/wifi/wpa_supplicant.conf"
+printf 'disable_scan_offload=1\np2p_disabled=1\nbgscan="simple:64:-70:360"\n' > "$AW_ROOT/vendor/etc/wifi/wpa_supplicant_overlay.conf"
+echo auto > "$AW_PCI/drivers/ath11k_pci/0000:71:00.0/power/control"
+for _l in l1_aspm l1_1_aspm l1_2_aspm l1_1_pcipm l1_2_pcipm; do echo 1 > "$AW_PCI/drivers/ath11k_pci/0000:71:00.0/link/$_l"; done
+: > "$TMP/aw_mounts"; : > "$TMP/aw_proc"
+mount() { echo "$*" >> "$TMP/aw_mounts"; }
+log() { :; }
+NEWROOT="$AW_ROOT" GBOS_PROC_MODULES="$TMP/aw_proc" GBOS_TMP="$AW_TMP" GBOS_SYS_PCI="$AW_PCI" gbos_ath11k_wifi_tuning
+[ ! -s "$TMP/aw_mounts" ] && [ -z "$GBOS_ATH11K_PS_RC" ] || { echo "ath11k_wifi: applied without ath11k_pci" >&2; exit 1; }
+[ "$(cat "$AW_PCI/drivers/ath11k_pci/0000:71:00.0/link/l1_aspm")" = 1 ] || { echo "ath11k_wifi: touched ASPM without ath11k_pci" >&2; exit 1; }
+echo "ath11k_pci 36864 0 - Live 0x0" > "$TMP/aw_proc"
+NEWROOT="$AW_ROOT" GBOS_PROC_MODULES="$TMP/aw_proc" GBOS_TMP="$AW_TMP" GBOS_SYS_PCI="$AW_PCI" gbos_ath11k_wifi_tuning
+[ "$(wc -l < "$TMP/aw_mounts")" = 2 ] || { echo "ath11k_wifi: expected 2 bind mounts, got $(wc -l < "$TMP/aw_mounts")" >&2; exit 1; }
+[ "$(cat "$AW_PCI/drivers/ath11k_pci/0000:71:00.0/power/control")" = on ]
+for _l in l1_aspm l1_1_aspm l1_2_aspm l1_1_pcipm l1_2_pcipm; do [ "$(cat "$AW_PCI/drivers/ath11k_pci/0000:71:00.0/link/$_l")" = 0 ]; done
+grep -qx 'android_force_roaming_enabled=0' "$AW_TMP/wpa_supplicant.conf"
+grep -qx 'bgscan_enabled=0' "$AW_TMP/wpa_supplicant.conf"
+! grep -q '^bgscan=' "$AW_TMP/wpa_supplicant_overlay.conf"
+printf '%s\n' "$GBOS_ATH11K_PS_RC" | grep -q 'service gbos_ath11k_ps /system/bin/sh -c "/vendor/bin/iw dev wlan0 set power_save off'
+printf '%s\n' "$GBOS_ATH11K_PS_RC" | grep -qx 'on property:init.svc.wpa_supplicant_mainline=running'
+printf '%s\n' "$GBOS_ATH11K_PS_RC" | grep -qx '    exec_background - root root -- /system/bin/settings put global wifi_scan_always_enabled 0'
+! printf '%s\n' "$GBOS_ATH11K_PS_RC" | grep -qx '    oneshot'
+WIFI_COUNTRY=US NEWROOT="$AW_ROOT" GBOS_PROC_MODULES="$TMP/aw_proc" GBOS_TMP="$AW_TMP" GBOS_SYS_PCI="$AW_PCI" gbos_ath11k_wifi_tuning
+printf '%s\n' "$GBOS_ATH11K_PS_RC" | grep -q 'service gbos_ath11k_ps /system/bin/sh -c "/vendor/bin/iw reg set US; /vendor/bin/iw dev wlan0 set power_save off'
+unset -f mount
 
 echo "BOOT_TUNING_TEST_PASS"
