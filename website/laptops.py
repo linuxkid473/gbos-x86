@@ -5,7 +5,7 @@ status: works | partial | pending | no
 """
 from html import escape
 
-UPDATED = '2026-11-18'
+UPDATED = '2026-11-27'
 
 STATUS = {'works': 'Works', 'partial': 'Partly works', 'pending': 'Fix pending', 'no': 'Does not work'}
 
@@ -73,6 +73,13 @@ LAPTOPS = [
          works='Hardware graphics, Wi-Fi, Bluetooth, USB Ethernet, keyboard, Dell hotkeys and lid switch, touchpad, sound, Widevine, Play Store installs and updates, Night Light, Magic Pointer, root adb, the Linux Terminal VM (Debian, Linux apps in their own windows)',
          broken='',
          notes='Kernel #37, installed by hand next to Fedora. GitHub issue 17 (closed): the reporter found five bugs, each with a fix (sound on Meteor Lake needing the <code>sof-ace-tplg</code> topology, Widevine, Play Store installs, the touchpad), and confirmed the list after applying them.'),
+    dict(name='HP EliteBook 830 G7', cpu='Core i5-10310U (Comet Lake), UHD graphics, 32 GB', status='works',
+         works='Boot from USB, clean install to the internal NVMe, boot from the NVMe; Wi-Fi (Intel CNVi 8086:02f0, used for wireless ADB), '
+               'Bluetooth pairing, sound playback and microphone recording, webcam, suspend and resume; display (i915, eDP 1920x1080), backlight, keyboard, '
+               'Synaptics touchpad, ELAN touchscreen',
+         broken='Fingerprint reader (Synaptics 06cb:00df: no driver), Face Unlock (not offered)',
+         notes='R5 build, kernel #66, BIOS S70 01.25.00. Issue 70. Touch gestures and Thunderbolt were not tested. '
+               'The three unbound Intel PCI functions in <code>hwdetect.txt</code> (02ef, 0284, 02a4: shared SRAM, LPC/eSPI, SPI flash) need no driver.'),
     dict(name='Dell Latitude 3380', cpu='Core i5-7200U (Kaby Lake), 8 GB DDR4, 256 GB SSD', status='partial',
          works='Wi-Fi, sound, touchpad, keyboard, brightness, display, webcam (installed)',
          broken='Bluetooth',
