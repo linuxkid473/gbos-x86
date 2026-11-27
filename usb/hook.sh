@@ -708,13 +708,15 @@ gbos_touchpads() {
   }' ${INPUTS:-/proc/bus/input/devices} 2>/dev/null | sort -u
 }
 
-# The Goodix MOC backend supports this exact USB product only. USBDEVS is for regression tests.
+# Supported Goodix fingerprint USB sensors: 27c6:6384 (MOC, gbos_fp) and 27c6:533c (GM168SEC + Milan, gbos_fp_533c).
+# USBDEVS is for regression tests.
 gbos_goodix_fp() {
   for d in ${USBDEVS:-/sys/bus/usb/devices}/*; do
     [ "$(cat "$d/idVendor" 2>/dev/null)" = 27c6 ] || continue
-    [ "$(cat "$d/idProduct" 2>/dev/null)" = 6384 ] || continue
-    echo 27c6:6384
-    return
+    case "$(cat "$d/idProduct" 2>/dev/null)" in
+      6384) echo 27c6:6384; return ;;
+      533c) echo 27c6:533c; return ;;
+    esac
   done
 }
 
@@ -883,9 +885,9 @@ fi
   gbos_sysupdate_rc
   FPRC=
   if [ "${FINGERPRINT:-1}" != 0 ]; then
-    if [ -x "$G/gbos_fp" ]; then
-      FPDEV=$(gbos_goodix_fp)
-      if [ -n "$FPDEV" ]; then
+    FPDEV=$(gbos_goodix_fp)
+    if [ -n "$FPDEV" ]; then
+      if [ "$FPDEV" = 27c6:6384 ] && [ -x "$G/gbos_fp" ]; then
         # --no-gbos-install lets a live boot delete old-style (GBOS-<id>-...) sensor templates of earlier
         # live boots. Only when neither stage0 ($SYS) nor findfs now sees a GBOSSYS install: an install
         # may still use such a template, and a disk that was slow to appear must not count as "none".
@@ -912,11 +914,27 @@ on post-fs-data
     mkdir /data/vendor/crosfp/gbos_fp 0770 system system
     start gbos_fp"
         log "hook: fingerprint: starting Goodix HAL for $FPDEV${FPARGS:+ ($FPARGS)}"
+      elif [ "$FPDEV" = 27c6:533c ] && [ -x "$G/gbos_fp_533c" ]; then
+        FPLOG=$(gbos_system_log fingerprint.txt)
+        FPRC="# Experimental Goodix GM168SEC + Milan HAL for the exact USB sensor $FPDEV.
+service gbos_fp /postinstall/gbos/gbos_fp_533c --log $FPLOG
+    class hal
+    user system
+    group system usb
+    seclabel u:r:hal_fingerprint_default:s0
+    interface aidl android.hardware.biometrics.fingerprint.IFingerprint/default
+    disabled
+    oneshot
+on post-fs-data
+    mkdir /data/vendor/crosfp 0770 system system
+    mkdir /data/vendor/crosfp/gbos_fp 0770 system system
+    start gbos_fp"
+        log "hook: fingerprint: starting Goodix 533c HAL for $FPDEV"
       else
-        log "hook: fingerprint: Goodix 27c6:6384 not present; CrosFP left as-is"
+        log "hook: fingerprint: HAL binary missing for $FPDEV; CrosFP left as-is"
       fi
     else
-      log "hook: fingerprint: gbos_fp binary missing; CrosFP left as-is"
+      log "hook: fingerprint: Goodix 27c6:6384 or 27c6:533c not present; CrosFP left as-is"
     fi
   fi
   # Debug backchannel, off by default: with RUN_SH_BACKCHANNEL=1 in gbos.cfg, a gbos/run.sh put on the volume (from another computer) is
