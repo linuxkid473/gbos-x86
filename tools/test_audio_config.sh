@@ -447,6 +447,39 @@ cmp -s "$W/pchcp/mixer_paths.xml" "$TPL/mixer_paths.xml" && ok "volmax: file unt
 H=$ROOT/usb/hook.sh
 chk "hook: PCH path runs volmax.sh on a copy" "$H" 'VMSG=$(sh $G/audio/volmax.sh /proc/asound/card$CNO /tmp/gbos-audio/$AC/mixer_paths.xml) && ASRC=/tmp/gbos-audio/$AC'
 
+# ---- 5f. card id PCH, jack devices (usb/audio/jacks.sh; issue 88) -------------------------------------------------------------
+# Latitude 5300 (combo jack "HDA Intel PCH Headphone Mic"): the shipped template stays byte for byte as it is.
+J=$ROOT/usb/audio/jacks.sh
+mkdir -p $W/jk5300 $W/jkopti $W/jknone; cp "$TPL/audio_config.xml" $W/jk5300/; cp "$TPL/audio_config.xml" $W/jkopti/; cp "$TPL/audio_config.xml" $W/jknone/
+msg=$(INPUTS=$W/pch/input sh "$J" $W/jk5300/audio_config.xml "HDA Intel PCH") && ok "jacks 5300: exit 0" || bad "jacks 5300: exit status"
+cmp -s $W/jk5300/audio_config.xml "$TPL/audio_config.xml" && ok "jacks 5300: audio_config.xml identical to the template" || bad "jacks 5300: file changed"
+[ "$msg" = "jacks: headphone='HDA Intel PCH Headphone Mic' mic='HDA Intel PCH Headphone Mic'" ] && ok "jacks 5300: message" || bad "jacks 5300 message: $msg"
+# Dell OptiPlex 3020 desktop (ALC3220, input devices from issue 88): separate front/rear jacks and a line out
+cat > $W/jkopti/input <<'EOF'
+N: Name="HDA Intel PCH Front Mic"
+N: Name="HDA Intel PCH Rear Mic"
+N: Name="HDA Intel PCH Line Out"
+N: Name="HDA Intel PCH Front Headphone"
+N: Name="HDA Intel PCH HDMI/DP,pcm=3"
+EOF
+INPUTS=$W/jkopti/input sh "$J" $W/jkopti/audio_config.xml "HDA Intel PCH" >/dev/null && ok "jacks optiplex: exit 0" || bad "jacks optiplex: exit status"
+C=$W/jkopti/audio_config.xml
+wellformed "$C"
+python3 - "$C" <<'EOF' && ok "jacks optiplex: Headphone = Front Headphone, Mic = Front Mic" || bad "jacks optiplex: sections"
+import sys, xml.etree.ElementTree as E
+h = E.parse(sys.argv[1]).getroot().find('HiFi')
+assert h.find('Headphone/JackDev').text == 'HDA Intel PCH Front Headphone'
+assert h.find('Mic/JackDev').text == 'HDA Intel PCH Front Mic'
+assert h.find('HDMI1/JackDev').text == 'HDA Intel PCH HDMI/DP,pcm=3'
+EOF
+nochk "jacks optiplex: no jack device that does not exist" "$C" "Headphone Mic</JackDev>"
+[ "$(diff "$TPL/audio_config.xml" "$C" | grep -c '^>')" = 2 ] && ok "jacks optiplex: only the two JackDev lines changed" || bad "jacks optiplex: diff $(diff "$TPL/audio_config.xml" "$C")"
+# no jack device found at all (empty input list): unchanged
+: > $W/jknone/input
+INPUTS=$W/jknone/input sh "$J" $W/jknone/audio_config.xml "HDA Intel PCH" >/dev/null
+cmp -s $W/jknone/audio_config.xml "$TPL/audio_config.xml" && ok "jacks: no jack devices, file unchanged" || bad "jacks: file changed without jack devices"
+chk "hook: PCH path runs jacks.sh" "$H" 'JMSG=$(sh $G/audio/jacks.sh $ASRC/audio_config.xml "$CNAME")'
+
 # ---- 6. hook.sh: card id PCH still takes the static files, and generation is guarded -------------------------------------
 H=$ROOT/usb/hook.sh
 chk "hook: PCH uses the shipped config"   "$H" 'ASRC=$G/audio/gbos-hda-pch; ADEF=$G/audio/audio_default.xml'

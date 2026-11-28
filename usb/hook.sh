@@ -1692,6 +1692,13 @@ if [ -f $G/audio/gbos-hda-pch/audio_config.xml ]; then
       VMSG=$(sh $G/audio/volmax.sh /proc/asound/card$CNO /tmp/gbos-audio/$AC/mixer_paths.xml) && ASRC=/tmp/gbos-audio/$AC
       log "hook: audio $VMSG"
     fi
+    # The template's jack device "HDA Intel PCH Headphone Mic" is the Latitude 5300's combo jack. A board with separate jacks
+    # (desktop OptiPlex 3020: "Front Headphone", "Front Mic"; issue 88) has no such device, and dras then gives no sound at all.
+    # jacks.sh names the devices this card has (usb/audio/jacks.sh, the same choice gen_config.sh makes for other cards).
+    if [ -f $G/audio/jacks.sh ]; then
+      [ "$ASRC" = /tmp/gbos-audio/$AC ] || { rm -rf /tmp/gbos-audio/$AC && cp -r $ASRC /tmp/gbos-audio/$AC && ASRC=/tmp/gbos-audio/$AC; }
+      [ "$ASRC" = /tmp/gbos-audio/$AC ] && JMSG=$(sh $G/audio/jacks.sh $ASRC/audio_config.xml "$CNAME") && log "hook: audio $JMSG"
+    fi
   fi
   mkdir -p /tmp/vaudio && mount --bind $A /tmp/vaudio && mount -t tmpfs -o mode=0755 tmpfs $A \
     && for f in /tmp/vaudio/*; do n=${f##*/}; { [ -d $f ] && mkdir -p $A/$n || touch $A/$n; } && mount --bind $f $A/$n; done \
