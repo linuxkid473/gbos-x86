@@ -18,4 +18,9 @@
 	<path name="Mic">
 		<ctl name="Capture Switch" value="1 1" />
 	</path>
+	<!-- SOF HDA cards: the DMIC capture switch starts off (UCM's sof-hda-dsp BootSequence turns it on on Linux; issue 80).
+	     Legacy HDA cards have no such control, audio_route skips it. -->
+	<path name="InternalMic">
+		<ctl name="Dmic0 Capture Switch" value="1" />
+	</path>
 </mixer>

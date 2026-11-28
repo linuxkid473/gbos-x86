@@ -168,6 +168,17 @@ chk "sof: mixer sets Speaker Playback Volume (no Master volume on ALC245)" "$O/m
 chk "sof: mixer sets Headphone Playback Volume" "$O/mixer_paths.xml" 'name="Headphone Playback Volume" value="87 87"'
 chk "sof: mixer keeps Speaker switch"   "$O/mixer_paths.xml" 'name="Speaker Playback Switch"'
 chk "sof: mixer jack mic switch"        "$O/mixer_paths.xml" 'name="Mic Capture Switch"'
+# The SOF DMIC capture switch starts off; only the InternalMic route turns it on (issue 80). The jack-mic sed must leave its name alone.
+python3 - "$O/mixer_paths.xml" > $W/sof-dmic.py.out 2>&1 <<'EOF'
+import sys, xml.etree.ElementTree as ET
+r = ET.parse(sys.argv[1]).getroot()
+p = [x for x in r.findall('path') if x.get('name') == 'InternalMic']
+glob = [c for c in r.findall('ctl') if 'Dmic0' in c.get('name', '')]
+ok = len(p) == 1 and not glob and [(c.get('name'), c.get('value')) for c in p[0].findall('ctl')] == [('Dmic0 Capture Switch', '1')]
+print('PYOK' if ok else 'PYBAD %r %r' % ([ET.tostring(x) for x in p], [ET.tostring(x) for x in glob]))
+sys.exit(0 if ok else 1)
+EOF
+if [ $? = 0 ]; then ok "sof: InternalMic path turns on Dmic0 Capture Switch"; else bad "sof: InternalMic path: $(cat $W/sof-dmic.py.out)"; fi
 
 # ---- 3. legacy card with another id -----------------------------------------------------------------------------------------
 gen generic gbos-gen Generic "HD-Audio Generic" >/dev/null
