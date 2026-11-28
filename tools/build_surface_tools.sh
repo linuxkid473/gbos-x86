@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build the static helper binaries of the Surface Laptop 7 support in an amd64 Debian container:
+# Build the static IPTS and Surface helper binaries in an amd64 Debian container (IPTSD is shared by SL1/SL5/SL7):
 #   usb/surface/iptsd, usb/surface/iptsd-check-device   touchpad daemon: github.com/alex-lentz/iptsd (fork of linux-surface/iptsd with
 #       Surface Laptop 7 support) at a pinned commit, plus tools/iptsd/0004-... (Touchpad LiftGraceMs, by nierdal)
 #   usb/surface/surface-webcam                          userspace bridge daemon for Lunar Lake IPU7 raw sensor -> v4l2loopback

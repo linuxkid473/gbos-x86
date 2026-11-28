@@ -1,11 +1,13 @@
-# Surface Laptop 7 (Intel Lunar Lake) runtime files
+# Surface runtime files (Surface Laptop 1, Surface Pro 5, and Surface Laptop 7)
 
 Copied to the stick as `gbos/surface/` (and by the installer to the internal disk).
 
 | File | What |
 |---|---|
-| `iptsd-run.sh` | started by the `gbos_iptsd` service in `hook.sh`; finds the touchpad's hidraw node (045E:0C9F) and keeps `iptsd` running on it. Exits by itself on other laptops. |
+| `iptsd-run.sh` | started by `gbos_iptsd`; matches the Surface Laptop 1 touchscreen (1B96:0979), Surface Pro 5 touchscreen, or Surface Laptop 7 touchpad and keeps `iptsd` running. Exits by itself on other laptops. |
 | `iptsd.conf` | touchpad calibration for the alex-lentz iptsd fork + LiftGraceMs patch |
+| `iptsd-surface-laptop-1.conf` | IPTS EDS v1 touchscreen profile for the first-generation Surface Laptop (1B96:0979), matching upstream's uninverted axes and 13.5-inch 3:2 geometry |
+| `Vendor_1b96_Product_0979.idc` | created at post-fs-data by `hook.sh` to classify the IPTSD uinput device as an internal, orientation-aware touchscreen |
 | `Vendor_045e_Product_0c9f.idc` | Android Input Device Configuration for the virtual multitouch uinput touchpad device |
 | `surface-camera.sh` | started by the `gbos_camera` service in `hook.sh`; loads v4l2loopback, sets up fake UVC sysfs node, and starts `surface-webcam` |
 | `fake_uvc_desc.bin` | UVC binary descriptors presented to Android USB camera HAL |

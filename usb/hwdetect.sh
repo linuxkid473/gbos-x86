@@ -499,6 +499,16 @@ gbos_report_input() {
   done
   echo "== intel_hid / intel_vbtn dmesg"
   dmesg 2>/dev/null | grep -iE 'intel[-_]hid|intel[-_]vbtn|INTC10[57][018]|INT33D6|switch event|5 button|platform supports|Intel HID' | tail -n 20
+  echo "== Surface Laptop keyboard support"
+  _kmod=$(find "/lib/modules/$(uname -r)" -name 'surface_kbd.ko*' 2>/dev/null | head -n 1)
+  echo "surface_kbd module=${_kmod:-missing} loaded=$(grep -q '^surface_kbd ' "${GBOS_PROC_MODULES:-/proc/modules}" 2>/dev/null && echo yes || echo no)"
+  echo "surface_aggregator loaded=$(grep -q '^surface_aggregator ' "${GBOS_PROC_MODULES:-/proc/modules}" 2>/dev/null && echo yes || echo no)"
+  for d in "$sys"/bus/acpi/devices/MSHW0096:00 "$sys"/bus/platform/devices/MSHW0096:00; do
+    [ -e "$d" ] && echo "keyboard_transport ${d##*/}: modalias=$(cat "$d/modalias" 2>/dev/null) driver=$(readlink "$d/driver" 2>/dev/null | sed 's#.*/##')"
+  done
+  echo "== Marvell 88W8897 firmware"
+  _fw="${G:-/gbos}/firmware/mrvl/pcie8897_uapsta.bin"
+  [ -s "$_fw" ] && echo "present $_fw ($(wc -c < "$_fw") bytes)" || echo "missing $_fw"
   echo "== /proc/bus/input/devices"
   cat "${GBOS_INPUT_DEVICES:-/proc/bus/input/devices}" 2>&1
 }

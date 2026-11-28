@@ -74,7 +74,7 @@ g() { grep "$@" $W/all.txt || true; }
   # Marvell 88W8897 Wi-Fi + Bluetooth (Surface Pro 4/5/6, Book 1/2, Laptop 1/2; mwifiex_pcie). Without it the Surface Pro 5 had
   # "Direct firmware load for mrvl/pcie8897_uapsta.bin failed with error -2": no Wi-Fi, and no Bluetooth either (the same firmware
   # starts the chip's USB Bluetooth function).
-  g -E '^mrvl/pcie8897_uapsta\.bin$'
+  g -E '^mrvl/pcie8897_uapsta\.bin(\.zst)?$'
   # Cirrus amps found on some laptops
   g -E '^cirrus/cs35l(41|56)-[^/]*$'
   # Texas Instruments TAS2781/TAS2563 smart amps (Lenovo ThinkBook/Yoga/Legion, Meteor Lake+; I2C amps behind an HDA codec). The HDA driver
@@ -123,6 +123,28 @@ if [ -d $OUT/intel/iwlwifi ]; then mv $OUT/intel/iwlwifi/* $OUT/ && rmdir $OUT/i
 find $OUT -type l | while read l; do t=$(readlink -f "$l"); [ -f "$t" ] && { rm "$l"; cp "$t" "$l"; } || rm "$l"; done
 echo "linux-firmware commit: $(cat $W/commit.txt)" > $OUT/FIRMWARE_SOURCE.txt
 echo "ipu6-camera-bins: commit $IPU6_BINS_COMMIT, ipu6_fw.bin sha256 $IPU6_FW_SHA256" >> "$OUT/FIRMWARE_SOURCE.txt"
+
+# mwifiex_pcie requests the uncompressed Marvell 88W8897 firmware filename.
+# linux-firmware may store it as .zst; stage the exact plain path the driver requests.
+MARVELL_FW=mrvl/pcie8897_uapsta.bin
+mkdir -p "$OUT/mrvl"
+if [ -s "$W/fw/$MARVELL_FW" ]; then
+  cp "$W/fw/$MARVELL_FW" "$OUT/$MARVELL_FW"
+elif [ -s "$W/fw/$MARVELL_FW.zst" ]; then
+  command -v zstd >/dev/null 2>&1 || {
+    echo "ERROR: zstd is required to decompress $MARVELL_FW.zst" >&2
+    exit 1
+  }
+  zstd -q -d -f "$W/fw/$MARVELL_FW.zst" -o "$OUT/$MARVELL_FW"
+else
+  echo "ERROR: linux-firmware checkout does not contain $MARVELL_FW or $MARVELL_FW.zst" >&2
+  exit 1
+fi
+[ -s "$OUT/$MARVELL_FW" ] || {
+  echo "ERROR: staged Marvell firmware is missing or empty: $OUT/$MARVELL_FW" >&2
+  exit 1
+}
+echo "Marvell 88W8897: $MARVELL_FW sha256 $(sha256sum "$OUT/$MARVELL_FW" | awk '{print $1}')" >> "$OUT/FIRMWARE_SOURCE.txt"
 du -sh $OUT
 
 # Intel SOF audio firmware + topologies come from a separate repo (not in linux-firmware).
