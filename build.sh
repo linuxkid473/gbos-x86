@@ -268,6 +268,13 @@ else say "3/4 kernel modules: present"; fi
 if [ ! -f usb/firmware/rtl_nic/rtl8168h-2.fw ]; then
   fetch "$REL_FW/$FW" "build/dl/$FW" "$FW_SHA"; tar -xJf "build/dl/$FW" -C usb
 else say "    firmware: present"; fi
+# Meteor Lake and newer (SOF ACE) load the HDA-generic topology from intel/sof-ace-tplg. Firmware r4 is older than the copy
+# tools/fetch_firmware.sh makes there (issue 17), so without this the card never appears ("SOF firmware and/or topology file
+# not found", Samsung Galaxy Book4 Pro, issue 80). The files are the same as in sof-ipc4-tplg; FAT has no symlinks.
+if [ -d usb/firmware/intel/sof-ipc4-tplg ] && [ ! -f usb/firmware/intel/sof-ace-tplg/sof-hda-generic-2ch.tplg ]; then
+  mkdir -p usb/firmware/intel/sof-ace-tplg && cp usb/firmware/intel/sof-ipc4-tplg/sof-hda-generic*.tplg usb/firmware/intel/sof-ace-tplg/ \
+    && say "    firmware: SOF HDA-generic topologies copied to intel/sof-ace-tplg (Meteor Lake and newer)"
+fi
 if ! have_swr; then
   # Only AMD laptops need it: a failed download is a warning, not the end of the build (Intel images are complete without it).
   if ( fetch "$REL_SWR/$SWR" "build/dl/$SWR" "$SWR_SHA" ) && tar -xJf "build/dl/$SWR" -C usb; then :
