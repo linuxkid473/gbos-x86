@@ -831,6 +831,13 @@ fi
   else
     SURFACESTART="# gbos: no DMI-approved camera bridge or Surface sleep guard"
   fi
+  # IPTSD creates a virtual device with INPUT_PROP_DIRECT. Give Android an explicit built-in touchscreen
+  # IDC before InputReader starts; init's copy builtin rejects files sourced from the stick's vfat mount.
+  GBOS_IPTS_IDC_START=
+  if grep -q 'Name="IPTS 1B96:0979 Touchscreen"' /proc/bus/input/devices 2>/dev/null; then
+    GBOS_IPTS_IDC_START="    start gbos_surface_laptop1_touch_idc"
+    log "hook: Surface Laptop 1 IPTS touchscreen detected; Android touchscreen IDC queued"
+  fi
   IDCRC=
   if [ "${TOUCHPAD_FLICK:-1}" != 0 ]; then
     for tp in $(gbos_touchpads); do
@@ -1021,6 +1028,7 @@ $GBOS_GPU_IRQ_LINK
 
 on post-fs-data
 $IDCRC
+$GBOS_IPTS_IDC_START
 on boot
     setprop persist.zygote.zygote_next.start_on_boot false
     start gbos_nativezygote
@@ -1147,6 +1155,15 @@ service gbos_displaydiag /system/bin/sh -c "sleep 70; ( mount -t debugfs debugfs
 service gbos_iptsd /system/bin/sh /postinstall/gbos/surface/iptsd-run.sh $N
     user root
     group root input
+    seclabel u:r:shell:s0
+    oneshot
+    disabled
+
+# The IPTSD uinput device uses the source HID vendor/product (1B96:0979). Create its
+# Android IDC at post-fs-data, before InputReader enumerates the virtual direct-touch device.
+service gbos_surface_laptop1_touch_idc /system/bin/sh -c "mkdir -p /data/system/devices/idc && echo 'device.internal = 1' > /data/system/devices/idc/Vendor_1b96_Product_0979.idc && echo 'touch.deviceType = touchScreen' >> /data/system/devices/idc/Vendor_1b96_Product_0979.idc && echo 'touch.orientationAware = 1' >> /data/system/devices/idc/Vendor_1b96_Product_0979.idc && chown system:system /data/system/devices/idc/Vendor_1b96_Product_0979.idc && chmod 0644 /data/system/devices/idc/Vendor_1b96_Product_0979.idc"
+    user root
+    group root
     seclabel u:r:shell:s0
     oneshot
     disabled

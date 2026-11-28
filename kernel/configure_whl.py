@@ -119,6 +119,9 @@ GENERIC['SERIAL_8250_RUNTIME_UARTS'] = '4'
 # SURFACE_GPE: lid wake (Pro 5 is in surface_gpe.c's DMI table); SOC_BUTTON_ARRAY + SURFACE_PRO3_BUTTON: power/volume buttons;
 # HID_IPTS: touchscreen + pen (drivers/hid/ipts, added by kernel/surface/apply.sh; iptsd in usb/surface reads it).
 _m('SURFACE_ACPI_NOTIFY', 'SURFACE_GPE', 'INPUT_SOC_BUTTON_ARRAY', 'SURFACE_PRO3_BUTTON', 'HID_IPTS')
+# Surface Laptop 1/2: integrated keyboard (ACPI MSHW0096) uses surface_kbd.
+# This is distinct from SURFACE_HID, which serves newer Surface generations.
+_m('SURFACE_KBD')
 # Intel Volume Management Device: with VMD on (many 11th gen+ laptops, no BIOS switch) the NVMe sits behind a VMD domain and is invisible
 # to the installer until this root-port driver is in the kernel (HP 14s-dq2509TU, Core i3-1115G4, 8086:9a0b).
 _y('VMD')
@@ -181,7 +184,7 @@ REQUIRED = ['DRM_I915', 'TRIM_UNUSED_KSYMS', 'MODULE_SIG_PROTECT', 'ANDROID_BIND
             'KSU', 'VMD', 'IPU_BRIDGE', 'VIDEO_INTEL_IPU6', 'VIDEO_OV5675', 'VIDEO_OV8856', 'VIDEO_DW9714',
             'INTEL_SKL_INT3472', 'GPIO_TPS68470', 'REGULATOR_TPS68470', 'COMMON_CLK_TPS68470',
             'SND_SOC_AMD_RENOIR_MACH', 'SND_SOC_AMD_YC_MACH', 'SND_SOC_AMD_PS', 'SND_SOC_AMD_PS_MACH',
-            'SND_SOC_AMD_ACP_PCI', 'SND_AMD_ASOC_ACP70', 'SND_SOC_AMD_LEGACY_MACH']
+            'SND_SOC_AMD_ACP_PCI', 'SND_AMD_ASOC_ACP70', 'SND_SOC_AMD_LEGACY_MACH', 'SURFACE_KBD']
 
 
 def parse(text):

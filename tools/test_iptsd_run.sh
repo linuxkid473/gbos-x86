@@ -2,6 +2,7 @@
 # Test of usb/surface/iptsd-run.sh against a fake /sys, fake /dev and fake iptsd binaries (nothing touches the machine):
 #   - the Surface touchpad's hidraw node (HID_ID ...045E:00000C9F) is found and iptsd is started on it, another HID device is ignored
 #   - the Surface Pro 5 touchscreen (HID_ID ...1B96:0000001F) is checked as a touchscreen and gets iptsd-surface-pro-5.conf
+#   - the Surface Laptop 1 touchscreen (HID_ID ...1B96:00000979) is checked as a touchscreen and gets its EDS-v1 profile
 #   - a rejecting iptsd-check-device means no start
 #   - no such touchpad: gives up (exit 0) after WAIT; without the binaries it exits at once and writes no log
 #   - the service in hook.sh is oneshot (the script exits by itself on other laptops, init must not restart it)
@@ -55,6 +56,17 @@ grep -q -- '/dev/hidraw2 config=.*/surface/iptsd-surface-pro-5.conf$' $G/checked
   || bad "SP5 check without config: $(cat $G/checked 2>&1)"
 grep -q 'config .*/surface/iptsd-surface-pro-5.conf$' $G/ran 2>/dev/null && ok "SP5 runs with iptsd-surface-pro-5.conf" || bad "SP5 config: $(cat $G/ran 2>&1)"
 [ -f $ROOT/usb/surface/iptsd-surface-pro-5.conf ] && ok "usb/surface/iptsd-surface-pro-5.conf exists" || bad "SP5 config file missing"
+# Surface Laptop 1: IPTS touchscreen 1B96:0979 (EDS v1)
+S=$W/sys1e; G=$W/g1e
+mkdev $S hidraw0 0000:00001B96:00000979 "IPTS 1B96:0979 Touchscreen"
+mkstick $G 0
+run $G $S GBOS_ONCE=1; rc=$?
+[ $rc = 0 ] && grep -q 'iptsd on /dev/hidraw0 ' $G/ran 2>/dev/null && ok "Surface Laptop 1 touchscreen: iptsd started on /dev/hidraw0"   || bad "Surface Laptop 1: rc=$rc ran=$(cat $G/ran 2>&1)"
+grep -q -- '--type touchscreen /dev/hidraw0' $G/checked 2>/dev/null && ok "Surface Laptop 1 checked as --type touchscreen" || bad "Surface Laptop 1 check args: $(cat $G/checked 2>&1)"
+grep -q -- '/dev/hidraw0 config=.*/surface/iptsd-surface-laptop-1.conf$' $G/checked 2>/dev/null && ok "Surface Laptop 1 check runs with its EDS-v1 screen-size profile"   || bad "Surface Laptop 1 check config: $(cat $G/checked 2>&1)"
+grep -q 'config .*/surface/iptsd-surface-laptop-1.conf$' $G/ran 2>/dev/null && ok "Surface Laptop 1 runs with its own profile" || bad "Surface Laptop 1 run config: $(cat $G/ran 2>&1)"
+[ -f $ROOT/usb/surface/iptsd-surface-laptop-1.conf ] && ok "Surface Laptop 1 IPTS profile exists" || bad "Surface Laptop 1 IPTS profile missing"
+
 # the older N-trig id of iptsd's preset (lower-case hex as some kernels print it) still matches
 S=$W/sys1d; G=$W/g1d; mkdev $S hidraw0 0044:00001b96:0000001f "IPTS 1B96:001F"; mkstick $G 0
 run $G $S GBOS_ONCE=1
@@ -91,6 +103,9 @@ H=$ROOT/usb/hook.sh
 awk '/^service gbos_iptsd /{f=1} f&&/oneshot/{print "yes"; exit} f&&/^$/{exit}' "$H" | grep -q yes && ok "hook: gbos_iptsd is oneshot" || bad "hook: gbos_iptsd service not oneshot"
 grep -qF 'start gbos_iptsd' "$H" && ok "hook: gbos_iptsd is started" || bad "hook: gbos_iptsd never started"
 sh -n "$R" && sh -n "$H" && ok "sh -n iptsd-run.sh hook.sh" || bad "syntax"
+
+grep -qF 'start gbos_surface_laptop1_touch_idc' "$H" && ok "hook: Surface Laptop 1 touchscreen IDC start is conditional" || bad "hook: SL1 touchscreen IDC start missing"
+grep -qF 'touch.deviceType = touchScreen' "$H" && ok "hook: Android IDC marks IPTSD output as touchscreen" || bad "hook: touchscreen IDC content missing"
 
 echo "$n checks, $fail failed"
 [ $fail = 0 ] && echo IPTSD_RUN_TEST_PASS
