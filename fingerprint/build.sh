@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build the AIDL v4 Goodix HAL against the Android libraries extracted from this image.
+# Build the AIDL v4 USB MOC fingerprint HAL (Goodix 27c6:6384 + Validity 9x) against the Android libraries extracted from this image.
 set -eu
 C=${CLANG_DIR:-/build/inputs/clang-r584948b}
 CC=${CC:-$C/bin/clang-22}
@@ -29,3 +29,7 @@ $HOSTCC -std=c11 -O2 -Wall -Wextra -Werror -o "$TMP/goodix_sim_test" goodix_sim_
 "$TMP/goodix_sim_test"
 $HOSTCC -std=c11 -O2 -Wall -Wextra -Werror -o "$TMP/fp_log_test" fp_log_test.c
 "$TMP/fp_log_test"
+CRYPTO_FLAGS=$(pkg-config --cflags --libs libcrypto 2>/dev/null || printf '%s' '-lcrypto')
+# shellcheck disable=SC2086
+$HOSTCC -std=c11 -O2 -Wall -Wextra -Werror -o "$TMP/validity_test" validity_test.c $CRYPTO_FLAGS
+"$TMP/validity_test"

@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 /*
- * gbos_fp: android.hardware.biometrics.fingerprint.IFingerprint/default (AIDL V4) for the
- * Latitude 7320 Detachable's Goodix 27c6:6384 match-on-chip USB sensor.
+ * gbos_fp: android.hardware.biometrics.fingerprint.IFingerprint/default (AIDL V4) for USB
+ * match-on-chip fingerprint sensors:
+ *  - Goodix 27c6:6384 (Dell Latitude 7320 Detachable; goodix.h, ported from libfprint)
+ *  - Validity/Synaptics 9x: 138a:0090, 138a:0097 (ThinkPad T470), 138a:009d, 06cb:009a
+ *    (validity.h, ported from python-validity)
  * Experimental research source only; neither its ABI nor authentication behavior has been validated.
  *
- * Google's crosfp HAL only drives Google's own fingerprint MCU, so a laptop with a Goodix sensor has
- * no fingerprint at all. The sensor stores and matches templates itself (goodix.h, a port of libfprint's
- * driver); this HAL names them, keeps each user's list in /data/vendor/crosfp/gbos_fp/ and speaks AIDL.
+ * Google's crosfp HAL only drives Google's own fingerprint MCU, so a laptop with a Goodix or Validity
+ * sensor has no fingerprint at all. Each sensor stores and matches templates itself; this HAL names
+ * them, keeps each user's list in /data/vendor/crosfp/gbos_fp/ and speaks AIDL.
  *
  * Security model:
  *  - Declared SensorStrength::WEAK (Class 2): it unlocks the lock screen and answers BIOMETRIC_WEAK
@@ -109,10 +112,60 @@ int __android_log_print(int prio, const char *tag, const char *fmt, ...) __attri
 
 /* ---- BoringSSL ---- */
 typedef struct env_md_st EVP_MD;
+typedef struct env_md_ctx_st EVP_MD_CTX;
+typedef struct evp_cipher_st EVP_CIPHER;
+typedef struct evp_cipher_ctx_st EVP_CIPHER_CTX;
+typedef struct bignum_st BIGNUM;
+typedef struct bignum_ctx BN_CTX;
+typedef struct ec_group_st EC_GROUP;
+typedef struct ec_point_st EC_POINT;
+typedef struct ec_key_st EC_KEY;
+typedef struct engine_st ENGINE;
 const EVP_MD *EVP_sha256(void);
+EVP_MD_CTX *EVP_MD_CTX_new(void);
+void EVP_MD_CTX_free(EVP_MD_CTX *);
+int EVP_MD_CTX_copy_ex(EVP_MD_CTX *out, const EVP_MD_CTX *in);
+int EVP_DigestInit_ex(EVP_MD_CTX *, const EVP_MD *, ENGINE *);
+int EVP_DigestUpdate(EVP_MD_CTX *, const void *, size_t);
+int EVP_DigestFinal_ex(EVP_MD_CTX *, uint8_t *, unsigned int *);
+int EVP_Digest(const void *, size_t, uint8_t *, unsigned int *, const EVP_MD *, ENGINE *);
+const EVP_CIPHER *EVP_aes_256_cbc(void);
+EVP_CIPHER_CTX *EVP_CIPHER_CTX_new(void);
+void EVP_CIPHER_CTX_free(EVP_CIPHER_CTX *);
+int EVP_CIPHER_CTX_set_padding(EVP_CIPHER_CTX *, int pad);
+int EVP_EncryptInit_ex(EVP_CIPHER_CTX *, const EVP_CIPHER *, ENGINE *, const uint8_t *key, const uint8_t *iv);
+int EVP_EncryptUpdate(EVP_CIPHER_CTX *, uint8_t *out, int *out_len, const uint8_t *in, int in_len);
+int EVP_EncryptFinal_ex(EVP_CIPHER_CTX *, uint8_t *out, int *out_len);
+int EVP_DecryptInit_ex(EVP_CIPHER_CTX *, const EVP_CIPHER *, ENGINE *, const uint8_t *key, const uint8_t *iv);
+int EVP_DecryptUpdate(EVP_CIPHER_CTX *, uint8_t *out, int *out_len, const uint8_t *in, int in_len);
+int EVP_DecryptFinal_ex(EVP_CIPHER_CTX *, uint8_t *out, int *out_len);
 uint8_t *HMAC(const EVP_MD *, const void *key, size_t key_len, const uint8_t *data, size_t data_len,
 	      uint8_t *out, unsigned int *out_len);
 int CRYPTO_memcmp(const void *, const void *, size_t);
+BIGNUM *BN_new(void);
+void BN_free(BIGNUM *);
+BIGNUM *BN_bin2bn(const uint8_t *, size_t, BIGNUM *);
+unsigned int BN_num_bits(const BIGNUM *);
+size_t BN_bn2bin(const BIGNUM *, uint8_t *);
+EC_KEY *EC_KEY_new_by_curve_name(int nid);
+void EC_KEY_free(EC_KEY *);
+int EC_KEY_generate_key(EC_KEY *);
+const EC_GROUP *EC_KEY_get0_group(const EC_KEY *);
+const BIGNUM *EC_KEY_get0_private_key(const EC_KEY *);
+const EC_POINT *EC_KEY_get0_public_key(const EC_KEY *);
+int EC_KEY_set_private_key(EC_KEY *, const BIGNUM *);
+int EC_KEY_set_public_key(EC_KEY *, const EC_POINT *);
+EC_POINT *EC_POINT_new(const EC_GROUP *);
+void EC_POINT_free(EC_POINT *);
+int EC_POINT_mul(const EC_GROUP *, EC_POINT *r, const BIGNUM *n, const EC_POINT *q, const BIGNUM *m, BN_CTX *);
+int EC_POINT_set_affine_coordinates_GFp(const EC_GROUP *, EC_POINT *, const BIGNUM *x, const BIGNUM *y, BN_CTX *);
+int EC_POINT_get_affine_coordinates_GFp(const EC_GROUP *, const EC_POINT *, BIGNUM *x, BIGNUM *y, BN_CTX *);
+int ECDH_compute_key(void *out, size_t out_len, const EC_POINT *pub_key, const EC_KEY *priv_key,
+		     void *(*kdf)(const void *, size_t, void *, size_t *));
+int ECDSA_sign(int type, const uint8_t *digest, size_t digest_len, uint8_t *sig, unsigned int *sig_len,
+	       const EC_KEY *);
+int ECDSA_verify(int type, const uint8_t *digest, size_t digest_len, const uint8_t *sig, size_t sig_len,
+		 const EC_KEY *);
 
 /* ---- libbinder_ndk ---- */
 typedef struct AIBinder AIBinder; typedef struct AIBinder_Class AIBinder_Class;
@@ -157,7 +210,7 @@ AStatus *AStatus_newOk(void); void AStatus_delete(AStatus *);
 #define STATUS_PERMISSION_DENIED (-1)
 #define STATUS_UNKNOWN_TRANSACTION (-74)
 
-/* ---- Goodix sensor ---- */
+/* ---- Sensors (Goodix + Validity) ---- */
 #define GOODIX_ERRNO errno
 #define GOODIX_LOGI LOGI
 #define GOODIX_LOGW LOGW
@@ -166,6 +219,11 @@ AStatus *AStatus_newOk(void); void AStatus_delete(AStatus *);
 #define FP_LOGI LOGI
 #define FP_LOGW LOGW
 #include "gbos_fp_policy.h"
+#define VALIDITY_ERRNO errno
+#define VALIDITY_LOGI LOGI
+#define VALIDITY_LOGW LOGW
+#define VALIDITY_LOGE LOGE
+#include "validity.h"
 
 /* ---- AIDL ---- */
 #define FP_DESCRIPTOR "android.hardware.biometrics.fingerprint.IFingerprint"
@@ -245,12 +303,16 @@ struct op {
 	int32_t *ids, n;
 };
 
+enum fp_backend { FP_BACKEND_NONE = 0, FP_BACKEND_GOODIX, FP_BACKEND_VALIDITY };
+
 static pthread_mutex_t mu;
 static pthread_cond_t cv;
 static struct op *q_head, *q_tail, *cur;
 static int64_t next_op_id = 1;
 static struct session *active;
+static enum fp_backend backend;
 static struct goodix dev;		/* the worker's; other threads only call goodix_request_cancel */
+static struct validity vdev;		/* the worker's; other threads only call validity_request_cancel */
 static char instance[9];
 static bool data_live;			/* DATA_DIR is on tmpfs: forgotten at reboot */
 static bool no_install;			/* --no-gbos-install: hook.sh found no LABEL=GBOSSYS */
@@ -259,7 +321,28 @@ static bool installed;			/* --installed (booted from the NVMe install), /data pe
 static struct { int32_t user; int64_t value, expires; } challenges[16];	/* under mu */
 static struct { int32_t user; int64_t until; } timed[8];		/* under mu, monotonic ms */
 static AIBinder_Class *fp_cls, *session_cls, *cb_cls, *cancel_cls;
-static char hw_version[16], fw_version[40], serial[16];
+static char hw_version[16], fw_version[40], serial[16], sensor_desc[64];
+
+static void fp_request_cancel(void)
+{
+	if (backend == FP_BACKEND_VALIDITY)
+		validity_request_cancel(&vdev);
+	else
+		goodix_request_cancel(&dev);
+}
+
+static void fp_clear_cancel(void)
+{
+	if (backend == FP_BACKEND_VALIDITY)
+		validity_clear_cancel(&vdev);
+	else
+		goodix_clear_cancel(&dev);
+}
+
+static bool fp_cancel_requested(void)
+{
+	return backend == FP_BACKEND_VALIDITY ? validity_cancel_requested(&vdev) : goodix_cancel_requested(&dev);
+}
 
 static int64_t now_ms(int clock)
 {
@@ -438,11 +521,50 @@ static struct fp_policy session_policy(const struct session *ss)
  * The sensor is open. Delete its templates that no Android can reach any more (gbos_fp_policy.h). Returns
  * fp_reconcile's result: negative means the sensor stopped answering and must be reopened.
  */
+static int reconcile_validity(struct session *ss)
+{
+	struct fp_policy p = session_policy(ss);
+	struct validity_template list[VALIDITY_MAX_TEMPLATES];
+	size_t count = 0;
+	int r, deleted = 0, failed = 0, kept = 0;
+
+	r = validity_list_templates(&vdev, list, VALIDITY_MAX_TEMPLATES, &count);
+	if (r != VALIDITY_OK) {
+		LOGW("user %d: Validity template cleanup failed: %d; retried at the next enroll", ss->user, r);
+		return r;
+	}
+	for (size_t i = 0; i < count; i++) {
+		enum fp_verdict v = fp_classify(&p, list[i].uid);
+
+		LOGI("sensor template %s: %s", list[i].uid[0] ? list[i].uid : "(unnamed)", fp_verdict_text(v));
+		if (!fp_verdict_deletes(v)) {
+			kept++;
+			continue;
+		}
+		r = validity_delete(&vdev, list[i].uid);
+		if (r == VALIDITY_OK || r == VALIDITY_NORECORD) {
+			LOGI("deleted sensor template %s (no longer listed)", list[i].uid);
+			deleted++;
+		} else {
+			LOGW("deleting sensor template %s (%s) failed: %d", list[i].uid, fp_verdict_text(v), r);
+			failed++;
+			if (r < 0)
+				return r;
+		}
+	}
+	LOGI("sensor templates for user %d: %u stored, %d deleted, %d kept, %d enrollments known",
+	     (int)p.user, (unsigned int)count, deleted, kept, p.n);
+	ss->reconciled = failed == 0;
+	return VALIDITY_OK;
+}
+
 static int reconcile(struct session *ss)
 {
 	struct fp_policy p = session_policy(ss);
 	int r, deleted, failed, fail = 0;
 
+	if (backend == FP_BACKEND_VALIDITY)
+		return reconcile_validity(ss);
 	r = fp_reconcile(&dev, &p, &deleted, &failed, &fail);
 	if (r != GOODIX_OK) {
 		LOGW("user %d: sensor template cleanup failed: %d (sensor code %d); retried at the next enroll",
@@ -459,6 +581,16 @@ static void op_reconcile(struct session *ss)
 
 	if (ss->reconciled)
 		return;
+	if (backend == FP_BACKEND_VALIDITY) {
+		if ((r = validity_open(&vdev)) < 0) {
+			LOGW("user %d: Validity sensor unavailable for template cleanup: %d; retried at the next enroll",
+			     ss->user, r);
+			return;
+		}
+		if (reconcile_validity(ss) < 0)
+			validity_close(&vdev, false);
+		return;
+	}
 	if ((r = goodix_open(&dev)) < 0) {
 		LOGW("user %d: sensor unavailable for template cleanup: %d; retried at the next enroll",
 		     ss->user, r);
@@ -777,7 +909,7 @@ static binder_status_t cancel_transact(AIBinder *b, transaction_code_t code, con
 	case 1:		/* oneway cancel() */
 		pthread_mutex_lock(&mu);
 		if (cur && cur->id == id) {
-			goodix_request_cancel(&dev);
+			fp_request_cancel();
 		} else {
 			for (struct op *o = q_head; o; o = o->next)
 				if (o->id == id)
@@ -819,6 +951,34 @@ static binder_status_t reply_cancel_signal(AParcel *out, int64_t id)
 /* ---- the worker: every operation runs here, in order, one at a time ---- */
 
 struct op_ctx { struct session *ss; int32_t enroll_id; };
+
+static void on_validity_event(void *ctx, int kind, int value)
+{
+	struct op_ctx *c = ctx;
+
+	if (kind == VALIDITY_EV_CAPTURE) {
+		cb_acquired(c->ss, ACQ_GOOD);
+	} else if (kind == VALIDITY_EV_RETRY) {
+		cb_acquired(c->ss, ACQ_INSUFFICIENT);
+	} else if (kind == VALIDITY_EV_PROGRESS && c->enroll_id) {
+		struct cbargs a = {
+			.a = c->enroll_id,
+			.b = value < VALIDITY_ENROLL_STAGES ? VALIDITY_ENROLL_STAGES - value : 1,
+		};
+
+		cb_send(c->ss, CB_ENROLLMENT_PROGRESS, fill_int_int, &a);
+	}
+}
+
+static bool sleep_cancellable_ms(unsigned int ms)
+{
+	for (unsigned int elapsed = 0; elapsed < ms; elapsed += 50) {
+		if (fp_cancel_requested())
+			return true;
+		usleep(50 * 1000);
+	}
+	return fp_cancel_requested();
+}
 
 static void on_sensor_event(void *ctx, int kind, int value)
 {
@@ -911,6 +1071,73 @@ static void op_authenticate(struct session *ss)
 		list[i] = names[i];
 	}
 	LOGI("user %d: authenticate starting (%d enrollments)", ss->user, st->n);
+	if (backend == FP_BACKEND_VALIDITY) {
+		struct validity_ev vev = { on_validity_event, &ctx };
+
+		if ((r = validity_open(&vdev)) < 0) {
+			open_failed(ss, r, "");
+			return;
+		}
+		for (;;) {
+			r = validity_identify(&vdev, list, st->n, &vev, matched, &fail);
+			if (r < 0 && r != -ECANCELED && validity_cancel_requested(&vdev)) {
+				LOGW("identify ended with %d while being cancelled: reported as cancelled", r);
+				r = -ECANCELED;
+			}
+			if (r == VALIDITY_OK) {
+				for (i = 0; i < st->n && strcmp(matched, names[i]); i++)
+					;
+				if (i == st->n) {
+					LOGE("sensor matched a template that was not offered");
+					cb_void(ss, CB_AUTH_FAILED);
+					if (count_failure(ss) || sleep_cancellable_ms(500)) {
+						if (validity_cancel_requested(&vdev))
+							cb_error(ss, ERR_CANCELED, 0);
+						break;
+					}
+					continue;
+				}
+				if (st->failed) {
+					st->failed = 0;
+					st_save(st);
+				}
+				LOGI("user %d: accepted enrollment %d", ss->user, st->ids[i]);
+				{
+					struct cbargs a = { .a = st->ids[i] };
+
+					cb_send(ss, CB_AUTH_SUCCEEDED, fill_auth_ok, &a);
+				}
+				break;
+			}
+			if (r == VALIDITY_NOMATCH) {
+				cb_void(ss, CB_AUTH_FAILED);
+				if (count_failure(ss))
+					break;
+				if (sleep_cancellable_ms(500)) {
+					cb_error(ss, ERR_CANCELED, 0);
+					break;
+				}
+				continue;
+			}
+			if (r == VALIDITY_RETRY) {
+				if (sleep_cancellable_ms(250)) {
+					cb_error(ss, ERR_CANCELED, 0);
+					break;
+				}
+				continue;
+			}
+			if (r == -ECANCELED) {
+				cb_error(ss, ERR_CANCELED, 0);
+			} else {
+				LOGE("Validity identify failed: %d (sensor code %d)", r, fail);
+				if (r < 0)
+					validity_close(&vdev, false);
+				cb_error(ss, r == VALIDITY_FAILED ? ERR_UNABLE_TO_PROCESS : ERR_HW_UNAVAILABLE, fail);
+			}
+			break;
+		}
+		return;
+	}
 	if ((r = goodix_open(&dev)) < 0) {
 		open_failed(ss, r, "");
 		return;
@@ -1011,6 +1238,50 @@ static void op_enroll(struct session *ss, const struct hat *hat)
 		return;
 	}
 	LOGI("user %d: enroll %d starting as %s", ss->user, id, name);
+	if (backend == FP_BACKEND_VALIDITY) {
+		struct validity_ev vev = { on_validity_event, &ctx };
+
+		if ((r = validity_open(&vdev)) < 0) {
+			open_failed(ss, r, "");
+			return;
+		}
+		if (!ss->reconciled && reconcile_validity(ss) < 0) {
+			validity_close(&vdev, false);
+			if ((r = validity_open(&vdev)) < 0) {
+				open_failed(ss, r, " after the template cleanup");
+				return;
+			}
+		}
+		r = validity_enroll(&vdev, name, &vev, &fail);
+		if (r < 0 && r != -ECANCELED && validity_cancel_requested(&vdev)) {
+			LOGW("user %d: enroll ended with %d while being cancelled: reported as cancelled", ss->user, r);
+			r = -ECANCELED;
+		}
+		if (r == VALIDITY_OK) {
+			st->ids[st->n++] = id;
+			if (st_save(st)) {
+				struct cbargs a = { .a = id, .b = 0 };
+
+				LOGI("user %d: enrolled %d", ss->user, id);
+				cb_send(ss, CB_ENROLLMENT_PROGRESS, fill_int_int, &a);
+			} else {
+				st->n--;
+				(void)validity_delete(&vdev, name);
+				cb_error(ss, ERR_UNABLE_TO_PROCESS, 0);
+			}
+		} else if (r == -ECANCELED) {
+			cb_error(ss, ERR_CANCELED, 0);
+		} else if (r == VALIDITY_FAILED) {
+			LOGE("user %d: Validity enroll failed, sensor code %d", ss->user, fail);
+			cb_error(ss, ERR_UNABLE_TO_PROCESS, fail);
+		} else {
+			LOGE("user %d: Validity enroll failed: %d", ss->user, r);
+			if (r < 0)
+				validity_close(&vdev, false);
+			cb_error(ss, ERR_HW_UNAVAILABLE, 0);
+		}
+		return;
+	}
 	if ((r = goodix_open(&dev)) < 0) {
 		open_failed(ss, r, "");
 		return;
@@ -1085,6 +1356,24 @@ static void op_remove(struct session *ss, const int32_t *ids, int32_t n)
 			;
 		if (i == st->n)
 			continue;	/* not ours (or already gone): nothing to delete */
+		if (backend == FP_BACKEND_VALIDITY) {
+			if (!opened && validity_open(&vdev) < 0) {
+				failed = true;
+				break;
+			}
+			opened = true;
+			template_name(name, ss->user, ids[k]);
+			r = validity_delete(&vdev, name);
+			if (r != VALIDITY_OK && r != VALIDITY_NORECORD) {
+				LOGE("user %d: deleting %d failed: %d", ss->user, ids[k], r);
+				if (r < 0)
+					validity_close(&vdev, false);
+				failed = true;
+				continue;
+			}
+			st->ids[i] = st->ids[--st->n];
+			continue;
+		}
 		if (!opened && goodix_open(&dev) < 0) {
 			failed = true;
 			break;
@@ -1099,7 +1388,7 @@ static void op_remove(struct session *ss, const int32_t *ids, int32_t n)
 		}
 		st->ids[i] = st->ids[--st->n];
 	}
-	if (opened)
+	if (opened && backend == FP_BACKEND_GOODIX)
 		goodix_close(&dev);
 	st_save(st);
 	if (failed)
@@ -1224,7 +1513,7 @@ static void *worker(void *arg)
 			continue;
 		}
 		cur = op;
-		goodix_clear_cancel(&dev);
+		fp_clear_cancel();
 		pthread_mutex_unlock(&mu);
 		run(op);
 		pthread_mutex_lock(&mu);
@@ -1362,7 +1651,7 @@ static binder_status_t write_sensor_props(AParcel *out)
 	AParcel_writeInt32(out, MAX_ENROLL);
 	AParcel_writeInt32(out, 1);		/* ComponentInfo[1] */
 	comp = begin_parcelable(out);
-	write_str(out, "Goodix fingerprint sensor (27c6:6384)");
+	write_str(out, sensor_desc);
 	write_str(out, hw_version);
 	write_str(out, fw_version);
 	write_str(out, serial);
@@ -1420,7 +1709,7 @@ static binder_status_t create_session(const AParcel *in, AParcel *out)
 		LOGW("createSession while user %d's session is open: closing it", old->user);
 		old->closed = true;
 		if (cur && cur->ss == old)
-			goodix_request_cancel(&dev);
+			fp_request_cancel();
 		session_unref_locked(old);
 	}
 	pthread_mutex_unlock(&mu);
@@ -1475,7 +1764,8 @@ int main(int argc, char **argv, char **envp)
 	pthread_t t;
 	int32_t ex;
 	struct statfs_buf fs;
-	bool boot_installed = false, persistent = false;
+	bool boot_installed = false, persistent = false, validity_seen = false;
+	const char *dmi_file = NULL;
 	int i, probe_result = 0;
 
 	(void)envp;
@@ -1484,6 +1774,8 @@ int main(int argc, char **argv, char **envp)
 			no_install = true;
 		else if (strcmp(argv[i], "--installed") == 0)
 			boot_installed = true;
+		else if (strcmp(argv[i], "--dmi-file") == 0 && i + 1 < argc)
+			dmi_file = argv[++i];
 		else if (strcmp(argv[i], "--log") == 0 && i + 1 < argc) {
 			log_fd = open(argv[++i], O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW, 0644);
 			if (log_fd < 0)
@@ -1493,6 +1785,10 @@ int main(int argc, char **argv, char **envp)
 			LOGW("ignoring unknown argument %s", argv[i]);
 	}
 	goodix_init(&dev);
+	validity_init(&vdev);
+	snprintf(vdev.data_dir, sizeof(vdev.data_dir), "%s", DATA_DIR);
+	if (dmi_file)
+		snprintf(vdev.dmi_file, sizeof(vdev.dmi_file), "%s", dmi_file);
 	if (mkdir(DATA_DIR, 0700) != 0 && errno != EEXIST)
 		LOGE("mkdir " DATA_DIR ": %d", errno);
 	/* A statfs failure counts as persistent: it only ever makes the cleanup keep more templates. */
@@ -1512,22 +1808,48 @@ int main(int argc, char **argv, char **envp)
 	/* hook.sh starts this before system_server; retries cover USB nodes still settling. */
 	for (i = 0; i < 12; i++) {
 		LOGI("sensor initialization attempt %d/12", i + 1);
-		probe_result = goodix_open(&dev);
-		if (probe_result == 0)
-			break;
+		if (goodix_find(&dev) == 0) {
+			probe_result = goodix_open(&dev);
+			if (probe_result == 0) {
+				backend = FP_BACKEND_GOODIX;
+				break;
+			}
+		} else if (validity_find(&vdev) == 0) {
+			validity_seen = true;
+			probe_result = validity_open(&vdev);
+			if (probe_result == 0) {
+				backend = FP_BACKEND_VALIDITY;
+				break;
+			}
+		} else {
+			probe_result = -ENODEV;
+		}
 		LOGW("sensor initialization attempt %d/12 failed: %d", i + 1, probe_result);
 		if (i < 11)
 			usleep(5 * 1000 * 1000);
 	}
-	if (i == 12) {
-		LOGE("no usable Goodix sensor after 12 attempts (last error %d), not registering " FP_INSTANCE,
-		     probe_result);
+	if (backend == FP_BACKEND_NONE) {
+		if (validity_seen)
+			LOGE("no usable Validity sensor after 12 attempts (last error %d), not registering " FP_INSTANCE,
+			     probe_result);
+		else
+			LOGE("no usable Goodix sensor after 12 attempts (last error %d), not registering " FP_INSTANCE,
+			     probe_result);
 		return 1;
 	}
-	snprintf(hw_version, sizeof(hw_version), "27c6:%04x", dev.pid);
-	snprintf(fw_version, sizeof(fw_version), "%.8s", dev.fw_version);
-	serial[0] = 0;
-	goodix_close(&dev);
+	if (backend == FP_BACKEND_GOODIX) {
+		snprintf(sensor_desc, sizeof(sensor_desc), "Goodix fingerprint sensor (27c6:%04x)", dev.pid);
+		snprintf(hw_version, sizeof(hw_version), "27c6:%04x", dev.pid);
+		snprintf(fw_version, sizeof(fw_version), "%.8s", dev.fw_version);
+		serial[0] = 0;
+		goodix_close(&dev);
+	} else {
+		snprintf(sensor_desc, sizeof(sensor_desc), "Validity fingerprint sensor (%04x:%04x)", vdev.vid, vdev.pid);
+		snprintf(hw_version, sizeof(hw_version), "%04x:%04x", vdev.vid, vdev.pid);
+		snprintf(fw_version, sizeof(fw_version), "%s", vdev.fw_version);
+		serial[0] = 0;
+		/* Keep Validity TLS session open to avoid exhausting sensor session memory on repeated opens. */
+	}
 	LOGI("sensor %s firmware %s, install %s", hw_version, fw_version, instance);
 
 	ABinderProcess_setThreadPoolMaxThreadCount(0);
