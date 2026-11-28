@@ -708,13 +708,18 @@ gbos_touchpads() {
   }' ${INPUTS:-/proc/bus/input/devices} 2>/dev/null | sort -u
 }
 
-# The Goodix MOC backend supports this exact USB product only. USBDEVS is for regression tests.
+# Supported USB fingerprint sensors: Goodix MOC (27c6:6384) and Validity/Synaptics 9x
+# (138a:0090, 138a:0097, 138a:009d, 06cb:009a). USBDEVS is for regression tests.
 gbos_goodix_fp() {
   for d in ${USBDEVS:-/sys/bus/usb/devices}/*; do
-    [ "$(cat "$d/idVendor" 2>/dev/null)" = 27c6 ] || continue
-    [ "$(cat "$d/idProduct" 2>/dev/null)" = 6384 ] || continue
-    echo 27c6:6384
-    return
+    _v=$(cat "$d/idVendor" 2>/dev/null)
+    _p=$(cat "$d/idProduct" 2>/dev/null)
+    case "$_v:$_p" in
+      27c6:6384|138a:0090|138a:0097|138a:009d|06cb:009a)
+        echo "$_v:$_p"
+        return
+        ;;
+    esac
   done
 }
 
@@ -898,7 +903,21 @@ fi
           FPARGS=" --no-gbos-install"
         fi
         FPLOG=$(gbos_system_log fingerprint.txt)
-        FPRC="# Experimental Goodix MOC HAL for the exact USB sensor $FPDEV.
+        case "$FPDEV" in
+          138a:*|06cb:*)
+            # Validity 9x derives its pre-TLS key from DMI product_name + product_serial; product_serial is
+            # mode 0400 root:root, so pass both to gbos_fp (uid system) via a root/system-only file in /dev.
+            _fp_dmi_dir=${GBOS_DMI:-/sys/class/dmi/id}
+            _fp_prod=$(cat "$_fp_dmi_dir/product_name" 2>/dev/null || true)
+            _fp_ser=$(cat "$_fp_dmi_dir/product_serial" 2>/dev/null || true)
+            if [ -n "$_fp_prod" ] && [ -n "$_fp_ser" ]; then
+              printf '%s\n%s\n' "$_fp_prod" "$_fp_ser" > "${GBOS_DEV:-/dev}/gbos-fp-dmi" 2>/dev/null &&
+                chown 1000:1000 "${GBOS_DEV:-/dev}/gbos-fp-dmi" 2>/dev/null &&
+                chmod 0400 "${GBOS_DEV:-/dev}/gbos-fp-dmi" 2>/dev/null || true
+            fi
+            ;;
+        esac
+        FPRC="# Experimental USB MOC fingerprint HAL for $FPDEV.
 service gbos_fp /postinstall/gbos/gbos_fp$FPARGS --log $FPLOG
     class hal
     user system
@@ -911,9 +930,9 @@ on post-fs-data
     mkdir /data/vendor/crosfp 0770 system system
     mkdir /data/vendor/crosfp/gbos_fp 0770 system system
     start gbos_fp"
-        log "hook: fingerprint: starting Goodix HAL for $FPDEV${FPARGS:+ ($FPARGS)}"
+        log "hook: fingerprint: starting USB MOC HAL for $FPDEV${FPARGS:+ ($FPARGS)}"
       else
-        log "hook: fingerprint: Goodix 27c6:6384 not present; CrosFP left as-is"
+        log "hook: fingerprint: no supported USB sensor (Goodix 27c6:6384 / Validity 9x); CrosFP left as-is"
       fi
     else
       log "hook: fingerprint: gbos_fp binary missing; CrosFP left as-is"

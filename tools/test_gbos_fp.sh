@@ -19,6 +19,13 @@ $HOSTCC -std=c11 -O2 -Wall -Wextra -Werror -I"$ROOT/fingerprint" \
 "$W/goodix_sim_test" | grep -q '^GOODIX_SIM_TEST_PASS$' \
   && ok "simulated sensor: stale-template cleanup policy, duplicate handling, cancel recovery" \
   || bad "Goodix simulated-sensor tests"
+CRYPTO_FLAGS=$(pkg-config --cflags --libs libcrypto 2>/dev/null || printf '%s' '-lcrypto')
+# shellcheck disable=SC2086
+$HOSTCC -std=c11 -O2 -Wall -Wextra -Werror -I"$ROOT/fingerprint" \
+  -o "$W/validity_test" "$ROOT/fingerprint/validity_test.c" $CRYPTO_FLAGS
+"$W/validity_test" | grep -q '^VALIDITY_PROTOCOL_TEST_PASS$' \
+  && ok "Validity 9x protocol, python-validity vectors, TLS 1.2 handshake, and simulated sensor tests" \
+  || bad "Validity protocol tests"
 
 sh -n "$ROOT/usb/hook.sh" "$ROOT/usb/install.sh" "$ROOT/fingerprint/build.sh" \
   "$ROOT/fingerprint/build_image.sh" \
@@ -104,6 +111,21 @@ grep -q '"--no-gbos-install"' "$ROOT/fingerprint/gbos_fp.c" &&
 printf '6383\n' > "$W/usb/1-1/idProduct"
 [ -z "$(run_service 1)" ] && ok "unmatched USB product does not start HAL" || bad "USB product scoping"
 
+# Validity 9x ThinkPad sensors (T470 138a:0097, plus 138a:0090, 138a:009d, 06cb:009a)
+mkdir -p "$W/dmi" "$W/vdev"
+printf '20HD000MUS\n' > "$W/dmi/product_name"
+printf 'PF0ABCDE\n' > "$W/dmi/product_serial"
+printf '138a\n' > "$W/usb/1-1/idVendor"
+printf '0097\n' > "$W/usb/1-1/idProduct"
+RC=$(GBOS_DMI="$W/dmi" GBOS_DEV="$W/vdev"; export GBOS_DMI GBOS_DEV; chown() { :; }; run_service default)
+printf '%s\n' "$RC" | grep -q 'service gbos_fp /postinstall/gbos/gbos_fp' &&
+  [ -f "$W/vdev/gbos-fp-dmi" ] &&
+  [ "$(cat "$W/vdev/gbos-fp-dmi")" = "$(printf '20HD000MUS\nPF0ABCDE')" ] \
+  && ok "Validity 138a:0097 (ThinkPad T470) starts HAL and passes DMI product/serial" \
+  || bad "Validity 138a:0097 service or DMI file"
+printf '0099\n' > "$W/usb/1-1/idProduct"
+[ -z "$(run_service 1)" ] && ok "unmatched Validity USB product does not start HAL" || bad "Validity USB scoping"
+printf '27c6\n' > "$W/usb/1-1/idVendor"
 printf '6384\n' > "$W/usb/1-1/idProduct"
 mv "$W/gbos/gbos_fp" "$W/gbos/gbos_fp.missing"
 [ -z "$(run_service 1)" ] && ok "missing HAL binary does not start service" || bad "missing binary handling"

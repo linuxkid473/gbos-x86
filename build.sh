@@ -230,7 +230,7 @@ if [ -n "${GBOS_SENSOR_BUILD_INPUTS:-}" ]; then
 else
   echo "Experimental Sensors sub-HAL: not included (set GBOS_SENSOR_BUILD_INPUTS to the prepared compact build inputs)."
 fi
-echo "Goodix fingerprint HAL: will build from the local Android image if the kernel build setup is there (else left out with a warning), enabled only for USB 27c6:6384 (set FINGERPRINT=0 to opt out at boot)."
+echo "USB fingerprint HAL: will build from the local Android image if the kernel build setup is there (else left out with a warning), enabled for Goodix 27c6:6384 and Validity 9x (138a:0090, 0097, 009d; 06cb:009a) (set FINGERPRINT=0 to opt out at boot)."
 # Latitude 7320 cameras (IPU6 bridge, DMI-gated, so other laptops are unaffected): on in images built here.
 # usb/gbos.cfg keeps CAMERA_BRIDGE=0; GBOS_IPU6_CAMERA_BRIDGE=0 ./build.sh builds without it. Left unset, a kernel/module/firmware
 # payload that lacks the IPU6 parts (release modules r5, firmware r4) only turns them off with a warning; =1 makes it an error.
@@ -308,12 +308,12 @@ if [ -n "${GBOS_SENSOR_BUILD_INPUTS:-}" ]; then
   sh sensors/trogdor/image_payload.sh build-docker "$GBOS_SENSOR_BUILD_INPUTS" "$SENSOR_PAYLOAD" "${GBOS_SENSOR_BUILD_CLANG:-}"
 fi
 
-say "Building Goodix 27c6:6384 fingerprint HAL"
+say "Building USB fingerprint HAL (Goodix + Validity 9x)"
 # It needs the kernel build setup (docker images gbos-erofs and gbos-kbuild, volume gbos-ksrc with clang), which an image build from
 # the release kernel does not have (issue 65). Without it the image just has no gbos_fp (make_gbos86_image.sh copies it only if
-# present), which only matters on laptops with the USB reader 27c6:6384.
+# present), which only matters on laptops with Goodix 27c6:6384 or Validity 9x USB readers.
 if ! sh fingerprint/build_image.sh lapis/parts; then
-  printf '\nWARNING: no Goodix fingerprint HAL in this image (needs the kernel build setup, see above); only USB reader 27c6:6384 is affected.\n'
+  printf '\nWARNING: no USB fingerprint HAL in this image (needs the kernel build setup, see above); only Goodix 27c6:6384 and Validity 9x readers are affected.\n'
 fi
 
 if [ "$BUILD_TYPE" = "dualboot" ]; then
