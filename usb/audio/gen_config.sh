@@ -75,22 +75,9 @@ IMIC=${DMIC:-$ACP}
 H1=; H2=; H3=; i=0
 for d in $HDMI; do i=$((i+1)); [ $i = 1 ] && H1=$d; [ $i = 2 ] && H2=$d; [ $i = 3 ] && H3=$d; done
 
-# --- jack input devices ------------------------------------------------------------------------------------------------
-has() { [ -f "$INPUTS" ] && grep -qxF "N: Name=\"$1\"" "$INPUTS"; }
-HPJ=; MICJ=; COMBO=
-for n in "$CNAME Headphone Mic" "$CNAME Headset Jack" "$CNAME Headset"; do has "$n" && { COMBO=$n; break; }; done
-if [ -n "$COMBO" ]; then HPJ=$COMBO; MICJ=$COMBO; else
-  # "Front Headphone"/"Front Mic": the HDA parser names a jack after its pin location (Acer Aspire A515-46, ALC255: "HD-Audio Generic Front Headphone").
-  for n in "$CNAME Headphone" "$CNAME Headphones" "$CNAME Front Headphone"; do has "$n" && { HPJ=$n; break; }; done
-  for n in "$CNAME Headset Mic" "$CNAME Mic" "$CNAME Front Mic"; do has "$n" && { MICJ=$n; break; }; done
-  # A jack with no mic input device (the headset mic pin is not wired) must still name a device that exists: the template's
-  # "<name> Headphone Mic" does not, and the HAL cannot open it. Use the headphone jack's device for the mic section too.
-  [ -z "$MICJ" ] && [ -n "$HPJ" ] && MICJ=$HPJ
-fi
-
 # --- rewrite audio_config.xml ------------------------------------------------------------------------------------------
 if [ -n "$APB" ]; then
-  awk -v cid="$CID" -v cn="$CNAME" -v apb="$APB" -v spk="$SPK" -v acp="$ACP" -v imic="$IMIC" -v imiccid="$IMIC_CID" -v hpj="$HPJ" -v micj="$MICJ" \
+  awk -v cid="$CID" -v cn="$CNAME" -v apb="$APB" -v spk="$SPK" -v acp="$ACP" -v imic="$IMIC" -v imiccid="$IMIC_CID" \
       -v h1="$H1" -v h2="$H2" -v h3="$H3" '
     function setpcm(dev) { setpcmc(cid, dev) }
     function setpcmc(c, dev) { sub(/hw:[^<,]*,[0-9]*/, "hw:" c "," dev) }
@@ -111,8 +98,6 @@ if [ -n "$APB" ]; then
       if (sec == "Mic" && acp != "") setpcm(acp)
     }
     sec != "" && /<JackDev>/ {
-      if (sec == "Headphone" && hpj != "") setjack(hpj)
-      if (sec == "Mic" && micj != "") setjack(micj)
       if (sec == "HDMI1") setjack(cn " HDMI/DP,pcm=" h1)
       if (sec == "HDMI2") setjack(cn " HDMI/DP,pcm=" h2)
       if (sec == "HDMI3") setjack(cn " HDMI/DP,pcm=" h3)
@@ -121,6 +106,8 @@ if [ -n "$APB" ]; then
     /^[ \t]*<\/(Speaker|Headphone|InternalMic|Mic|HDMI1|HDMI2|HDMI3)>/ { sec = ""; drop = 0 }
   ' "$O/audio_config.xml" > "$O/audio_config.xml.new" && mv "$O/audio_config.xml.new" "$O/audio_config.xml"
 fi
+# Headphone/Mic <JackDev>: the jack input devices this card has (jacks.sh, also used by hook.sh for card id PCH).
+JMSG=$(INPUTS=$INPUTS sh "${0%/*}/jacks.sh" "$O/audio_config.xml" "$CNAME")
 
 # --- mixer_paths.xml: output volumes, the second speaker pair and the jack mic -----------------------------------------------------------
 # With a codec fixup that declares a second speaker pin (ENVY 13-aq0xxx) the HDA parser names the pair "Speaker" and "Bass Speaker";
@@ -136,5 +123,5 @@ sedi "$O/mixer_paths.xml" \
 VMSG=
 if [ -n "$CARDNO" ] && [ -f "${0%/*}/volmax.sh" ]; then VMSG=$(sh "${0%/*}/volmax.sh" "$ASOUND/card$CARDNO" "$O/mixer_paths.xml") || true; fi
 
-echo "pcm map: card=${CARDNO:-?} playback-default=${APB:--} speaker-playback=${SPK:-${APB:--}} headphone-playback=${APB:--} analog-capture=${ACP:--} dmic=${DMIC:--} internal-mic=${IMIC:+$IMIC_CID,}${IMIC:--} hdmi=${HDMI:--}; jacks: headphone='${HPJ:--}' mic='${MICJ:--}'"
+echo "pcm map: card=${CARDNO:-?} playback-default=${APB:--} speaker-playback=${SPK:-${APB:--}} headphone-playback=${APB:--} analog-capture=${ACP:--} dmic=${DMIC:--} internal-mic=${IMIC:+$IMIC_CID,}${IMIC:--} hdmi=${HDMI:--}; $JMSG"
 [ -z "$VMSG" ] || echo "$VMSG"
